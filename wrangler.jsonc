@@ -30,12 +30,23 @@
 			"id": "fc2762ad5637489bb0b19c47698f027a"
 		}
 	],
+	"d1_databases": [
+		{
+			"binding": "CRM_DB",
+			"database_name": "property-crm-db",
+			"database_id": "d00a5157-bfca-4a16-997b-64bd013cc44b",
+			"migrations_dir": "migrations"
+		}
+	],
 	"r2_buckets": [
 		{
 			"binding": "CRM_DOCS",
 			"bucket_name": "crm-docs"
 		}
-	]
+	],
+	"browser": {
+		"binding": "BROWSER"
+	}
 	/**
 	 * Smart Placement
 	 * https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement

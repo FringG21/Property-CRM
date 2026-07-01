@@ -1,9 +1,15 @@
+import puppeteer from '@cloudflare/puppeteer';
+
 // ============================================================
 // Property CRM — Cloudflare Worker
 // ============================================================
 
+// Frontend and worker are served from the same origin (single-page app via
+// the ASSETS binding), so the only legitimate cross-origin caller is none —
+// this just stops arbitrary third-party sites from calling the API with a
+// leaked bearer token. Wrangler dev serves both from the same local origin too.
 const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Origin': 'https://property-crm.aa-investment-partners.workers.dev',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
@@ -16,14 +22,58 @@ function corsResponse(body, status = 200, extra = {}) {
 }
 
 // ============================================================
+// AUCTION CONTROL CENTRE — STATIC CONFIG
+// ============================================================
+
+const AUCTION_HOUSES_CONFIG = [
+  { id: 'ah_sy', name: 'Auction House South Yorkshire', shortName: 'AH S.Yorks', diaryUrl: 'https://www.auctionhouse.co.uk/southyorkshire/auction/future-auction-dates' },
+  { id: 'sdl', name: 'SDL Property Auctions', shortName: 'SDL', diaryUrl: 'https://www.sdlauctions.co.uk/property-auctions/upcoming-auctions/' },
+  { id: 'mj', name: 'Mark Jenkinson & Son', shortName: 'Mark Jenkinson', diaryUrl: 'https://www.markjenkinson.co.uk/auction-diary' },
+  { id: 'pugh', name: 'Pugh Auctions', shortName: 'Pugh', diaryUrl: 'https://www.pugh-auctions.com/auction-diary' },
+  { id: 'allsop', name: 'Allsop Residential', shortName: 'Allsop', diaryUrl: 'https://www.allsop.co.uk/auctions/property-for-auction-in-sheffield/' },
+];
+
+// ============================================================
 // AUTH HELPERS
 // ============================================================
 
-async function hashPassword(password) {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(password);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToBytes(hex) {
+  const arr = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < arr.length; i++) arr[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return arr;
+}
+
+const PBKDF2_ITERATIONS = 100000;
+
+// Salted PBKDF2, self-describing format: pbkdf2$<iterations>$<saltHex>$<hashHex>
+async function hashPassword(password, saltHex = null, iterations = PBKDF2_ITERATIONS) {
+  const saltBytes = saltHex ? hexToBytes(saltHex) : crypto.getRandomValues(new Uint8Array(16));
+  const resolvedSaltHex = saltHex || bytesToHex(saltBytes);
+  const keyMaterial = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const derivedBits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: saltBytes, iterations, hash: 'SHA-256' }, keyMaterial, 256);
+  return `pbkdf2$${iterations}$${resolvedSaltHex}$${bytesToHex(new Uint8Array(derivedBits))}`;
+}
+
+// Legacy unsalted SHA-256 — kept only to verify hashes created before the PBKDF2 migration
+async function legacySha256(password) {
+  const hashBuffer = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(password));
+  return bytesToHex(new Uint8Array(hashBuffer));
+}
+
+// Verifies against either format; callers that need to know whether to upgrade
+// a legacy hash can compare storedHash.startsWith('pbkdf2$') themselves.
+async function verifyPassword(password, storedHash) {
+  if (!storedHash) return false;
+  if (storedHash.startsWith('pbkdf2$')) {
+    const [, iterStr, saltHex] = storedHash.split('$');
+    const candidate = await hashPassword(password, saltHex, parseInt(iterStr, 10));
+    return candidate === storedHash;
+  }
+  return (await legacySha256(password)) === storedHash;
 }
 
 function generateToken() {
@@ -127,6 +177,17 @@ async function sendCountdownAlerts(env) {
       const auction = new Date(p.auctionDate); auction.setHours(0, 0, 0, 0);
       const diff = Math.round((auction - today) / (1000 * 60 * 60 * 24));
       if (!days.includes(diff)) continue;
+
+      try {
+        await d1InsertAlert(env, {
+          id: `countdown-${p.id}-${diff}d`,
+          type: 'auction_countdown',
+          title: `Auction in ${diff} day${diff === 1 ? '' : 's'}: ${p.address}`,
+          body: `Guide £${(p.guidePrice || 0).toLocaleString()}${p.maxBid ? ` · Max bid £${p.maxBid.toLocaleString()}` : ''}`,
+          targetType: 'property',
+          targetId: p.id,
+        });
+      } catch {}
 
       await sendEmail(env, {
         to: u.email,
@@ -296,7 +357,7 @@ function extractPropertyDetails(html, pageUrl) {
 // CRM DATA HELPERS
 // ============================================================
 
-const CRM_KEYS = ['properties', 'companies', 'contacts', 'surveyors', 'watchlist', 'scrapedAuctions', 'globalNotes', 'tasks'];
+const CRM_KEYS = ['properties', 'companies', 'contacts', 'surveyors', 'watchlist', 'scrapedAuctions', 'globalNotes', 'tasks', 'refurbQuotes', 'specItems', 'specTemplates', 'specAllowances', 'taskTemplates', 'catalogTrades', 'catalogProducts', 'roomTemplates'];
 
 function mergeUserData(datasets) {
   const merged = {};
@@ -322,13 +383,234 @@ function mergeUserData(datasets) {
 }
 
 // ============================================================
+// D1 STORAGE LAYER
+// ============================================================
+// Each CRM entity gets its own table. Rows are keyed (user_id, id) so every
+// user's copy of a record is stored separately — reads merge newest-first per
+// id, which reproduces the legacy KV mergeUserData() semantics exactly.
+// The full record always lives in the `data` JSON column; the extra columns
+// are extracted at write time purely for relational queries.
+
+const D1_ENTITY_TABLES = {
+  properties: {
+    table: 'properties',
+    cols: r => ({
+      status: r.status ?? null,
+      postcode: r.postcode ?? null,
+      auction_date: r.auctionDate ?? null,
+      source_lot_id: r.sourceLotId != null ? String(r.sourceLotId) : null,
+    }),
+  },
+  companies: { table: 'companies', cols: r => ({ name: r.name ?? null, type: r.type ?? null }) },
+  contacts: {
+    table: 'contacts',
+    cols: r => ({ name: r.name ?? null, role: r.role ?? null, company_id: r.companyId != null ? String(r.companyId) : null }),
+  },
+  surveyors: { table: 'surveyors', cols: r => ({ name: r.name ?? null }) },
+  watchlist: { table: 'watchlist_items', cols: r => ({ status: r.status ?? null }) },
+  scrapedAuctions: { table: 'scraped_auctions', cols: () => ({}) },
+  globalNotes: {
+    table: 'global_notes',
+    cols: r => ({ target_type: r.targetType ?? null, target_id: r.targetId != null ? String(r.targetId) : null }),
+  },
+  tasks: {
+    table: 'tasks',
+    cols: r => ({
+      status: r.status ?? null,
+      due_date: r.dueDate ?? null,
+      linked_type: r.linkedType ?? null,
+      linked_id: r.linkedId != null ? String(r.linkedId) : null,
+    }),
+  },
+  refurbQuotes: {
+    table: 'refurb_quotes',
+    cols: r => ({
+      property_id: r.propertyId != null ? String(r.propertyId) : null,
+      company_id: r.companyId != null ? String(r.companyId) : null,
+      trade_category: r.tradeCategory ?? null,
+    }),
+  },
+  specItems: { table: 'spec_items', cols: r => ({ property_id: r.propertyId != null ? String(r.propertyId) : null }) },
+  specTemplates: { table: 'spec_templates', cols: () => ({}) },
+  specAllowances: {
+    table: 'spec_allowances',
+    cols: r => ({ property_id: r.propertyId != null ? String(r.propertyId) : null, category: r.category ?? null }),
+  },
+  taskTemplates: { table: 'task_templates', cols: () => ({}) },
+  catalogTrades: { table: 'catalog_trades', cols: r => ({ trade: r.trade ?? null, job_type: r.jobType ?? null }) },
+  catalogProducts: { table: 'catalog_products', cols: r => ({ category: r.category ?? null, supplier: r.supplier ?? null }) },
+  roomTemplates: { table: 'catalog_room_templates', cols: () => ({}) },
+};
+
+// Replace a user's rows for every entity key present in the blob. Keys absent
+// from the blob are left untouched (some save paths post partial payloads).
+async function syncUserBlobToD1(env, userId, blob, savedAt) {
+  const stmts = [];
+  for (const [key, def] of Object.entries(D1_ENTITY_TABLES)) {
+    if (!Array.isArray(blob[key])) continue;
+    stmts.push(env.CRM_DB.prepare(`DELETE FROM ${def.table} WHERE user_id = ?`).bind(userId));
+    for (const r of blob[key]) {
+      if (r == null || r.id == null) continue;
+      const extra = def.cols(r);
+      const extraNames = Object.keys(extra);
+      stmts.push(env.CRM_DB.prepare(
+        `INSERT OR REPLACE INTO ${def.table} (id, user_id, updated_at, deleted, data${extraNames.map(c => ', ' + c).join('')}) ` +
+        `VALUES (?, ?, ?, ?, ?${', ?'.repeat(extraNames.length)})`
+      ).bind(String(r.id), userId, savedAt, r.deleted ? 1 : 0, JSON.stringify(r), ...extraNames.map(c => extra[c])));
+    }
+  }
+  if (stmts.length) await env.CRM_DB.batch(stmts);
+}
+
+// Rebuild the merged dataset the frontend expects, from D1.
+// Mirrors mergeUserData(): newest updated_at wins per id, deleted rows are
+// skipped without claiming the id (so an older live copy can still surface).
+async function readCrmFromD1(env) {
+  const keys = Object.keys(D1_ENTITY_TABLES);
+  const results = await env.CRM_DB.batch(keys.map(k =>
+    env.CRM_DB.prepare(`SELECT id, deleted, data FROM ${D1_ENTITY_TABLES[k].table} ORDER BY updated_at DESC`)
+  ));
+  const merged = {};
+  keys.forEach((key, i) => {
+    const seen = new Set();
+    merged[key] = [];
+    for (const row of (results[i]?.results || [])) {
+      if (row.deleted || seen.has(row.id)) continue;
+      seen.add(row.id);
+      try { merged[key].push(JSON.parse(row.data)); } catch {}
+    }
+  });
+  return merged;
+}
+
+// One-time backfill of every user's KV blob into D1, guarded by a KV flag.
+async function ensureCrmMigratedToD1(env) {
+  if (await env.SCRAPER_KV.get('d1:crm:migrated')) return;
+  const userIds = (await env.SCRAPER_KV.get('crm:user-ids', 'json')) || [];
+  for (const id of userIds) {
+    const blob = await env.SCRAPER_KV.get(`crm:user:${id}`, 'json');
+    if (blob) await syncUserBlobToD1(env, id, blob, blob.savedAt || new Date().toISOString());
+  }
+  await env.SCRAPER_KV.put('d1:crm:migrated', new Date().toISOString());
+}
+
+// One-time backfill of the auction control-centre datasets into D1.
+async function ensureAuctionMigratedToD1(env) {
+  if (await env.SCRAPER_KV.get('d1:auction:migrated')) return;
+  const dates = (await env.SCRAPER_KV.get('auction:dates', 'json')) || [];
+  const lots = (await env.SCRAPER_KV.get('auction:lots', 'json')) || [];
+  const stmts = [];
+  for (const d of dates) {
+    if (d?.id == null) continue;
+    stmts.push(env.CRM_DB.prepare(
+      'INSERT OR REPLACE INTO auction_dates (id, auction_date, created_at, updated_at, data) VALUES (?, ?, ?, ?, ?)'
+    ).bind(String(d.id), d.auctionDate || d.date || null, d.firstSeenAt || null, d.lastScannedAt || d.firstSeenAt || null, JSON.stringify(d)));
+  }
+  for (const l of lots) {
+    if (l?.id == null) continue;
+    stmts.push(env.CRM_DB.prepare(
+      'INSERT OR REPLACE INTO auction_lots (id, date_id, status, is_withdrawn, created_at, updated_at, data) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).bind(String(l.id), l.dateId != null ? String(l.dateId) : null, l.status || 'unreviewed', l.isWithdrawn ? 1 : 0, l.firstSeenAt || null, l.lastUpdatedAt || l.firstSeenAt || null, JSON.stringify(l)));
+  }
+  if (stmts.length) await env.CRM_DB.batch(stmts);
+  await env.SCRAPER_KV.put('d1:auction:migrated', new Date().toISOString());
+}
+
+async function d1GetAuctionDates(env) {
+  const { results } = await env.CRM_DB.prepare('SELECT data FROM auction_dates ORDER BY created_at DESC').all();
+  return (results || []).map(r => { try { return JSON.parse(r.data); } catch { return null; } }).filter(Boolean);
+}
+
+async function d1GetAuctionLots(env, dateId = null) {
+  const stmt = dateId
+    ? env.CRM_DB.prepare('SELECT data FROM auction_lots WHERE date_id = ? ORDER BY created_at ASC').bind(String(dateId))
+    : env.CRM_DB.prepare('SELECT data FROM auction_lots ORDER BY created_at ASC');
+  const { results } = await stmt.all();
+  return (results || []).map(r => { try { return JSON.parse(r.data); } catch { return null; } }).filter(Boolean);
+}
+
+async function d1PutAuctionDate(env, date) {
+  await env.CRM_DB.prepare(
+    'INSERT OR REPLACE INTO auction_dates (id, auction_date, created_at, updated_at, data) VALUES (?, ?, ?, ?, ?)'
+  ).bind(String(date.id), date.auctionDate || date.date || null, date.firstSeenAt || null, date.lastScannedAt || date.firstSeenAt || null, JSON.stringify(date)).run();
+}
+
+// Insert an alert; deterministic ids + OR IGNORE make generators idempotent.
+async function d1InsertAlert(env, { id, type, title, body = '', targetType = null, targetId = null, userId = null }) {
+  await env.CRM_DB.prepare(
+    'INSERT OR IGNORE INTO alerts (id, user_id, type, title, body, target_type, target_id, read, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)'
+  ).bind(id || `alert-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, userId, type, title, body, targetType, targetId != null ? String(targetId) : null, new Date().toISOString()).run();
+}
+
+// Weekly-deduped nudges for overdue tasks and stale quotes — runs from cron.
+async function generateAutoChaseAlerts(env) {
+  const today = new Date().toISOString().split('T')[0];
+  const week = (() => { const d = new Date(); const start = new Date(d.getFullYear(), 0, 1); return `${d.getFullYear()}w${Math.ceil(((d - start) / 86400000 + 1) / 7)}`; })();
+
+  const { results: taskRows } = await env.CRM_DB.prepare(
+    "SELECT id, data FROM tasks WHERE deleted = 0 AND due_date IS NOT NULL AND due_date < ?"
+  ).bind(today).all();
+  const seenTasks = new Set();
+  for (const row of taskRows || []) {
+    if (seenTasks.has(row.id)) continue;
+    seenTasks.add(row.id);
+    try {
+      const t = JSON.parse(row.data);
+      if (t.status === 'done' || t.status === 'complete') continue;
+      await d1InsertAlert(env, {
+        id: `chase-task-${row.id}-${week}`,
+        type: 'task_overdue',
+        title: `Overdue task: ${t.title || 'Untitled'}`,
+        body: `Due ${t.dueDate}${t.linkedName ? ` · ${t.linkedName}` : ''}${t.waitingOn ? ` · waiting on ${t.waitingOn}` : ''}`,
+        targetType: 'task',
+        targetId: row.id,
+      });
+    } catch {}
+  }
+
+  const staleBefore = new Date(Date.now() - 14 * 86400000).toISOString().split('T')[0];
+  const { results: quoteRows } = await env.CRM_DB.prepare(
+    "SELECT id, data FROM refurb_quotes WHERE deleted = 0"
+  ).all();
+  const seenQuotes = new Set();
+  for (const row of quoteRows || []) {
+    if (seenQuotes.has(row.id)) continue;
+    seenQuotes.add(row.id);
+    try {
+      const q = JSON.parse(row.data);
+      if (!['needed', 'received', 'reviewing'].includes(q.status)) continue;
+      if ((q.quoteDate || q.createdAt || today) > staleBefore) continue;
+      await d1InsertAlert(env, {
+        id: `chase-quote-${row.id}-${week}`,
+        type: 'quote_stale',
+        title: `Stale quote: ${q.tradeCategory || 'Trade'} (${q.status})`,
+        body: `No movement since ${q.quoteDate || q.createdAt} — chase or close it`,
+        targetType: 'quote',
+        targetId: row.id,
+      });
+    } catch {}
+  }
+}
+
+async function d1PutAuctionLot(env, lot) {
+  await env.CRM_DB.prepare(
+    'INSERT OR REPLACE INTO auction_lots (id, date_id, status, is_withdrawn, created_at, updated_at, data) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  ).bind(String(lot.id), lot.dateId != null ? String(lot.dateId) : null, lot.status || 'unreviewed', lot.isWithdrawn ? 1 : 0, lot.firstSeenAt || null, lot.lastUpdatedAt || lot.firstSeenAt || null, JSON.stringify(lot)).run();
+}
+
+// ============================================================
 // SCRAPER HELPERS
 // ============================================================
 
-async function scrapeAuctionHouse(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PropertyCRM/1.0)' } });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const html = await res.text();
+async function scrapeAuctionHouse(url, browser) {
+  const page = await browser.newPage();
+  let html;
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 8000 });
+    html = await page.content();
+  } finally {
+    await page.close();
+  }
   const dates = [];
   const dateRegex = /(\d{2})\/(\d{2})\/(\d{4})/g;
   let match;
@@ -338,10 +620,15 @@ async function scrapeAuctionHouse(url) {
   return [...new Set(dates)];
 }
 
-async function scrapeMcHugh(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PropertyCRM/1.0)' } });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const html = await res.text();
+async function scrapeMcHugh(url, browser) {
+  const page = await browser.newPage();
+  let html;
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 8000 });
+    html = await page.content();
+  } finally {
+    await page.close();
+  }
   const months = { January:'01',February:'02',March:'03',April:'04',May:'05',June:'06',July:'07',August:'08',September:'09',October:'10',November:'11',December:'12' };
   const dates = [];
   const dateRegex = /(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})/g;
@@ -352,10 +639,15 @@ async function scrapeMcHugh(url) {
   return [...new Set(dates)];
 }
 
-async function scrapePugh(url) {
-  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PropertyCRM/1.0)' } });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const html = await res.text();
+async function scrapePugh(url, browser) {
+  const page = await browser.newPage();
+  let html;
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 8000 });
+    html = await page.content();
+  } finally {
+    await page.close();
+  }
   const months = { January:'01',February:'02',March:'03',April:'04',May:'05',June:'06',July:'07',August:'08',September:'09',October:'10',November:'11',December:'12' };
   const dates = [];
   const dateRegex = /(\d{1,2})(?:st|nd|rd|th)(?:-\d{1,2}(?:st|nd|rd|th))?\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/g;
@@ -389,30 +681,47 @@ async function runScrape(env) {
   const existingIds = new Set(existing.map(e => e.id));
   const newEntries = [];
 
-  for (const site of sites) {
-    try {
-      const dates = await site.scraper(site.url);
-      for (const date of dates) {
-        const id = `${site.platform}-${date}`;
-        if (!existingIds.has(id)) {
-          newEntries.push({
-            id,
-            platform: site.platform,
-            auctionDate: date,
-            diaryUrl: site.url,
-            totalLotsFound: 0,
-            reviewed: false,
-            scrapedAt: new Date().toISOString(),
-          });
+  const browser = await puppeteer.launch(env.BROWSER);
+  try {
+    for (const site of sites) {
+      try {
+        const dates = await site.scraper(site.url, browser);
+        for (const date of dates) {
+          const id = `${site.platform}-${date}`;
+          if (!existingIds.has(id)) {
+            newEntries.push({
+              id,
+              platform: site.platform,
+              auctionDate: date,
+              diaryUrl: site.url,
+              totalLotsFound: 0,
+              reviewed: false,
+              scrapedAt: new Date().toISOString(),
+            });
+          }
         }
+      } catch (err) {
+        console.error(`Scrape failed for ${site.platform}:`, err);
       }
-    } catch (err) {
-      console.error(`Scrape failed for ${site.platform}:`, err);
     }
+  } finally {
+    await browser.close();
   }
 
   const updated = [...existing, ...newEntries];
   await env.SCRAPER_KV.put('results', JSON.stringify(updated));
+  for (const entry of newEntries) {
+    try {
+      await d1InsertAlert(env, {
+        id: `newdate-${entry.id}`,
+        type: 'listing_change',
+        title: `New auction date: ${entry.platform}`,
+        body: `${entry.auctionDate} — scan found a new upcoming auction`,
+        targetType: 'auction_date',
+        targetId: entry.id,
+      });
+    } catch {}
+  }
   return { added: newEntries.length, total: updated.length };
 }
 
@@ -816,7 +1125,11 @@ function enrichCompsWithEPC(lrItems, epcItems) {
 export default {
   // Cron handler — runs Wednesday 22:00 and Saturday 22:00 UTC
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(Promise.all([runScrape(env), sendCountdownAlerts(env)]));
+    ctx.waitUntil(Promise.all([
+      runScrape(env),
+      sendCountdownAlerts(env),
+      generateAutoChaseAlerts(env).catch(err => console.error('Auto-chase alerts failed:', err)),
+    ]));
   },
 
   async fetch(request, env) {
@@ -825,6 +1138,127 @@ export default {
     // Handle CORS preflight
     if (request.method === 'OPTIONS') {
       return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
+
+    // Routes are handled in handleApiRoutes(); wrapping the call here means a
+    // malformed request.json() or any other unexpected throw anywhere below
+    // returns a clean JSON error instead of a bare unhandled Worker exception.
+    try {
+      return await handleApiRoutes(request, env, url);
+    } catch (err) {
+      console.error('Unhandled worker error:', err);
+      if (url.pathname.startsWith('/api/')) {
+        return corsResponse({ success: false, message: 'Invalid request' }, 400);
+      }
+      throw err;
+    }
+  },
+};
+
+async function handleApiRoutes(request, env, url) {
+    // --------------------------------------------------------
+    // AUCTION CONTROL CENTRE API ROUTES
+    // --------------------------------------------------------
+
+    if (url.pathname === '/api/auction/houses' && request.method === 'GET') {
+      return corsResponse({ houses: AUCTION_HOUSES_CONFIG });
+    }
+
+    if (url.pathname === '/api/auction/dates' && request.method === 'GET') {
+      await ensureAuctionMigratedToD1(env);
+      const dates = await d1GetAuctionDates(env);
+      return corsResponse({ dates });
+    }
+
+    if (url.pathname === '/api/auction/dates' && request.method === 'POST') {
+      const body = await request.json();
+      await ensureAuctionMigratedToD1(env);
+      const exists = await env.CRM_DB.prepare('SELECT 1 FROM auction_dates WHERE id = ?').bind(String(body.id)).first();
+      if (exists) return corsResponse({ success: false, message: 'Date already exists' }, 409);
+      const newDate = { reviewedCount: 0, shortlistedCount: 0, rejectedCount: 0, watchingCount: 0, totalLots: 0, isNew: true, firstSeenAt: new Date().toISOString(), lastScannedAt: new Date().toISOString(), ...body };
+      await d1PutAuctionDate(env, newDate);
+      return corsResponse({ success: true, date: newDate });
+    }
+
+    if (/^\/api\/auction\/dates\/[^/]+$/.test(url.pathname) && request.method === 'PATCH') {
+      const id = url.pathname.split('/').pop();
+      const updates = await request.json();
+      await ensureAuctionMigratedToD1(env);
+      const row = await env.CRM_DB.prepare('SELECT data FROM auction_dates WHERE id = ?').bind(String(id)).first();
+      if (!row) return corsResponse({ success: false }, 404);
+      const updated = { ...JSON.parse(row.data), ...updates };
+      await d1PutAuctionDate(env, updated);
+      return corsResponse({ success: true });
+    }
+
+    if (url.pathname === '/api/auction/lots' && request.method === 'GET') {
+      await ensureAuctionMigratedToD1(env);
+      const dateId = url.searchParams.get('dateId');
+      const lots = await d1GetAuctionLots(env, dateId);
+      return corsResponse({ lots });
+    }
+
+    if (url.pathname === '/api/auction/lots' && request.method === 'POST') {
+      const body = await request.json();
+      await ensureAuctionMigratedToD1(env);
+      const incoming = Array.isArray(body) ? body : [body];
+      const now = new Date().toISOString();
+      let created = 0;
+      for (const l of incoming) {
+        if (l?.id == null) continue;
+        const exists = await env.CRM_DB.prepare('SELECT 1 FROM auction_lots WHERE id = ?').bind(String(l.id)).first();
+        if (exists) continue;
+        const newLot = { status: 'unreviewed', isNew: true, guidePriceChanged: false, isWithdrawn: false, firstSeenAt: now, lastUpdatedAt: now, ...l };
+        await d1PutAuctionLot(env, newLot);
+        created++;
+      }
+      return corsResponse({ success: true, created });
+    }
+
+    if (/^\/api\/auction\/lots\/[^/]+$/.test(url.pathname) && request.method === 'PATCH') {
+      const id = decodeURIComponent(url.pathname.split('/').pop());
+      const updates = await request.json();
+      await ensureAuctionMigratedToD1(env);
+      const row = await env.CRM_DB.prepare('SELECT data FROM auction_lots WHERE id = ?').bind(String(id)).first();
+      if (!row) return corsResponse({ success: false }, 404);
+      const existingLot = JSON.parse(row.data);
+      const updatedLot = { ...existingLot, ...updates, lastUpdatedAt: new Date().toISOString() };
+      await d1PutAuctionLot(env, updatedLot);
+
+      // Guide-price change on a watched listing → alert feed
+      const priceChanged = updates.guidePrice != null && existingLot.guidePrice != null && Number(updates.guidePrice) !== Number(existingLot.guidePrice);
+      if (priceChanged || updates.guidePriceChanged === true || updates.isWithdrawn === true) {
+        try {
+          const what = updates.isWithdrawn === true ? 'withdrawn' : `guide ${Number(existingLot.guidePrice || 0).toLocaleString()} → ${Number(updatedLot.guidePrice || 0).toLocaleString()}`;
+          await d1InsertAlert(env, {
+            id: `lotchange-${id}-${new Date().toISOString().split('T')[0]}`,
+            type: 'listing_change',
+            title: `Listing changed: ${updatedLot.address || id}`,
+            body: `${updatedLot.houseName || 'Auction'} — ${what}`,
+            targetType: 'lot',
+            targetId: id,
+          });
+        } catch {}
+      }
+
+      // Recompute parent date counts from the lots table
+      const dateId = updatedLot.dateId;
+      if (dateId) {
+        const dateLots = (await d1GetAuctionLots(env, dateId)).filter(l => !l.isWithdrawn);
+        const dateRow = await env.CRM_DB.prepare('SELECT data FROM auction_dates WHERE id = ?').bind(String(dateId)).first();
+        if (dateRow) {
+          const date = JSON.parse(dateRow.data);
+          await d1PutAuctionDate(env, {
+            ...date,
+            totalLots: dateLots.length,
+            reviewedCount: dateLots.filter(l => l.status !== 'unreviewed').length,
+            shortlistedCount: dateLots.filter(l => l.status === 'shortlisted').length,
+            rejectedCount: dateLots.filter(l => l.status === 'rejected').length,
+            watchingCount: dateLots.filter(l => l.status === 'watching').length,
+          });
+        }
+      }
+      return corsResponse({ success: true });
     }
 
     // --------------------------------------------------------
@@ -852,6 +1286,39 @@ export default {
     // AUTH API ROUTES
     // --------------------------------------------------------
 
+    // POST /api/auth/setup — one-time first-admin bootstrap, only works while no users exist
+    if (url.pathname === '/api/auth/setup' && request.method === 'POST') {
+      const users = (await env.SCRAPER_KV.get('users', 'json')) || [];
+      if (users.length > 0) return corsResponse({ success: false, message: 'Setup has already been completed' }, 403);
+
+      const { name, email, password } = await request.json();
+      if (!name || !email || !password) return corsResponse({ success: false, message: 'Name, email and password are required' }, 400);
+      if (password.length < 8) return corsResponse({ success: false, message: 'Password must be at least 8 characters' }, 400);
+
+      const adminUser = {
+        id: '1',
+        name,
+        email,
+        role: 'Admin',
+        allowedTabs: ['dashboard','pipeline','scraper','surveyors','auctionintel','companies','contacts','tasks','refurb','spec','dealanalysis','portfolio','settings'],
+        passwordHash: await hashPassword(password),
+        verified: true,
+        verifyToken: null,
+        verifyExpiry: null,
+        resetToken: null,
+        resetExpiry: null,
+        lastLogin: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+      };
+      await env.SCRAPER_KV.put('users', JSON.stringify([adminUser]));
+
+      const token = generateToken();
+      const sessionData = { userId: adminUser.id, email: adminUser.email, role: adminUser.role, allowedTabs: adminUser.allowedTabs };
+      await env.SCRAPER_KV.put(`session:${token}`, JSON.stringify(sessionData), { expirationTtl: 604800 });
+
+      return corsResponse({ success: true, token, user: { name: adminUser.name, email: adminUser.email, role: adminUser.role, allowedTabs: adminUser.allowedTabs } });
+    }
+
     // POST /api/auth/login
     if (url.pathname === '/api/auth/login' && request.method === 'POST') {
       // 10 attempts per minute per IP — brute-force protection
@@ -863,25 +1330,8 @@ export default {
 
       let users = (await env.SCRAPER_KV.get('users', 'json')) || [];
 
-      // Seed admin user if no users exist
       if (users.length === 0) {
-        const adminUser = {
-          id: '1',
-          name: 'Ashley Austin-Buah',
-          email: 'ashleyeab@gmail.com',
-          role: 'Admin',
-          allowedTabs: ['dashboard','pipeline','scraper','surveyors','auctionintel','companies','contacts','settings'],
-          passwordHash: await hashPassword('admin123'),
-          verified: true,
-          verifyToken: null,
-          verifyExpiry: null,
-          resetToken: null,
-          resetExpiry: null,
-          lastLogin: null,
-          createdAt: new Date().toISOString(),
-        };
-        users = [adminUser];
-        await env.SCRAPER_KV.put('users', JSON.stringify(users));
+        return corsResponse({ success: false, needsSetup: true, message: 'No account exists yet — set up the first admin account.' }, 401);
       }
 
       const user = users.find(u => u.email === email);
@@ -893,8 +1343,8 @@ export default {
         return corsResponse({ success: false, message: 'Please verify your email first' }, 401);
       }
 
-      const submittedHash = await hashPassword(password);
-      if (submittedHash !== user.passwordHash) {
+      const passwordOk = await verifyPassword(password, user.passwordHash);
+      if (!passwordOk) {
         return corsResponse({ success: false, message: 'Invalid email or password' }, 401);
       }
 
@@ -903,8 +1353,10 @@ export default {
       const sessionData = { userId: user.id, email: user.email, role: user.role, allowedTabs: user.allowedTabs };
       await env.SCRAPER_KV.put(`session:${token}`, JSON.stringify(sessionData), { expirationTtl: 604800 });
 
-      // Update lastLogin
-      const updatedUsers = users.map(u => u.id === user.id ? { ...u, lastLogin: new Date().toISOString() } : u);
+      // Update lastLogin, and opportunistically upgrade any legacy unsalted hash to PBKDF2
+      const needsUpgrade = !user.passwordHash.startsWith('pbkdf2$');
+      const upgradedHash = needsUpgrade ? await hashPassword(password) : user.passwordHash;
+      const updatedUsers = users.map(u => u.id === user.id ? { ...u, lastLogin: new Date().toISOString(), passwordHash: upgradedHash } : u);
       await env.SCRAPER_KV.put('users', JSON.stringify(updatedUsers));
 
       return corsResponse({
@@ -1145,8 +1597,8 @@ export default {
 
       if (userIdx === -1) return corsResponse({ success: false, message: 'User not found' }, 404);
 
-      const currentHash = await hashPassword(currentPassword);
-      if (currentHash !== users[userIdx].passwordHash) {
+      const currentOk = await verifyPassword(currentPassword, users[userIdx].passwordHash);
+      if (!currentOk) {
         return corsResponse({ success: false, message: 'Current password is incorrect' }, 401);
       }
 
@@ -1154,6 +1606,25 @@ export default {
       await env.SCRAPER_KV.put('users', JSON.stringify(users));
 
       return corsResponse({ success: true });
+    }
+
+    // POST /api/auth/profile — self-service display-name update (email is the
+    // login identity and isn't editable here — that needs a re-verification flow)
+    if (url.pathname === '/api/auth/profile' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+
+      const { name } = await request.json();
+      if (!name || !name.trim()) return corsResponse({ success: false, message: 'Name is required' }, 400);
+
+      const users = (await env.SCRAPER_KV.get('users', 'json')) || [];
+      const userIdx = users.findIndex(u => u.id === session.userId);
+      if (userIdx === -1) return corsResponse({ success: false, message: 'User not found' }, 404);
+
+      users[userIdx] = { ...users[userIdx], name: name.trim() };
+      await env.SCRAPER_KV.put('users', JSON.stringify(users));
+
+      return corsResponse({ success: true, user: { id: users[userIdx].id, name: users[userIdx].name, email: users[userIdx].email, role: users[userIdx].role, allowedTabs: users[userIdx].allowedTabs } });
     }
 
     // GET /api/auth/google
@@ -1681,6 +2152,67 @@ export default {
     // --------------------------------------------------------
     // PROPERTY URL SCRAPE
     // --------------------------------------------------------
+    // POST /api/product-url-fetch — server-side proxy to fetch product data from supplier URLs
+    if (url.pathname === '/api/product-url-fetch' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const { url: productUrl } = await request.json();
+      if (!productUrl) return corsResponse({ success: false, error: 'No URL provided' }, 400);
+      try {
+        const res = await fetch(productUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-GB,en;q=0.5',
+          },
+          redirect: 'follow',
+        });
+        const html = await res.text();
+        const getTag = (prop) => {
+          const m = html.match(new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']+)["']`, 'i'))
+                 || html.match(new RegExp(`<meta[^>]+content=["']([^"']+)["'][^>]+(?:property|name)=["']${prop}["']`, 'i'));
+          return m ? m[1].trim() : '';
+        };
+        const ogTitle = getTag('og:title') || getTag('twitter:title');
+        const ogImage = getTag('og:image') || getTag('twitter:image');
+        const ogDesc  = getTag('og:description') || getTag('description');
+        // JSON-LD Product schema
+        let ldName='', ldPrice='', ldSku='', ldBrand='', ldAvail='';
+        const ldMatches = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
+        for (const m of ldMatches) {
+          try {
+            const obj = JSON.parse(m[1]);
+            const prod = obj['@type']==='Product' ? obj : (Array.isArray(obj['@graph']) ? obj['@graph'].find(x=>x['@type']==='Product') : null);
+            if (prod) {
+              ldName  = prod.name || '';
+              ldSku   = prod.sku || prod.mpn || '';
+              ldBrand = prod.brand?.name || prod.brand || '';
+              const offer = Array.isArray(prod.offers) ? prod.offers[0] : prod.offers;
+              if (offer) { ldPrice = offer.price || ''; ldAvail = offer.availability || ''; }
+              break;
+            }
+          } catch(_){}
+        }
+        // Price fallback: regex scan for £ pattern
+        let priceStr = ldPrice ? String(ldPrice) : '';
+        if (!priceStr) {
+          const pm = html.match(/["']price["']\s*:\s*["']?([\d.]+)["']?/) || html.match(/£\s*([\d,]+(?:\.\d{1,2})?)/);
+          if (pm) priceStr = pm[1].replace(/,/g,'');
+        }
+        // Title fallback
+        const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+        const title = ldName || ogTitle || (titleMatch ? titleMatch[1].split('|')[0].split('-')[0].trim() : '');
+        // Supplier from hostname
+        const hostname = new URL(productUrl).hostname.replace('www.','');
+        const supplierMap = { 'screwfix.com':'Screwfix','toolstation.com':'Toolstation','diy.com':'B&Q','wickes.co.uk':'Wickes','toppstiles.co.uk':'Topps Tiles','carpetright.co.uk':'Carpetright','howdens.com':'Howdens','ikea.com':'IKEA','amazon.co.uk':'Amazon','plumbworld.co.uk':'Plumbworld','victoriaplum.com':'Victoria Plum','bathroomstoredirect.co.uk':'Bathroom Store' };
+        const supplier = Object.entries(supplierMap).find(([k])=>hostname.includes(k))?.[1] || hostname;
+        const availability = ldAvail.includes('InStock') ? 'In stock' : ldAvail.includes('OutOf') ? 'Out of stock' : ldAvail.includes('PreOrder') ? 'Pre-order' : '';
+        return corsResponse({ success:true, name:title, price:priceStr, imageUrl:ogImage, sku:ldSku, brand:ldBrand, description:ogDesc, supplier, availability });
+      } catch(e) {
+        return corsResponse({ success:false, error:'Could not fetch product data: '+e.message });
+      }
+    }
+
     if (url.pathname === '/api/scrape-property' && request.method === 'POST') {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
@@ -1710,7 +2242,11 @@ export default {
       const propertyId = formData.get('propertyId') || 'unknown';
       const fileKey = formData.get('fileKey') || 'file';
       if (!file) return corsResponse({ success: false, message: 'No file provided' }, 400);
-      const key = `${session.userId}/${propertyId}/${fileKey}/${file.name}`;
+      // Random segment keeps the key from being guessable purely from the low-entropy
+      // timestamp-based userId/propertyId — the frontend always echoes back the key
+      // the upload response returns rather than reconstructing it, so this is safe to add.
+      const keyToken = bytesToHex(crypto.getRandomValues(new Uint8Array(8)));
+      const key = `${session.userId}/${propertyId}/${fileKey}/${keyToken}/${file.name}`;
       await env.CRM_DOCS.put(key, file.stream(), {
         httpMetadata: { contentType: file.type || 'application/octet-stream' },
       });
@@ -1721,6 +2257,8 @@ export default {
     if (url.pathname.startsWith('/api/documents/') && request.method === 'GET') {
       const session = await getSession(env, request);
       if (!session) return new Response('Unauthorized', { status: 401 });
+      const docRateOk = await checkRateLimit(env, `docs:${session.userId}`, 120);
+      if (!docRateOk) return new Response('Too many requests', { status: 429 });
       const key = url.pathname.slice('/api/documents/'.length);
       const object = await env.CRM_DOCS.get(key);
       if (!object) return new Response('Not found', { status: 404 });
@@ -1754,34 +2292,43 @@ export default {
       };
 
       const auctionHouses = [
-        { name: 'Auction House Yorkshire', url: 'https://www.auctionhouse.co.uk/yorkshire', diaryUrl: 'https://www.auctionhouse.co.uk/yorkshire/auction-diary' },
-        { name: 'SDL Property Auctions', url: 'https://sdlauctions.co.uk/properties/for-sale/', diaryUrl: 'https://sdlauctions.co.uk/properties/for-sale/' },
-        { name: 'Mark Jenkinson & Son', url: 'https://www.markjenkinson.co.uk/auction-properties', diaryUrl: 'https://www.markjenkinson.co.uk/auction-properties' },
-        { name: 'Pugh Auctions', url: 'https://pugh-auctions.com/catalogue/', diaryUrl: 'https://pugh-auctions.com/catalogue/' },
-        { name: 'Allsop Residential', url: 'https://www.allsop.co.uk/residential-auction/search/?location=Sheffield', diaryUrl: 'https://www.allsop.co.uk/residential-auction/' },
+        { name: 'Auction House Yorkshire', url: 'https://www.auctionhouse.co.uk/southyorkshire/auction/future-auction-dates', diaryUrl: 'https://www.auctionhouse.co.uk/southyorkshire/auction/future-auction-dates' },
+        { name: 'SDL Property Auctions', url: 'https://www.sdlauctions.co.uk/property-auctions/upcoming-auctions/', diaryUrl: 'https://www.sdlauctions.co.uk/property-auctions/upcoming-auctions/' },
+        { name: 'Mark Jenkinson & Son', url: 'https://www.markjenkinson.co.uk/auction-diary', diaryUrl: 'https://www.markjenkinson.co.uk/auction-diary' },
+        { name: 'Pugh Auctions', url: 'https://www.pugh-auctions.com/auction-diary', diaryUrl: 'https://www.pugh-auctions.com/auction-diary' },
+        { name: 'Allsop Residential', url: 'https://www.allsop.co.uk/auctions/property-for-auction-in-sheffield/', diaryUrl: 'https://www.allsop.co.uk/auctions/property-for-auction-in-sheffield/' },
       ];
 
-      const results = await Promise.allSettled(
-        auctionHouses.map(async (house) => {
+      let browser;
+      try {
+        browser = await puppeteer.launch(env.BROWSER);
+      } catch (launchErr) {
+        return corsResponse({ success: false, message: `Browser launch failed: ${launchErr.message}`, results: auctionHouses.map(h => ({ name: h.name, diaryUrl: h.diaryUrl, error: `Browser unavailable: ${launchErr.message}`, syMentions: 0, hasJuly: false, accessible: false })) });
+      }
+      try {
+        const data = [];
+        for (const house of auctionHouses) {
+          const page = await browser.newPage();
           try {
-            const res = await fetch(house.url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(8000) });
-            if (!res.ok) return { ...house, error: `HTTP ${res.status}`, syMentions: 0, hasJuly: false };
-            const html = await res.text();
+            await page.goto(house.url, { waitUntil: 'domcontentloaded', timeout: 8000 });
+            const html = await page.content();
             const low = html.toLowerCase();
             const hasJuly = MONTH_KEYWORDS.some(kw => low.includes(kw));
             const syMentions = countSYMentions(html);
             const auctionDate = extractDate(html);
             // rough lot count: count occurrences of "lot" or "property" in listings context
             const lotMatches = (html.match(/lot\s+\d+|class="[^"]*lot[^"]*"/gi) || []).length;
-            return { name: house.name, diaryUrl: house.diaryUrl, syMentions, hasJuly, auctionDate, estimatedLots: lotMatches, accessible: true };
+            data.push({ name: house.name, diaryUrl: house.diaryUrl, syMentions, hasJuly, auctionDate, estimatedLots: lotMatches, accessible: true });
           } catch (err) {
-            return { name: house.name, diaryUrl: house.diaryUrl, error: err.message, syMentions: 0, hasJuly: false, accessible: false };
+            data.push({ name: house.name, diaryUrl: house.diaryUrl, error: err.message, syMentions: 0, hasJuly: false, accessible: false });
+          } finally {
+            await page.close();
           }
-        })
-      );
-
-      const data = results.map(r => r.status === 'fulfilled' ? r.value : { ...r.reason, error: 'Failed' });
-      return corsResponse({ success: true, results: data, scrapedAt: new Date().toISOString() });
+        }
+        return corsResponse({ success: true, results: data, scrapedAt: new Date().toISOString() });
+      } finally {
+        await browser.close();
+      }
     }
 
     // --------------------------------------------------------
@@ -1949,23 +2496,158 @@ export default {
     }
 
     // --------------------------------------------------------
+    // AI — deal review (summary, risk flags, deal score)
+    // --------------------------------------------------------
+    if (url.pathname === '/api/ai/deal-review' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      if (!env.ANTHROPIC_API_KEY) {
+        return corsResponse({ success: false, message: 'AI not configured — set the ANTHROPIC_API_KEY secret: npx wrangler secret put ANTHROPIC_API_KEY' }, 400);
+      }
+      const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
+      if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
+
+      const { property } = await request.json();
+      if (!property || !property.address) return corsResponse({ success: false, message: 'Missing property' }, 400);
+
+      // Compact, bounded context — never ship whole blobs to the model
+      const clip = (obj) => JSON.stringify(obj ?? null).slice(0, 6000);
+      const context = [
+        `Address: ${property.address}${property.dealName ? ` (${property.dealName})` : ''}`,
+        `Status: ${property.status || 'Sourced'} · Guide price: £${Number(property.guidePrice || 0).toLocaleString()} · Auction: ${property.auctionDate || 'unknown'}`,
+        `Type: ${property.propertyType || 'unknown'} · Beds: ${property.bedrooms || 'unknown'}`,
+        `Report analytics: ${clip(property.analytics)}`,
+        `Area intelligence highlights: ${clip(property.intelligenceSummary)}`,
+        `Refurb position: ${clip(property.refurbSummary)}`,
+        `Comparables: ${clip(property.comparables)}`,
+      ].join('\n');
+
+      const schema = {
+        type: 'object',
+        additionalProperties: false,
+        required: ['summary', 'riskFlags', 'strengths', 'dealScore', 'verdict'],
+        properties: {
+          summary: { type: 'string', description: '3-5 sentence plain-English assessment of this deal for a UK property flip investor' },
+          riskFlags: { type: 'array', items: { type: 'string' }, description: 'Specific risks found in the data — thin margin, low comps, flood/planning/crime issues, missing information, over-guide pressure. Empty if genuinely none.' },
+          strengths: { type: 'array', items: { type: 'string' }, description: 'Specific strengths of the deal grounded in the data.' },
+          dealScore: { type: 'integer', description: 'Deal quality score from 0 (avoid at any price) to 100 (exceptional opportunity)' },
+          verdict: { type: 'string', enum: ['strong_buy', 'buy', 'conditional', 'avoid'] },
+        },
+      };
+
+      try {
+        const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'x-api-key': env.ANTHROPIC_API_KEY,
+            'anthropic-version': '2023-06-01',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'claude-opus-4-8',
+            max_tokens: 8000,
+            thinking: { type: 'adaptive' },
+            system: 'You are a UK property investment analyst reviewing auction flip deals for a small investment partnership in South Yorkshire. Be direct and specific: ground every claim in the numbers provided, flag what is missing, and never invent figures. Margins under 15% are tight for a flip; under 5% are usually not worth the risk.',
+            messages: [{ role: 'user', content: `Review this auction deal and score it.\n\n${context}` }],
+            output_config: { format: { type: 'json_schema', schema } },
+          }),
+        });
+        if (!aiRes.ok) {
+          const errText = await aiRes.text();
+          console.error('Anthropic API error:', aiRes.status, errText);
+          return corsResponse({ success: false, message: `AI request failed (HTTP ${aiRes.status})` }, 502);
+        }
+        const aiData = await aiRes.json();
+        if (aiData.stop_reason === 'refusal') {
+          return corsResponse({ success: false, message: 'AI declined to review this content' }, 502);
+        }
+        const textBlock = (aiData.content || []).find(b => b.type === 'text');
+        if (!textBlock) return corsResponse({ success: false, message: 'AI returned no content' }, 502);
+        const review = JSON.parse(textBlock.text);
+        return corsResponse({ success: true, review, reviewedAt: new Date().toISOString() });
+      } catch (err) {
+        console.error('AI deal review failed:', err);
+        return corsResponse({ success: false, message: 'Could not complete AI review' }, 502);
+      }
+    }
+
+    // --------------------------------------------------------
+    // ALERTS — persisted team-wide alert feed
+    // --------------------------------------------------------
+
+    // GET /api/alerts?unread=1 — latest alerts, newest first
+    if (url.pathname === '/api/alerts' && request.method === 'GET') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const unreadOnly = url.searchParams.get('unread') === '1';
+      const stmt = unreadOnly
+        ? env.CRM_DB.prepare('SELECT * FROM alerts WHERE read = 0 ORDER BY created_at DESC LIMIT 100')
+        : env.CRM_DB.prepare('SELECT * FROM alerts ORDER BY created_at DESC LIMIT 100');
+      const { results } = await stmt.all();
+      return corsResponse({ success: true, alerts: results || [] });
+    }
+
+    // POST /api/alerts — create an alert (used by frontend automations)
+    if (url.pathname === '/api/alerts' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const body = await request.json();
+      if (!body.type || !body.title) return corsResponse({ success: false, message: 'type and title are required' }, 400);
+      await d1InsertAlert(env, {
+        id: body.id,
+        type: String(body.type).slice(0, 40),
+        title: String(body.title).slice(0, 200),
+        body: String(body.body || '').slice(0, 500),
+        targetType: body.targetType || null,
+        targetId: body.targetId ?? null,
+        userId: session.userId,
+      });
+      return corsResponse({ success: true });
+    }
+
+    // POST /api/alerts/mark-read — { ids: [...] } or { all: true }
+    if (url.pathname === '/api/alerts/mark-read' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const body = await request.json();
+      if (body.all) {
+        await env.CRM_DB.prepare('UPDATE alerts SET read = 1 WHERE read = 0').run();
+      } else if (Array.isArray(body.ids) && body.ids.length) {
+        await env.CRM_DB.batch(body.ids.slice(0, 200).map(id =>
+          env.CRM_DB.prepare('UPDATE alerts SET read = 1 WHERE id = ?').bind(String(id))
+        ));
+      }
+      return corsResponse({ success: true });
+    }
+
+    // --------------------------------------------------------
     // CRM DATA ROUTES
     // --------------------------------------------------------
 
-    // GET /api/crm-data — load and merge all users' CRM data
+    // GET /api/crm-data — load merged CRM data. Primary source is D1 (backfilled
+    // from the KV blobs on first read after deploy); any D1 failure falls back
+    // to the legacy KV merge so reads can never break during the migration.
     if (url.pathname === '/api/crm-data' && request.method === 'GET') {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
 
-      const userIds = (await env.SCRAPER_KV.get('crm:user-ids', 'json')) || [];
-      const datasets = await Promise.all(
-        userIds.map(id => env.SCRAPER_KV.get(`crm:user:${id}`, 'json'))
-      );
-      const merged = mergeUserData(datasets.filter(Boolean));
-      return corsResponse({ success: true, data: merged });
+      try {
+        await ensureCrmMigratedToD1(env);
+        const merged = await readCrmFromD1(env);
+        return corsResponse({ success: true, data: merged });
+      } catch (err) {
+        console.error('D1 read failed, falling back to KV:', err);
+        const userIds = (await env.SCRAPER_KV.get('crm:user-ids', 'json')) || [];
+        const datasets = await Promise.all(
+          userIds.map(id => env.SCRAPER_KV.get(`crm:user:${id}`, 'json'))
+        );
+        const merged = mergeUserData(datasets.filter(Boolean));
+        return corsResponse({ success: true, data: merged });
+      }
     }
 
-    // POST /api/crm-data — save current user's CRM data
+    // POST /api/crm-data — save current user's CRM data (dual-write: KV blob
+    // stays the rollback path while D1 becomes the primary read source)
     if (url.pathname === '/api/crm-data' && request.method === 'POST') {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
@@ -1976,14 +2658,48 @@ export default {
 
       const body = await request.json();
       const userId = session.userId;
-      await env.SCRAPER_KV.put(`crm:user:${userId}`, JSON.stringify({ ...body, savedAt: new Date().toISOString() }));
+      const savedAt = new Date().toISOString();
+      await env.SCRAPER_KV.put(`crm:user:${userId}`, JSON.stringify({ ...body, savedAt }));
 
       const userIds = (await env.SCRAPER_KV.get('crm:user-ids', 'json')) || [];
       if (!userIds.includes(userId)) {
         userIds.push(userId);
         await env.SCRAPER_KV.put('crm:user-ids', JSON.stringify(userIds));
       }
-      return corsResponse({ success: true });
+
+      let d1Synced = true;
+      try {
+        await syncUserBlobToD1(env, userId, body, savedAt);
+      } catch (err) {
+        d1Synced = false;
+        console.error('D1 dual-write failed (KV save succeeded):', err);
+      }
+      return corsResponse({ success: true, d1Synced });
+    }
+
+    // GET /api/admin/d1-parity — compare KV-merged data vs D1 reads per entity
+    if (url.pathname === '/api/admin/d1-parity' && request.method === 'GET') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      if (session.role !== 'Admin') return corsResponse({ success: false, message: 'Forbidden' }, 403);
+
+      const userIds = (await env.SCRAPER_KV.get('crm:user-ids', 'json')) || [];
+      const datasets = await Promise.all(userIds.map(id => env.SCRAPER_KV.get(`crm:user:${id}`, 'json')));
+      const kvMerged = mergeUserData(datasets.filter(Boolean));
+      await ensureCrmMigratedToD1(env);
+      const d1Merged = await readCrmFromD1(env);
+
+      const report = {};
+      let match = true;
+      for (const key of Object.keys(D1_ENTITY_TABLES)) {
+        const kvIds = new Set((kvMerged[key] || []).map(r => String(r.id)));
+        const d1Ids = new Set((d1Merged[key] || []).map(r => String(r.id)));
+        const missingInD1 = [...kvIds].filter(id => !d1Ids.has(id));
+        const extraInD1 = [...d1Ids].filter(id => !kvIds.has(id));
+        if (missingInD1.length) match = false;
+        report[key] = { kvCount: kvIds.size, d1Count: d1Ids.size, missingInD1, extraInD1 };
+      }
+      return corsResponse({ success: true, match, report });
     }
 
     // --------------------------------------------------------
@@ -2001,5 +2717,4 @@ export default {
     // ASSETS binding, which (with not_found_handling: "single-page-application")
     // returns index.html so the React app can read the token from the URL.
     return env.ASSETS.fetch(request);
-  },
-};
+}

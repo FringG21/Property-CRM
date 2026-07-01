@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Refurb Quote Builder — Mockup C: Minimalist Pro</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #fff; color: #0f172a; }
+  .shell { display: flex; height: 100vh; overflow: hidden; }
+
+  /* Sidebar */
+  .sidebar { width: 200px; background: #fff; border-right: 1px solid #e2e8f0; flex-shrink: 0; display: flex; flex-direction: column; }
+  .sidebar-logo { padding: 18px 16px; border-bottom: 1px solid #f1f5f9; }
+  .sidebar-logo h1 { font-size: 13px; font-weight: 700; }
+  .sidebar-logo p { font-size: 11px; color: #94a3b8; margin-top: 2px; }
+  .nav-item { display: flex; align-items: center; gap: 9px; padding: 9px 16px; font-size: 12px; font-weight: 500; color: #64748b; cursor: pointer; border: none; background: none; width: 100%; text-align: left; }
+  .nav-item:hover { background: #f8fafc; color: #0f172a; }
+  .nav-item.active { background: #fef3c7; color: #92400e; font-weight: 600; border-left: 3px solid #b45309; }
+  .nav-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .5; }
+
+  /* Main */
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .topbar { padding: 12px 24px; background: #fff; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; }
+  .page-title { font-size: 16px; font-weight: 700; }
+  .page-sub { font-size: 11px; color: #94a3b8; margin-top: 1px; }
+  .topbar-actions { display: flex; gap: 8px; }
+  .btn-primary { padding: 8px 16px; background: #b45309; color: #fff; border: none; border-radius: 6px; font-size: 12px; font-weight: 700; cursor: pointer; }
+  .btn-ghost { padding: 8px 14px; background: none; color: #64748b; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; }
+
+  /* Sub-tab strip */
+  .tab-strip { display: flex; border-bottom: 1px solid #e2e8f0; padding: 0 24px; background: #fff; }
+  .tab-item { padding: 11px 16px; font-size: 12px; font-weight: 600; color: #94a3b8; border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap; }
+  .tab-item.active { color: #b45309; border-bottom-color: #b45309; }
+  .tab-item:hover:not(.active) { color: #475569; }
+
+  /* Content area */
+  .content-area { flex: 1; overflow: hidden; display: flex; }
+
+  /* ===== ALL QUOTES with filter sidebar ===== */
+  .filter-sidebar { width: 200px; flex-shrink: 0; border-right: 1px solid #f1f5f9; padding: 16px; overflow-y: auto; background: #fafafa; }
+  .filter-sidebar h4 { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #94a3b8; margin-bottom: 10px; }
+  .filter-group { margin-bottom: 16px; }
+  .filter-group label { display: block; font-size: 11px; font-weight: 600; color: #475569; margin-bottom: 5px; }
+  .filter-select { width: 100%; padding: 7px 9px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 11px; background: #fff; }
+  .filter-search { width: 100%; padding: 8px 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 12px; }
+  .filter-chip { display: inline-block; padding: 3px 9px; border-radius: 20px; font-size: 10px; font-weight: 600; cursor: pointer; margin: 2px; border: 1px solid #e2e8f0; background: #fff; color: #475569; }
+  .filter-chip.on { background: #b45309; color: #fff; border-color: #b45309; }
+  .filter-clear { font-size: 11px; color: #b45309; cursor: pointer; font-weight: 600; }
+
+  /* Table area */
+  .table-area { flex: 1; overflow: auto; }
+  .table-toolbar { padding: 10px 16px; border-bottom: 1px solid #f1f5f9; display: flex; align-items: center; gap: 10px; }
+  .result-count { font-size: 11px; color: #94a3b8; }
+  .sort-select { padding: 6px 9px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 11px; background: #fff; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { padding: 9px 12px; text-align: left; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #94a3b8; background: #fafafa; border-bottom: 1px solid #f1f5f9; white-space: nowrap; cursor: pointer; user-select: none; }
+  th:hover { color: #475569; }
+  td { padding: 11px 12px; border-bottom: 1px solid #f8fafc; vertical-align: middle; }
+  tr:hover td { background: #fafafa; }
+  .badge { display: inline-block; padding: 2px 7px; border-radius: 10px; font-size: 9px; font-weight: 700; text-transform: uppercase; }
+  .ba { background: #fef3c7; color: #92400e; }
+  .br { background: #f5f3ff; color: #6d28d9; }
+  .bg { background: #dcfce7; color: #166534; }
+  .bo { background: #fff7ed; color: #c2410c; }
+  .bb { background: #d1fae5; color: #065f46; }
+  .stars { color: #eab308; font-size: 10px; }
+  .action-cell { display: flex; gap: 6px; opacity: 0; }
+  tr:hover .action-cell { opacity: 1; }
+  .icon-btn { padding: 4px 7px; border: 1px solid #e2e8f0; border-radius: 5px; background: #fff; cursor: pointer; font-size: 11px; color: #64748b; }
+  .icon-btn:hover { background: #f8fafc; }
+
+  /* ===== MIXER spreadsheet grid ===== */
+  .mixer-wrap { flex: 1; overflow: auto; padding: 20px 24px; }
+  .mixer-prop-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .mixer-prop-bar select { padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 7px; font-size: 13px; background: #fff; min-width: 280px; }
+  .mixer-prop-bar input { padding: 8px 10px; border: 1px solid #e2e8f0; border-radius: 7px; font-size: 13px; width: 70px; text-align: center; }
+  .grid-table { width: 100%; border-collapse: collapse; font-size: 12px; border: 1px solid #e2e8f0; border-radius: 8px; overflow: hidden; }
+  .grid-table th { padding: 9px 12px; text-align: left; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #94a3b8; background: #fafafa; border-bottom: 1px solid #e2e8f0; }
+  .grid-table td { padding: 0; border-bottom: 1px solid #f1f5f9; }
+  .grid-table td.label-cell { padding: 10px 12px; font-weight: 600; background: #fafafa; font-size: 12px; }
+  .grid-table td.label-cell span { font-size: 10px; font-weight: 400; color: #94a3b8; display: block; }
+  .cell-select { width: 100%; padding: 10px 12px; border: none; border-right: 1px solid #f1f5f9; font-size: 12px; background: transparent; cursor: pointer; }
+  .cell-select:focus { background: #fffbeb; outline: 2px solid #b45309; outline-offset: -2px; }
+  .amount-cell { padding: 10px 12px; font-size: 13px; font-weight: 700; color: #b45309; text-align: right; border-right: 1px solid #f1f5f9; }
+  .rating-cell { padding: 10px 12px; font-size: 11px; color: #eab308; }
+  .total-row td { background: #0f172a; color: #fff; font-weight: 700; padding: 12px 12px; }
+  .total-row td.label-cell { background: #0f172a; color: #fff; }
+  .total-amount { font-size: 16px; color: #fbbf24; }
+  .deps-cell { padding: 8px 12px; }
+  .dep-tag { display: inline-block; padding: 2px 6px; background: #f1f5f9; border-radius: 4px; font-size: 10px; color: #64748b; margin: 1px; }
+
+  /* ===== DIRECTORY card grid ===== */
+  .dir-wrap { flex: 1; overflow: auto; padding: 20px 24px; }
+  .dir-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  .dir-card { border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px; background: #fff; }
+  .dir-card:hover { border-color: #b45309; }
+  .dir-avatar { width: 40px; height: 40px; border-radius: 10px; background: #b45309; color: #fff; display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 700; margin-bottom: 10px; }
+  .dir-name { font-size: 13px; font-weight: 700; margin-bottom: 2px; }
+  .dir-trade { font-size: 11px; color: #64748b; margin-bottom: 6px; }
+  .dir-meta { display: flex; align-items: center; justify-content: space-between; font-size: 11px; }
+  .dir-quotes { color: #94a3b8; }
+  .dir-actions { display: flex; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #f1f5f9; }
+  .dir-btn { flex: 1; padding: 6px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 10px; font-weight: 600; cursor: pointer; background: #fff; color: #64748b; text-align: center; }
+  .dir-btn:hover { background: #fef3c7; border-color: #b45309; color: #b45309; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <!-- Sidebar -->
+  <nav class="sidebar">
+    <div class="sidebar-logo">
+      <h1>Property CRM</h1>
+      <p>A&A Investment Partners</p>
+    </div>
+    <div style="padding: 10px 0; flex: 1; overflow-y: auto;">
+      <button class="nav-item"><span>🏠</span> Dashboard</button>
+      <button class="nav-item"><span>📈</span> Pipeline</button>
+      <button class="nav-item"><span>🏢</span> Companies</button>
+      <button class="nav-item"><span>👤</span> Contacts</button>
+      <button class="nav-item active"><span>🔨</span> Refurb Quotes</button>
+      <button class="nav-item"><span>📋</span> Tasks</button>
+    </div>
+    <div style="padding: 12px 16px; border-top: 1px solid #f1f5f9;">
+      <button class="nav-item" style="padding: 8px 0;"><span>⚙️</span> Settings</button>
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <div class="main">
+    <div class="topbar">
+      <div>
+        <div class="page-title">Refurb Cost &amp; Trade Quote Builder</div>
+        <div class="page-sub">14 quotes across 2 properties</div>
+      </div>
+      <div class="topbar-actions">
+        <button class="btn-ghost">Load sample data</button>
+        <button class="btn-primary">+ Add Quote</button>
+      </div>
+    </div>
+
+    <!-- Tab strip -->
+    <div class="tab-strip">
+      <div class="tab-item" onclick="showTab('dashboard')">Dashboard</div>
+      <div class="tab-item active" onclick="showTab('quotes')">All Quotes</div>
+      <div class="tab-item" onclick="showTab('mixer')">Quote Mixer</div>
+      <div class="tab-item" onclick="showTab('directory')">Trade Directory</div>
+      <div class="tab-item" onclick="showTab('timeline')">Timeline</div>
+    </div>
+
+    <!-- ===== DASHBOARD (hidden) ===== -->
+    <div class="content-area" id="tab-dashboard" style="display:none">
+      <div style="padding:24px;color:#94a3b8;font-size:13px">Dashboard view</div>
+    </div>
+
+    <!-- ===== ALL QUOTES with filter sidebar ===== -->
+    <div class="content-area" id="tab-quotes">
+      <!-- Collapsible filter sidebar -->
+      <div class="filter-sidebar">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <h4>Filters</h4>
+          <span class="filter-clear">Clear all</span>
+        </div>
+        <div class="filter-group">
+          <label>Search</label>
+          <input class="filter-search" placeholder="Trade, company, ref…" />
+        </div>
+        <div class="filter-group">
+          <label>Property</label>
+          <select class="filter-select">
+            <option>All properties</option>
+            <option>23 Birchwood Ave</option>
+            <option>7 Maple St</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label>Status</label>
+          <div>
+            <span class="filter-chip on">All</span>
+            <span class="filter-chip">Needed</span>
+            <span class="filter-chip">Received</span>
+            <span class="filter-chip">Accepted</span>
+            <span class="filter-chip">Booked</span>
+          </div>
+        </div>
+        <div class="filter-group">
+          <label>Trade</label>
+          <select class="filter-select">
+            <option>All trades</option>
+            <option>Electrician</option>
+            <option>Plumber/Heating</option>
+            <option>Plasterer</option>
+            <option>Painter/Decorator</option>
+            <option>Flooring</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label>Pricing method</label>
+          <select class="filter-select">
+            <option>All methods</option>
+            <option>Fixed Total Quote</option>
+            <option>Per Room</option>
+            <option>Per m²</option>
+            <option>Day Rate</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label>Company</label>
+          <select class="filter-select">
+            <option>All companies</option>
+            <option>Spark Electric Ltd</option>
+            <option>Sheffield Plumbing Co</option>
+          </select>
+        </div>
+        <div class="filter-group">
+          <label>Insured only</label>
+          <div style="display:flex;align-items:center;gap:6px;margin-top:4px">
+            <input type="checkbox" id="insured" />
+            <label for="insured" style="font-size:12px;font-weight:400;color:#475569">Insured contractors</label>
+          </div>
+        </div>
+      </div>
+
+      <!-- Table -->
+      <div class="table-area">
+        <div class="table-toolbar">
+          <span class="result-count">6 quotes</span>
+          <div style="flex:1"></div>
+          <select class="sort-select"><option>Sort: Date ↓</option><option>Sort: Amount ↓</option><option>Sort: Rating ↓</option></select>
+          <button class="btn-ghost" style="padding:6px 11px;font-size:11px">Export CSV</button>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Ref ↕</th>
+              <th>Trade ↕</th>
+              <th>Property</th>
+              <th>Company / Contact</th>
+              <th>Method</th>
+              <th>Net ↕</th>
+              <th>VAT</th>
+              <th>Inc. VAT ↕</th>
+              <th>Status ↕</th>
+              <th>Rating ↕</th>
+              <th>Expiry ↕</th>
+              <th>Ins.</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="font-size:11px;color:#94a3b8;font-family:monospace">SPARK-001</td>
+              <td><b>Electrician</b></td>
+              <td>23 Birchwood Ave</td>
+              <td><div style="font-weight:600">Spark Electric Ltd</div><div style="font-size:10px;color:#94a3b8">J. Sparks</div></td>
+              <td style="color:#64748b">Fixed</td>
+              <td>£4,800</td>
+              <td style="color:#94a3b8">£960</td>
+              <td><b>£5,760</b></td>
+              <td><span class="badge br">received</span></td>
+              <td><span class="stars">★★★★★</span></td>
+              <td style="color:#dc2626;font-size:11px;font-weight:700">3d ⚠</td>
+              <td style="text-align:center">✅</td>
+              <td><div class="action-cell"><button class="icon-btn">✏</button><button class="icon-btn">🗑</button></div></td>
+            </tr>
+            <tr>
+              <td style="font-size:11px;color:#94a3b8;font-family:monospace">SPC-2026-14</td>
+              <td><b>Plumber/Heating</b></td>
+              <td>23 Birchwood Ave</td>
+              <td><div style="font-weight:600">Sheffield Plumbing Co</div><div style="font-size:10px;color:#94a3b8">M. Holt</div></td>
+              <td style="color:#64748b">Fixed</td>
+              <td>£6,200</td>
+              <td style="color:#94a3b8">£1,240</td>
+              <td><b>£7,440</b></td>
+              <td><span class="badge bg">accepted</span></td>
+              <td><span class="stars">★★★★☆</span></td>
+              <td style="color:#94a3b8;font-size:11px">15 Sep</td>
+              <td style="text-align:center">✅</td>
+              <td><div class="action-cell"><button class="icon-btn">✏</button><button class="icon-btn">🗑</button></div></td>
+            </tr>
+            <tr>
+              <td style="font-size:11px;color:#94a3b8;font-family:monospace">DP-Q-2026</td>
+              <td><b>Plasterer</b></td>
+              <td>23 Birchwood Ave</td>
+              <td><div style="font-weight:600">D. Parsons</div><div style="font-size:10px;color:#94a3b8">Sole trader</div></td>
+              <td style="color:#64748b">Per Room</td>
+              <td>£3,400</td>
+              <td style="color:#94a3b8">—</td>
+              <td><b>£3,400</b></td>
+              <td><span class="badge bo">reviewing</span></td>
+              <td><span class="stars">★★★★☆</span></td>
+              <td style="color:#94a3b8;font-size:11px">30 Sep</td>
+              <td style="text-align:center">—</td>
+              <td><div class="action-cell"><button class="icon-btn">✏</button><button class="icon-btn">🗑</button></div></td>
+            </tr>
+            <tr>
+              <td style="font-size:11px;color:#94a3b8;font-family:monospace">DSY-0062</td>
+              <td><b>Damp Specialist</b></td>
+              <td>23 Birchwood Ave</td>
+              <td><div style="font-weight:600">Damp Solutions Yorks</div><div style="font-size:10px;color:#94a3b8">R. Barnett</div></td>
+              <td style="color:#64748b">Per Linear m</td>
+              <td>£2,100</td>
+              <td style="color:#94a3b8">£420</td>
+              <td><b>£2,520</b></td>
+              <td><span class="badge bg">accepted</span></td>
+              <td><span class="stars">★★★★★</span></td>
+              <td style="color:#94a3b8;font-size:11px">15 Aug</td>
+              <td style="text-align:center">✅</td>
+              <td><div class="action-cell"><button class="icon-btn">✏</button><button class="icon-btn">🗑</button></div></td>
+            </tr>
+            <tr>
+              <td style="font-size:11px;color:#94a3b8;font-family:monospace">PD-SY-88</td>
+              <td><b>Painter/Decorator</b></td>
+              <td>23 Birchwood Ave</td>
+              <td><div style="font-weight:600">Paul Whitmore</div><div style="font-size:10px;color:#94a3b8">Sole trader</div></td>
+              <td style="color:#64748b">Per Room</td>
+              <td>£2,800</td>
+              <td style="color:#94a3b8">—</td>
+              <td><b>£2,800</b></td>
+              <td><span class="badge br">received</span></td>
+              <td><span class="stars">★★★★★</span></td>
+              <td style="color:#94a3b8;font-size:11px">31 Oct</td>
+              <td style="text-align:center">—</td>
+              <td><div class="action-cell"><button class="icon-btn">✏</button><button class="icon-btn">🗑</button></div></td>
+            </tr>
+            <tr>
+              <td style="font-size:11px;color:#94a3b8;font-family:monospace">SFI-2026</td>
+              <td><b>Flooring</b></td>
+              <td>23 Birchwood Ave</td>
+              <td style="color:#94a3b8">—</td>
+              <td style="color:#64748b">Per m²</td>
+              <td style="color:#94a3b8">—</td>
+              <td style="color:#94a3b8">—</td>
+              <td style="color:#94a3b8">—</td>
+              <td><span class="badge ba">needed</span></td>
+              <td style="color:#94a3b8">—</td>
+              <td style="color:#94a3b8">—</td>
+              <td style="text-align:center">—</td>
+              <td><div class="action-cell"><button class="icon-btn">✏</button><button class="icon-btn">🗑</button></div></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== MIXER spreadsheet ===== -->
+    <div class="content-area" id="tab-mixer" style="display:none;flex-direction:column">
+      <div class="mixer-wrap">
+        <div class="mixer-prop-bar">
+          <div>
+            <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Property</div>
+            <select><option>23 Birchwood Ave, Sheffield S6 2YT</option></select>
+          </div>
+          <div>
+            <div style="font-size:10px;font-weight:700;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Contingency %</div>
+            <input type="number" value="10" />
+          </div>
+          <div style="margin-left:auto;display:flex;gap:8px;align-items:flex-end">
+            <button class="btn-ghost" style="font-size:11px;padding:7px 12px">Export summary</button>
+            <button class="btn-primary" style="font-size:11px;padding:7px 12px">Apply to deal calc</button>
+          </div>
+        </div>
+
+        <table class="grid-table">
+          <thead>
+            <tr>
+              <th style="width:160px">Trade</th>
+              <th>Selected Quote</th>
+              <th style="width:100px;text-align:right">Net</th>
+              <th style="width:70px;text-align:right">VAT</th>
+              <th style="width:100px;text-align:right">Inc. VAT</th>
+              <th style="width:80px">Rating</th>
+              <th style="width:100px">Dependencies</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td class="label-cell">🔌 Electrician</td>
+              <td><select class="cell-select"><option>SPARK-001 — Spark Electric Ltd (★★★★★)</option><option>VOLT-02 — JT Electrical (★★★★☆)</option></select></td>
+              <td class="amount-cell">£4,800</td>
+              <td style="padding:10px 12px;text-align:right;color:#94a3b8;font-size:12px">£960</td>
+              <td style="padding:10px 12px;text-align:right;font-weight:700;font-size:13px">£5,760</td>
+              <td class="rating-cell">★★★★★</td>
+              <td class="deps-cell"><span class="dep-tag">Builder</span><span class="dep-tag">Damp</span></td>
+            </tr>
+            <tr>
+              <td class="label-cell">🔧 Plumber/Heating</td>
+              <td><select class="cell-select"><option>SPC-2026-14 — Sheffield Plumbing Co (★★★★☆)</option></select></td>
+              <td class="amount-cell">£6,200</td>
+              <td style="padding:10px 12px;text-align:right;color:#94a3b8;font-size:12px">£1,240</td>
+              <td style="padding:10px 12px;text-align:right;font-weight:700;font-size:13px">£7,440</td>
+              <td class="rating-cell">★★★★☆</td>
+              <td class="deps-cell"><span class="dep-tag">Builder</span></td>
+            </tr>
+            <tr>
+              <td class="label-cell">🪣 Plasterer</td>
+              <td><select class="cell-select"><option>DP-Q-2026 — D. Parsons (★★★★☆)</option></select></td>
+              <td class="amount-cell">£3,400</td>
+              <td style="padding:10px 12px;text-align:right;color:#94a3b8;font-size:12px">—</td>
+              <td style="padding:10px 12px;text-align:right;font-weight:700;font-size:13px">£3,400</td>
+              <td class="rating-cell">★★★★☆</td>
+              <td class="deps-cell"><span class="dep-tag">Elec</span><span class="dep-tag">Plumb</span></td>
+            </tr>
+            <tr>
+              <td class="label-cell">💧 Damp Specialist</td>
+              <td><select class="cell-select"><option>DSY-0062 — Damp Solutions Yorks (★★★★★)</option></select></td>
+              <td class="amount-cell">£2,100</td>
+              <td style="padding:10px 12px;text-align:right;color:#94a3b8;font-size:12px">£420</td>
+              <td style="padding:10px 12px;text-align:right;font-weight:700;font-size:13px">£2,520</td>
+              <td class="rating-cell">★★★★★</td>
+              <td class="deps-cell">—</td>
+            </tr>
+            <tr>
+              <td class="label-cell">🖌️ Painter/Dec</td>
+              <td><select class="cell-select"><option>PD-SY-88 — Paul Whitmore (★★★★★)</option></select></td>
+              <td class="amount-cell">£2,800</td>
+              <td style="padding:10px 12px;text-align:right;color:#94a3b8;font-size:12px">—</td>
+              <td style="padding:10px 12px;text-align:right;font-weight:700;font-size:13px">£2,800</td>
+              <td class="rating-cell">★★★★★</td>
+              <td class="deps-cell"><span class="dep-tag">Plaster</span></td>
+            </tr>
+            <tr style="background:#fafafa">
+              <td class="label-cell" style="color:#94a3b8">🪵 Flooring</td>
+              <td style="padding:10px 12px;color:#94a3b8;font-size:12px">No quotes — <a href="#" style="color:#b45309">+ Add</a></td>
+              <td class="amount-cell" style="color:#94a3b8">—</td>
+              <td style="padding:10px 12px;text-align:right;color:#94a3b8;font-size:12px">—</td>
+              <td style="padding:10px 12px;text-align:right;color:#94a3b8;font-size:12px">—</td>
+              <td class="rating-cell" style="color:#e2e8f0">☆☆☆☆☆</td>
+              <td class="deps-cell">—</td>
+            </tr>
+            <!-- Totals -->
+            <tr style="background:#fafafa;border-top:2px solid #e2e8f0">
+              <td style="padding:10px 12px;font-size:11px;font-weight:700;text-transform:uppercase;color:#94a3b8" colspan="2">Subtotal (ex VAT)</td>
+              <td style="padding:10px 12px;text-align:right;font-weight:700">£19,300</td>
+              <td style="padding:10px 12px;text-align:right;font-size:12px;color:#94a3b8">£2,620</td>
+              <td style="padding:10px 12px;text-align:right;font-weight:700">£21,920</td>
+              <td colspan="2"></td>
+            </tr>
+            <tr style="background:#fafafa">
+              <td style="padding:10px 12px;font-size:11px;font-weight:700;text-transform:uppercase;color:#94a3b8" colspan="2">Contingency (10%)</td>
+              <td style="padding:10px 12px;text-align:right;font-size:13px;color:#64748b">£1,930</td>
+              <td colspan="3"></td>
+            </tr>
+            <tr class="total-row">
+              <td class="label-cell" colspan="2" style="font-size:13px">Grand Total (inc. VAT + contingency)</td>
+              <td colspan="2"></td>
+              <td><span class="total-amount">£23,850</span></td>
+              <td colspan="2" style="font-size:11px;color:#94a3b8">Est. 7.5 wks</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== DIRECTORY ===== -->
+    <div class="content-area" id="tab-directory" style="display:none">
+      <div class="dir-wrap">
+        <div style="display:flex;gap:10px;margin-bottom:16px;align-items:center">
+          <input style="padding:8px 12px;border:1px solid #e2e8f0;border-radius:7px;font-size:12px;width:220px" placeholder="Search companies & contacts…" />
+          <select style="padding:8px 10px;border:1px solid #e2e8f0;border-radius:7px;font-size:12px;background:#fff"><option>All trades</option></select>
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:#475569"><input type="checkbox" /> Insured only</label>
+        </div>
+        <div class="dir-grid">
+          <div class="dir-card">
+            <div class="dir-avatar">SE</div>
+            <div class="dir-name">Spark Electric Ltd</div>
+            <div class="dir-trade">🔌 Electrician</div>
+            <div style="color:#eab308;font-size:11px;margin-bottom:6px">★★★★★</div>
+            <div class="dir-meta"><span class="dir-quotes">2 quotes</span><span style="font-size:10px;background:#dcfce7;color:#166534;padding:2px 7px;border-radius:8px;font-weight:700">Insured</span></div>
+            <div class="dir-meta" style="margin-top:4px"><span style="font-size:11px;color:#64748b">Avg: £4,800</span><span style="font-size:10px;color:#94a3b8">Prev used ✓</span></div>
+            <div class="dir-actions">
+              <div class="dir-btn">View quotes</div>
+              <div class="dir-btn">+ New quote</div>
+            </div>
+          </div>
+          <div class="dir-card">
+            <div class="dir-avatar" style="background:#0891b2">SP</div>
+            <div class="dir-name">Sheffield Plumbing Co</div>
+            <div class="dir-trade">🔧 Plumber/Heating</div>
+            <div style="color:#eab308;font-size:11px;margin-bottom:6px">★★★★☆</div>
+            <div class="dir-meta"><span class="dir-quotes">1 quote</span><span style="font-size:10px;background:#dcfce7;color:#166534;padding:2px 7px;border-radius:8px;font-weight:700">Gas Safe</span></div>
+            <div class="dir-meta" style="margin-top:4px"><span style="font-size:11px;color:#64748b">Avg: £6,200</span><span style="font-size:10px;color:#94a3b8">New</span></div>
+            <div class="dir-actions">
+              <div class="dir-btn">View quotes</div>
+              <div class="dir-btn">+ New quote</div>
+            </div>
+          </div>
+          <div class="dir-card">
+            <div class="dir-avatar" style="background:#059669">DP</div>
+            <div class="dir-name">D. Parsons</div>
+            <div class="dir-trade">🪣 Plasterer</div>
+            <div style="color:#eab308;font-size:11px;margin-bottom:6px">★★★★☆</div>
+            <div class="dir-meta"><span class="dir-quotes">1 quote</span><span style="font-size:10px;background:#fef3c7;color:#92400e;padding:2px 7px;border-radius:8px;font-weight:700">No ins.</span></div>
+            <div class="dir-meta" style="margin-top:4px"><span style="font-size:11px;color:#64748b">Avg: £3,400</span><span style="font-size:10px;color:#94a3b8">Prev used ✓</span></div>
+            <div class="dir-actions">
+              <div class="dir-btn">View quotes</div>
+              <div class="dir-btn">+ New quote</div>
+            </div>
+          </div>
+          <div class="dir-card">
+            <div class="dir-avatar" style="background:#7c3aed">DS</div>
+            <div class="dir-name">Damp Solutions Yorkshire</div>
+            <div class="dir-trade">💧 Damp Specialist</div>
+            <div style="color:#eab308;font-size:11px;margin-bottom:6px">★★★★★</div>
+            <div class="dir-meta"><span class="dir-quotes">2 quotes</span><span style="font-size:10px;background:#dcfce7;color:#166534;padding:2px 7px;border-radius:8px;font-weight:700">PCA Member</span></div>
+            <div class="dir-meta" style="margin-top:4px"><span style="font-size:11px;color:#64748b">Avg: £1,950</span><span style="font-size:10px;color:#94a3b8">Prev used ✓</span></div>
+            <div class="dir-actions">
+              <div class="dir-btn">View quotes</div>
+              <div class="dir-btn">+ New quote</div>
+            </div>
+          </div>
+          <div class="dir-card">
+            <div class="dir-avatar" style="background:#d97706">PW</div>
+            <div class="dir-name">Paul Whitmore</div>
+            <div class="dir-trade">🖌️ Painter/Decorator</div>
+            <div style="color:#eab308;font-size:11px;margin-bottom:6px">★★★★★</div>
+            <div class="dir-meta"><span class="dir-quotes">1 quote</span><span style="font-size:10px;background:#fef3c7;color:#92400e;padding:2px 7px;border-radius:8px;font-weight:700">No ins.</span></div>
+            <div class="dir-meta" style="margin-top:4px"><span style="font-size:11px;color:#64748b">Avg: £2,800</span><span style="font-size:10px;color:#94a3b8">Prev used ✓</span></div>
+            <div class="dir-actions">
+              <div class="dir-btn">View quotes</div>
+              <div class="dir-btn">+ New quote</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TIMELINE (hidden stub) -->
+    <div class="content-area" id="tab-timeline" style="display:none">
+      <div style="padding:24px;color:#94a3b8;font-size:13px">Timeline / Gantt view</div>
+    </div>
+  </div>
+</div>
+
+<script>
+function showTab(id) {
+  document.querySelectorAll('[id^="tab-"]').forEach(el => el.style.display = 'none');
+  document.querySelectorAll('.tab-item').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + id).style.display = 'flex';
+  event.target.classList.add('active');
+}
+</script>
+</body>
+</html>

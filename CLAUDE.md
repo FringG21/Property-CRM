@@ -52,10 +52,45 @@ Active connectors: address, landRegistry, epc, police, flood, planning, osm, imd
 
 EPC enrichment: after allSettled, enrichCompsWithEPC() cross-references LR comps with EPC records by address similarity.
 
-## Responsive breakpoints
-- isMobile: viewport width < 768px
-- isTablet: viewport width >= 768 and < 1024px
-- All layout uses inline styles + JS ternaries (no CSS media queries)
+## Responsive Design & Device Optimisation
+
+### Breakpoints
+| Name    | Width        | Boolean available |
+|---------|--------------|-------------------|
+| Mobile  | < 768px      | `isMobile`        |
+| Tablet  | 768–1023px   | `isTablet`        |
+| Desktop | ≥ 1024px     | (neither)         |
+
+### Implementation pattern
+This project uses **inline styles + JS ternaries only** — no CSS media queries, no Tailwind, no CSS classes. All responsive logic must follow the existing pattern:
+
+```jsx
+style={{ width: isMobile ? '100%' : '480px' }}
+```
+
+Never use CSS media queries or external class-based frameworks. The `isMobile` and `isTablet` booleans are derived from `window.innerWidth` and updated via a resize listener — use them for every layout decision.
+
+### Layout rules
+- **No fixed-width containers** — avoid `width: '600px'`; use `'100%'`, percentages, or ternaries
+- **No horizontal scroll** — every view must fit within its viewport width at 375px, 768px, and 1280px; use `overflowX: 'auto'` on tables/grids only when unavoidable, with `className="crm-table-wrap"`
+- **Flexbox or Grid** — use `display: 'flex'` or `display: 'grid'` for all multi-column layouts; collapse to single column on mobile via ternary on `gridTemplateColumns` or `flexDirection`
+- **Stacking order** — on mobile, secondary panels/sidebars always stack below the primary content, never beside it
+
+### Touch & accessibility
+- Interactive elements (buttons, selects, inputs) must have a minimum tap target of **44×44px** on mobile — use `padding` to achieve this if needed
+- Minimum font size **14px** on mobile; do not use `fontSize` below `'12px'` for body text, and never below `'10px'` for any visible label
+- Maintain **WCAG AA colour contrast** at all sizes — check foreground/background pairs when adding new colour combinations
+- Focus states must remain visible — do not remove `outline` without providing an equivalent visible focus indicator
+
+### Images & media
+- Always set `loading="lazy"` and explicit `width`/`height` attributes on `<img>` tags to prevent cumulative layout shift (CLS)
+- Never use a fixed pixel width on images; use `style={{ maxWidth: '100%', height: 'auto' }}`
+
+### Mental checklist before finalising any UI change
+Reason through the layout at all three widths — fix issues before committing:
+- [ ] 375px — iPhone SE / small Android (mobile)
+- [ ] 768px — tablet portrait
+- [ ] 1280px — standard desktop
 
 ## Build and deploy
 npm run build

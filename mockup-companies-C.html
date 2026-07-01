@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Companies & Contacts — Mockup C: Full Table + Slide-in Drawer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f1f5f9; color: #0f172a; height: 100vh; display: flex; overflow: hidden; }
+  .sidebar-nav { width: 200px; background: #0f172a; flex-shrink: 0; display: flex; flex-direction: column; }
+  .sidebar-logo { padding: 18px 16px; border-bottom: 1px solid #1e293b; }
+  .sidebar-logo h1 { font-size: 13px; font-weight: 700; color: #fff; }
+  .sidebar-logo p { font-size: 10px; color: #64748b; margin-top: 2px; }
+  .nav-item { display: flex; align-items: center; gap: 9px; padding: 9px 16px; font-size: 12px; font-weight: 500; color: #94a3b8; cursor: pointer; border: none; background: none; width: 100%; text-align: left; }
+  .nav-item.active { color: #fff; background: #1e293b; border-left: 3px solid #059669; padding-left: 13px; }
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+  /* Top bar */
+  .topbar { padding: 0 24px; background: #fff; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; flex-shrink: 0; }
+  .tab-btn { padding: 14px 18px; font-size: 13px; font-weight: 600; background: none; border: none; cursor: pointer; color: #64748b; border-bottom: 2px solid transparent; }
+  .tab-btn.active { color: #059669; border-bottom-color: #059669; }
+  /* Filter bar */
+  .filter-bar { padding: 10px 20px; background: #fff; border-bottom: 1px solid #e2e8f0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-shrink: 0; }
+  .search-wrap { position: relative; }
+  .search-wrap input { padding: 7px 10px 7px 30px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 12px; background: #f8fafc; outline: none; width: 200px; }
+  .search-wrap svg { position: absolute; top: 8px; left: 8px; color: #94a3b8; width: 13px; height: 13px; pointer-events: none; }
+  select.f { padding: 6px 9px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 11px; background: #fff; outline: none; }
+  .tgl-row { display: flex; gap: 3px; align-items: center; }
+  .tgl-row label { font-size: 10px; font-weight: 600; color: #64748b; margin-right: 2px; }
+  .tgl { padding: 5px 9px; border-radius: 4px; font-size: 10px; font-weight: 600; cursor: pointer; border: 1px solid #e2e8f0; background: #f1f5f9; color: #64748b; }
+  .tgl.on { background: #0f172a; color: #fff; border-color: #0f172a; }
+  .filter-meta { font-size: 10px; color: #94a3b8; }
+  .clear-btn { font-size: 10px; color: #059669; background: none; border: none; cursor: pointer; font-weight: 600; }
+  .btn-primary { padding: 7px 14px; background: #059669; color: #fff; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  /* Full-width table */
+  .table-wrap { flex: 1; overflow-y: auto; padding: 16px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; background: #fff; border-radius: 10px; border: 1px solid #e2e8f0; overflow: hidden; }
+  thead { position: sticky; top: 0; z-index: 2; }
+  th { padding: 10px 14px; text-align: left; font-weight: 600; color: #64748b; font-size: 10px; text-transform: uppercase; background: #f8fafc; border-bottom: 1px solid #e2e8f0; white-space: nowrap; cursor: pointer; user-select: none; }
+  th:hover { color: #0f172a; }
+  th .sort-arrow { margin-left: 4px; opacity: .4; font-style: normal; }
+  th.sorted .sort-arrow { opacity: 1; color: #059669; }
+  td { padding: 11px 14px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #f8fafc; }
+  tr.active-row td { background: #f0fdf4; }
+  .badge { display: inline-block; font-size: 9px; padding: 2px 6px; border-radius: 4px; font-weight: 700; }
+  .tier-gold   { background: #fef3c7; color: #92400e; }
+  .tier-silver { background: #f1f5f9; color: #475569; }
+  .tier-bronze { background: #fff7ed; color: #b45309; }
+  .stat-chips { display: flex; gap: 5px; }
+  .stat-chip { font-size: 10px; padding: 2px 7px; border-radius: 10px; font-weight: 600; }
+  /* Slide-in drawer */
+  .drawer-overlay { position: fixed; inset: 0; background: rgba(15,23,42,.25); z-index: 50; opacity: 0; pointer-events: none; transition: opacity .2s; }
+  .drawer-overlay.open { opacity: 1; pointer-events: all; }
+  .drawer { position: fixed; top: 0; right: -500px; width: 480px; height: 100vh; background: #fff; border-left: 1px solid #e2e8f0; z-index: 51; display: flex; flex-direction: column; box-shadow: -4px 0 24px rgba(0,0,0,.1); transition: right .2s ease; }
+  .drawer.open { right: 0; }
+  .drawer-head { padding: 16px 20px; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: flex-start; flex-shrink: 0; }
+  .drawer-avatar { width: 44px; height: 44px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 16px; font-weight: 700; flex-shrink: 0; }
+  .drawer-title { font-size: 15px; font-weight: 700; color: #0f172a; margin-bottom: 3px; }
+  .drawer-sub { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .drawer-close { background: none; border: none; font-size: 20px; color: #94a3b8; cursor: pointer; line-height: 1; padding: 2px; }
+  .drawer-tabs { display: flex; padding: 0 20px; border-bottom: 1px solid #e2e8f0; background: #fafafa; flex-shrink: 0; }
+  .dtab { padding: 9px 14px 9px 0; font-size: 12px; font-weight: 500; background: none; border: none; cursor: pointer; color: #94a3b8; border-bottom: 2px solid transparent; }
+  .dtab.active { color: #059669; border-bottom-color: #059669; }
+  .drawer-body { flex: 1; overflow-y: auto; padding: 18px 20px; background: #f8fafc; }
+  /* Drawer inner */
+  .dcard { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  .dcard-title { font-size: 10px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 12px; }
+  .dgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .dfield { margin-bottom: 10px; }
+  .dfield label { display: block; font-size: 10px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
+  .dfield input, .dfield select, .dfield textarea { width: 100%; padding: 7px 9px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 12px; background: #fff; color: #0f172a; outline: none; font-family: inherit; }
+  /* Note cards */
+  .note-card { padding: 9px 10px; border-radius: 7px; border: 1px solid; margin-bottom: 6px; position: relative; }
+  .note-type-badge { font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 4px; color: #fff; display: inline-block; margin-bottom: 4px; }
+  .note-del { position: absolute; top: 7px; right: 8px; background: none; border: none; font-size: 13px; cursor: pointer; opacity: .4; line-height: 1; }
+  .act-add textarea { width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 12px; resize: none; font-family: inherit; outline: none; margin-bottom: 6px; }
+  .act-row { display: flex; gap: 6px; }
+  .act-row select { flex: 1; padding: 5px 8px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 11px; background: #fff; outline: none; }
+  .act-row button { padding: 5px 12px; background: #0f172a; color: #fff; border: none; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; }
+  /* Contact table specifics */
+  .con-avatar-sm { width: 28px; height: 28px; border-radius: 50%; background: #e0f2fe; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #0369a1; flex-shrink: 0; }
+  /* Contact drawer */
+  .con-drawer-avatar { width: 40px; height: 40px; border-radius: 50%; background: #e0f2fe; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: #0369a1; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="sidebar-nav">
+  <div class="sidebar-logo"><h1>Property CRM</h1><p>AA Investment Partners</p></div>
+  <button class="nav-item">🏠 Dashboard</button>
+  <button class="nav-item">🏗️ Pipeline</button>
+  <button class="nav-item active">🏢 Companies &amp; Contacts</button>
+  <button class="nav-item">📋 Tasks</button>
+  <button class="nav-item">🔧 Refurb Quotes</button>
+</div>
+
+<div class="main">
+  <div class="topbar">
+    <button class="tab-btn active" id="tab-co" onclick="switchTab('companies')">Companies</button>
+    <button class="tab-btn" id="tab-con" onclick="switchTab('contacts')">Contacts</button>
+  </div>
+
+  <!-- COMPANIES VIEW -->
+  <div id="view-co" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+    <div class="filter-bar">
+      <div class="search-wrap">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input type="text" placeholder="Search companies…" oninput="renderCo()" id="cos">
+      </div>
+      <select class="f" onchange="renderCo()" id="cosort">
+        <option value="newest">Newest first</option><option value="az">A → Z</option><option value="za">Z → A</option>
+        <option value="contacts">Most contacts</option><option value="properties">Most properties</option>
+      </select>
+      <select class="f" onchange="renderCo()" id="cotype">
+        <option value="ALL">All types</option>
+        <option>Auction House</option><option>Builder</option><option>Estate Agent</option>
+        <option>Letting Agent</option><option>Mortgage Broker</option><option>Solicitor</option>
+        <option>Surveyor</option><option>Trade / Contractor</option><option>Other</option>
+      </select>
+      <select class="f" onchange="renderCo()" id="cocity">
+        <option value="ALL">All cities</option><option>London</option><option>Sheffield</option><option>Edinburgh</option><option>Coventry</option>
+      </select>
+      <div class="tgl-row">
+        <label>Contacts</label>
+        <button class="tgl on" onclick="setTgl('cc','ALL',this)">All</button>
+        <button class="tgl" onclick="setTgl('cc','yes',this)">Yes</button>
+        <button class="tgl" onclick="setTgl('cc','no',this)">No</button>
+      </div>
+      <div class="tgl-row">
+        <label>Properties</label>
+        <button class="tgl on" onclick="setTgl('cp','ALL',this)">All</button>
+        <button class="tgl" onclick="setTgl('cp','yes',this)">Yes</button>
+        <button class="tgl" onclick="setTgl('cp','no',this)">No</button>
+      </div>
+      <span class="filter-meta" id="cometa">6 of 6 companies</span>
+      <button class="clear-btn" onclick="clearCo()">Clear filters</button>
+      <button class="btn-primary" style="margin-left:auto">+ New company</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th onclick="coSortCol('name')" id="cth-name">Company <em class="sort-arrow">↕</em></th>
+            <th onclick="coSortCol('type')" id="cth-type">Type <em class="sort-arrow">↕</em></th>
+            <th onclick="coSortCol('tier')" id="cth-tier">Tier <em class="sort-arrow">↕</em></th>
+            <th onclick="coSortCol('city')" id="cth-city">City <em class="sort-arrow">↕</em></th>
+            <th onclick="coSortCol('contacts')" id="cth-contacts">Contacts <em class="sort-arrow">↕</em></th>
+            <th onclick="coSortCol('properties')" id="cth-properties">Properties <em class="sort-arrow">↕</em></th>
+            <th>Last note</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="co-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- CONTACTS VIEW -->
+  <div id="view-con" class="hidden" style="flex:1;display:flex;flex-direction:column;overflow:hidden">
+    <div class="filter-bar">
+      <div class="search-wrap">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input type="text" placeholder="Search contacts…" oninput="renderCon()" id="cons" style="width:200px">
+      </div>
+      <select class="f" onchange="renderCon()" id="consort">
+        <option value="newest">Newest added</option><option value="az">A → Z</option><option value="za">Z → A</option><option value="activity">Last activity</option>
+      </select>
+      <select class="f" onchange="renderCon()" id="conrole">
+        <option value="ALL">All roles</option><option>Agent</option><option>Solicitor</option><option>Surveyor</option><option>Broker</option><option>Contractor</option><option>Investor</option>
+      </select>
+      <select class="f" onchange="renderCon()" id="conco">
+        <option value="ALL">All companies</option>
+        <option value="1">Allsop LLP</option><option value="2">Savills Sheffield</option><option value="3">DM Hall</option><option value="4">Brindley Twist</option><option value="5">RJ Property Services</option>
+      </select>
+      <div class="tgl-row">
+        <label>Notes</label>
+        <button class="tgl on" onclick="setConTgl('notes','ALL',this)">All</button>
+        <button class="tgl" onclick="setConTgl('notes','yes',this)">Has notes</button>
+        <button class="tgl" onclick="setConTgl('notes','no',this)">None</button>
+      </div>
+      <span class="filter-meta" id="conmeta">5 of 5 contacts</span>
+      <button class="clear-btn" onclick="clearCon()">Clear filters</button>
+      <button class="btn-primary" style="margin-left:auto">+ New contact</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th onclick="conSortCol('name')" id="cnth-name">Name <em class="sort-arrow">↕</em></th>
+            <th onclick="conSortCol('title')" id="cnth-title">Job Title <em class="sort-arrow">↕</em></th>
+            <th>Company</th>
+            <th onclick="conSortCol('role')" id="cnth-role">Role <em class="sort-arrow">↕</em></th>
+            <th>Email</th>
+            <th>Phone</th>
+            <th onclick="conSortCol('activity')" id="cnth-activity">Last activity <em class="sort-arrow">↕</em></th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="con-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Overlay -->
+  <div class="drawer-overlay" id="overlay" onclick="closeDrawer()"></div>
+
+  <!-- Company drawer -->
+  <div class="drawer" id="co-drawer">
+    <div class="drawer-head">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div class="drawer-avatar" id="co-drw-avatar"></div>
+        <div>
+          <div class="drawer-title" id="co-drw-name"></div>
+          <div class="drawer-sub" id="co-drw-sub"></div>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button style="padding:5px 10px;border:1px solid #fca5a5;border-radius:6px;background:#fef2f2;font-size:11px;color:#dc2626;cursor:pointer">Delete</button>
+        <button class="drawer-close" onclick="closeDrawer()">×</button>
+      </div>
+    </div>
+    <div class="drawer-tabs" id="co-drw-tabs"></div>
+    <div class="drawer-body" id="co-drw-body"></div>
+  </div>
+
+  <!-- Contact drawer -->
+  <div class="drawer" id="con-drawer">
+    <div class="drawer-head">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div class="con-drawer-avatar" id="con-drw-avatar"></div>
+        <div>
+          <div class="drawer-title" id="con-drw-name"></div>
+          <div class="drawer-sub" id="con-drw-sub"></div>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center">
+        <button style="padding:5px 10px;border:1px solid #fca5a5;border-radius:6px;background:#fef2f2;font-size:11px;color:#dc2626;cursor:pointer">Delete</button>
+        <button class="drawer-close" onclick="closeDrawer()">×</button>
+      </div>
+    </div>
+    <div class="drawer-body" id="con-drw-body"></div>
+  </div>
+</div>
+
+<script>
+const companies = [
+  { id:1, name:'Allsop LLP', type:'Auction House', tier:'Gold', city:'London', phone:'020 7494 4450', website:'allsop.co.uk', buyersPremium:"4% + VAT", adminFee:"£1,500 + VAT", createdDate:'2024-01-10' },
+  { id:2, name:'Savills Sheffield', type:'Estate Agent', tier:'Gold', city:'Sheffield', phone:'0114 263 6900', website:'savills.com', salesFee:"1.5% + VAT", createdDate:'2024-02-15' },
+  { id:3, name:'DM Hall', type:'Surveyor', tier:'Silver', city:'Edinburgh', phone:'0131 200 1200', website:'dmhall.co.uk', surveyTypes:"RICS Level 2, Full Structural", createdDate:'2024-03-01' },
+  { id:4, name:'Brindley Twist Tafft & James', type:'Solicitor', tier:'Bronze', city:'Coventry', phone:'024 7653 1532', website:'bttj.co.uk', conveyancingFee:"£1,200 + VAT", createdDate:'2024-04-12' },
+  { id:5, name:'RJ Property Services', type:'Builder', tier:'', city:'Sheffield', phone:'07890 123456', website:'', dayRate:"£280/day", createdDate:'2024-05-20' },
+  { id:6, name:'Brightstone Mortgages', type:'Mortgage Broker', tier:'', city:'London', phone:'020 3456 7890', website:'brightstonemortgages.co.uk', specialisms:"BTL, bridging", createdDate:'2024-06-01' },
+];
+const contacts = [
+  { id:101, name:'James Hartley', jobTitle:'Director', role:'Agent', email:'j.hartley@allsop.co.uk', phone:'07711 234567', companyId:1, origin:'Direct approach', lastActivity:'2025-06-27' },
+  { id:102, name:'Sarah Chen', jobTitle:'Senior Surveyor', role:'Surveyor', email:'s.chen@dmhall.co.uk', phone:'07822 345678', companyId:3, origin:'Referral', lastActivity:'2025-06-15' },
+  { id:103, name:'Mark Okonkwo', jobTitle:'Partner', role:'Solicitor', email:'m.okonkwo@bttj.co.uk', phone:'07933 456789', companyId:4, origin:'Auction', lastActivity:'2025-06-26' },
+  { id:104, name:'Emily Watson', jobTitle:'Lettings Manager', role:'Agent', email:'e.watson@savills.com', phone:'07644 567890', companyId:2, origin:'LinkedIn', lastActivity:'' },
+  { id:105, name:'Tom Briggs', jobTitle:'Site Manager', role:'Contractor', email:'tom@rjpropertyservices.co.uk', phone:'07555 678901', companyId:5, origin:'Recommendation', lastActivity:'2025-06-28' },
+];
+const globalNotes = [
+  { id:201, targetType:'company', targetId:1, type:'Call', text:'Spoke to James re Manchester catalogue — 120 lots expected in September.', author:'Ashley', date:'2025-06-27' },
+  { id:202, targetType:'company', targetId:1, type:'Meeting', text:'Site visit — Sheffield S3 lot. No structural issues flagged.', author:'Ashley', date:'2025-05-14' },
+  { id:203, targetType:'company', targetId:3, type:'Email', text:'Confirmed survey rate stays at £650 for properties under £300k.', author:'Ashley', date:'2025-06-15' },
+  { id:204, targetType:'Contact', targetId:101, type:'Call', text:'James confirmed S6 lot went under offer. Watching two similar Leeds lots.', author:'Ashley', date:'2025-06-27' },
+  { id:205, targetType:'Contact', targetId:103, type:'Meeting', text:'Reviewed title pack for 14 Burncross Rd — completion in 8 weeks.', author:'Ashley', date:'2025-06-26' },
+  { id:206, targetType:'Contact', targetId:105, type:'Call', text:'Tom quoted £28,500 all-in for kitchen/bathroom/rewire. 6 weeks.', author:'Ashley', date:'2025-06-28' },
+];
+const properties = [
+  { id:301, address:'14 Burncross Road, Sheffield', linkedCompanyIds:[1,4], status:'Due Diligence', guidePrice:85000, auctionDate:'2025-07-10' },
+  { id:302, address:'22 Abbeydale Road, Sheffield', linkedCompanyIds:[1], status:'Sourced', guidePrice:72000, auctionDate:'2025-07-10' },
+  { id:303, address:'7 Firth Park Ave, Sheffield', linkedCompanyIds:[2], status:'Acquired', guidePrice:110000 },
+  { id:304, address:'9 Nether Edge Rd, Sheffield', linkedCompanyIds:[2,5], status:'In Refurb', guidePrice:95000 },
+  { id:305, address:'45 Royal Mile, Edinburgh', linkedCompanyIds:[3], status:'Sourced', guidePrice:180000, auctionDate:'2025-08-20' },
+];
+const NOTE_COLORS = {Call:'#0ea5e9',Meeting:'#8b5cf6',Email:'#f59e0b',Review:'#7f77dd','Survey update':'#1d9e75',Legal:'#ba7517',Finance:'#378add',Task:'#8b5cf6',Flag:'#e24b4a'};
+const NOTE_BG     = {Call:'#e0f2fe',Meeting:'#ede9fe',Email:'#fefce8',Review:'#eeedfe','Survey update':'#e1f5ee',Legal:'#faeeda',Finance:'#e6f1fb',Task:'#ede9fe',Flag:'#fcebeb'};
+const NOTE_TEXT   = {Call:'#0c4a6e',Meeting:'#4c1d95',Email:'#713f12',Review:'#3c3489','Survey update':'#085041',Legal:'#633806',Finance:'#0c447c',Task:'#5b21b6',Flag:'#791f1f'};
+
+const typeStyle = t=>({'Auction House':'background:#dcfce7;color:#166534',Solicitor:'background:#eff6ff;color:#1d4ed8',Surveyor:'background:#fff7ed;color:#c2410c',Builder:'background:#f5f3ff;color:#6d28d9','Estate Agent':'background:#f0f9ff;color:#0369a1','Mortgage Broker':'background:#fdf4ff;color:#7c3aed','Letting Agent':'background:#fef9ee;color:#b45309'}[t]||'background:#f1f5f9;color:#475569');
+const tierStyle  = t=>({Gold:'tier-gold',Silver:'tier-silver',Bronze:'tier-bronze'}[t]||'');
+const roleStyle  = r=>({Surveyor:'background:#eff6ff;color:#1d4ed8',Agent:'background:#f0fdf4;color:#166534',Solicitor:'background:#fdf4ff;color:#7c3aed',Broker:'background:#fef3c7;color:#92400e',Contractor:'background:#fff7ed;color:#c2410c',Investor:'background:#ecfdf5;color:#065f46'}[r]||'background:#f8fafc;color:#475569');
+const initials   = n=>n.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase();
+const compProps  = c=>properties.filter(p=>(p.linkedCompanyIds||[]).includes(c.id)).length;
+const compCons   = c=>contacts.filter(x=>x.companyId===c.id).length;
+const compLN     = c=>globalNotes.filter(n=>n.targetType==='company'&&n.targetId===c.id).sort((a,b)=>b.date.localeCompare(a.date))[0]?.date||null;
+const conLN      = c=>globalNotes.filter(n=>n.targetType==='Contact'&&n.targetId===c.id).sort((a,b)=>b.date.localeCompare(a.date))[0]?.date||null;
+const isRecent   = d=>d&&(new Date()-new Date(d))<7*86400000;
+
+let tglCC='ALL',tglCP='ALL',tglConNotes='ALL';
+let activeCoId=null,activeCoTab='overview',activeConId=null;
+let coSortKey='newest',coSortDir=1,conSortKey='newest',conSortDir=1;
+
+function setTgl(g,v,el){ if(g==='cc')tglCC=v; else tglCP=v; el.closest('.tgl-row').querySelectorAll('.tgl').forEach(b=>b.classList.remove('on')); el.classList.add('on'); renderCo(); }
+function setConTgl(g,v,el){ tglConNotes=v; el.closest('.tgl-row').querySelectorAll('.tgl').forEach(b=>b.classList.remove('on')); el.classList.add('on'); renderCon(); }
+function clearCo(){ document.getElementById('cos').value=''; document.getElementById('cosort').value='newest'; document.getElementById('cotype').value='ALL'; document.getElementById('cocity').value='ALL'; tglCC='ALL';tglCP='ALL'; document.querySelectorAll('#view-co .tgl').forEach((b,i)=>b.classList.toggle('on',i%3===0)); renderCo(); }
+function clearCon(){ document.getElementById('cons').value=''; document.getElementById('consort').value='newest'; document.getElementById('conrole').value='ALL'; document.getElementById('conco').value='ALL'; tglConNotes='ALL'; document.querySelectorAll('#view-con .tgl').forEach((b,i)=>b.classList.toggle('on',i%3===0)); renderCon(); }
+
+function switchTab(t){
+  document.getElementById('view-co').style.display=t==='companies'?'flex':'none';
+  document.getElementById('view-con').style.display=t==='contacts'?'flex':'none';
+  document.getElementById('tab-co').classList.toggle('active',t==='companies');
+  document.getElementById('tab-con').classList.toggle('active',t==='contacts');
+  closeDrawer();
+  if(t==='contacts') renderCon();
+}
+
+function coSortCol(key){
+  if(coSortKey===key) coSortDir*=-1; else { coSortKey=key; coSortDir=1; }
+  document.querySelectorAll('th[id^="cth-"]').forEach(th=>{
+    th.classList.remove('sorted');
+    th.querySelector('.sort-arrow').textContent='↕';
+  });
+  const el=document.getElementById('cth-'+key);
+  if(el){ el.classList.add('sorted'); el.querySelector('.sort-arrow').textContent=coSortDir===1?'↑':'↓'; }
+  renderCo();
+}
+function conSortCol(key){
+  if(conSortKey===key) conSortDir*=-1; else { conSortKey=key; conSortDir=1; }
+  document.querySelectorAll('th[id^="cnth-"]').forEach(th=>{ th.classList.remove('sorted'); th.querySelector('.sort-arrow').textContent='↕'; });
+  const el=document.getElementById('cnth-'+key);
+  if(el){ el.classList.add('sorted'); el.querySelector('.sort-arrow').textContent=conSortDir===1?'↑':'↓'; }
+  renderCon();
+}
+
+function renderCo(){
+  const q=(document.getElementById('cos').value||'').toLowerCase();
+  const type=document.getElementById('cotype').value;
+  const city=document.getElementById('cocity').value;
+  const sort=document.getElementById('cosort').value;
+  let list=companies.filter(c=>{
+    if(type!=='ALL'&&c.type!==type) return false;
+    if(city!=='ALL'&&c.city!==city) return false;
+    if(tglCC==='yes'&&compCons(c)===0) return false;
+    if(tglCC==='no'&&compCons(c)>0) return false;
+    if(tglCP==='yes'&&compProps(c)===0) return false;
+    if(tglCP==='no'&&compProps(c)>0) return false;
+    if(q) return [c.name,c.city,c.type,c.phone].join(' ').toLowerCase().includes(q);
+    return true;
+  }).sort((a,b)=>{
+    let v=0;
+    if(coSortKey==='name') v=a.name.localeCompare(b.name);
+    else if(coSortKey==='type') v=a.type.localeCompare(b.type);
+    else if(coSortKey==='tier') v=(a.tier||'').localeCompare(b.tier||'');
+    else if(coSortKey==='city') v=(a.city||'').localeCompare(b.city||'');
+    else if(coSortKey==='contacts') v=compCons(a)-compCons(b);
+    else if(coSortKey==='properties') v=compProps(a)-compProps(b);
+    else if(sort==='az') return a.name.localeCompare(b.name);
+    else if(sort==='za') return b.name.localeCompare(a.name);
+    else if(sort==='contacts') return compCons(b)-compCons(a);
+    else if(sort==='properties') return compProps(b)-compProps(a);
+    else v=b.id-a.id;
+    return v*coSortDir;
+  });
+  document.getElementById('cometa').textContent=`${list.length} of ${companies.length} compan${companies.length!==1?'ies':'y'}`;
+  document.getElementById('co-tbody').innerHTML=list.map(c=>{
+    const cc=compCons(c),pc=compProps(c),ln=compLN(c);
+    return`<tr onclick="openCo(${c.id})" style="cursor:pointer;${c.id===activeCoId?'background:#f0fdf4;':''}" onmouseenter="if(${c.id}!==${activeCoId})this.style.background='#f8fafc'" onmouseleave="if(${c.id}!==${activeCoId})this.style.background=''">
+      <td>
+        <div style="display:flex;align-items:center;gap:9px">
+          <div style="width:30px;height:30px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex-shrink:0;${typeStyle(c.type)}">${c.name[0]}</div>
+          <span style="font-weight:600;color:#0f172a">${c.name}</span>
+        </div>
+      </td>
+      <td><span class="badge" style="${typeStyle(c.type)}">${c.type}</span></td>
+      <td>${c.tier?`<span class="badge ${tierStyle(c.tier)}">${c.tier}</span>`:'<span style="color:#94a3b8">—</span>'}</td>
+      <td style="color:#475569;font-size:11px">${c.city||'—'}</td>
+      <td>
+        <div class="stat-chips">
+          ${cc>0?`<span class="stat-chip" style="background:#f0fdf4;color:#065f46">${cc} contact${cc!==1?'s':''}</span>`:'<span style="color:#94a3b8;font-size:11px">0</span>'}
+        </div>
+      </td>
+      <td>
+        <div class="stat-chips">
+          ${pc>0?`<span class="stat-chip" style="background:#eff6ff;color:#1d4ed8">${pc} propert${pc!==1?'ies':'y'}</span>`:'<span style="color:#94a3b8;font-size:11px">0</span>'}
+        </div>
+      </td>
+      <td style="font-size:11px;color:#94a3b8">${ln||'—'}</td>
+      <td>
+        <button onclick="event.stopPropagation();openCo(${c.id})" style="padding:4px 10px;border:1px solid #e2e8f0;border-radius:5px;background:#f8fafc;font-size:11px;color:#475569;cursor:pointer;font-weight:500">Open →</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function openCo(id){
+  activeCoId=id; activeCoTab='overview';
+  renderCo();
+  const c=companies.find(x=>x.id===id);
+  const ts=typeStyle(c.type);
+  document.getElementById('co-drw-avatar').style=ts+';width:44px;height:44px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700';
+  document.getElementById('co-drw-avatar').textContent=c.name[0];
+  document.getElementById('co-drw-name').textContent=c.name;
+  document.getElementById('co-drw-sub').innerHTML=`<span class="badge" style="${ts}">${c.type}</span>${c.phone?`<span style="font-size:11px;color:#64748b">${c.phone}</span>`:''}${c.tier?`<span class="badge ${tierStyle(c.tier)}">${c.tier}</span>`:''}`;
+  renderCoDrawerTabs(c);
+  openDrawer('co');
+}
+function renderCoDrawerTabs(c){
+  const linked=contacts.filter(x=>x.companyId===c.id);
+  const lprops=properties.filter(p=>(p.linkedCompanyIds||[]).includes(c.id));
+  document.getElementById('co-drw-tabs').innerHTML=['overview','contacts','properties','costs'].map(t=>`<button class="dtab${t===activeCoTab?' active':''}" onclick="setCoTab('${t}')">${t.charAt(0).toUpperCase()+t.slice(1)}${t==='contacts'?` (${linked.length})`:t==='properties'?` (${lprops.length})`:''}</button>`).join('');
+  renderCoDrawerBody(c,linked,lprops);
+}
+function setCoTab(t){ activeCoTab=t; const c=companies.find(x=>x.id===activeCoId); if(c) renderCoDrawerTabs(c); }
+
+function renderCoDrawerBody(c,linked,lprops){
+  const notes=globalNotes.filter(n=>n.targetType==='company'&&n.targetId===c.id).sort((a,b)=>b.date.localeCompare(a.date));
+  let html='';
+  if(activeCoTab==='overview'){
+    html=`
+      <div class="dcard">
+        <div class="dcard-title">Company details</div>
+        ${df('Company name',c.name)} ${dsel('Type',c.type)} ${dsel('Relationship tier',c.tier||'',['','Gold','Silver','Bronze'],['— None —','Gold','Silver','Bronze'])}
+        ${df('Phone',c.phone)} ${df('Website',c.website||'')} ${df('City',c.city)}
+      </div>
+      <div class="dcard">
+        <div class="dcard-title">Activity notes</div>
+        <div class="act-add"><textarea rows="2" placeholder="Add a note…"></textarea>
+          <div class="act-row"><select><option>📞 Call</option><option>🤝 Meeting</option><option>✉️ Email</option><option>📋 Review</option><option>⚖️ Legal</option><option>💰 Finance</option></select><button>Add</button></div>
+        </div>
+        ${notes.map(n=>`<div class="note-card" style="background:${NOTE_BG[n.type]||'#f8fafc'};color:${NOTE_TEXT[n.type]||'#475569'};border-color:${NOTE_COLORS[n.type]||'#e2e8f0'}33">
+          <button class="note-del">×</button>
+          <span class="note-type-badge" style="background:${NOTE_COLORS[n.type]||'#94a3b8'}">${n.type}</span>
+          <div style="font-size:12px;line-height:1.5">${n.text}</div>
+          <div style="font-size:10px;margin-top:4px;opacity:.7">${n.author} · ${n.date}</div>
+        </div>`).join('')}
+        ${notes.length===0?'<p style="font-size:12px;color:#94a3b8">No notes yet</p>':''}
+      </div>
+    `;
+  } else if(activeCoTab==='contacts'){
+    html=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <span style="font-size:12px;font-weight:600;color:#475569">${linked.length} contact${linked.length!==1?'s':''}</span>
+      <button class="btn-primary" style="font-size:11px;padding:5px 12px">+ Add contact</button>
+    </div>
+    <div class="dcard" style="padding:0;overflow:hidden">
+      ${linked.length===0?'<p style="padding:24px;text-align:center;color:#94a3b8;font-size:13px">No contacts linked</p>':`<table><thead><tr><th>Name</th><th>Job Title</th><th>Email</th></tr></thead><tbody>${linked.map(x=>`<tr><td style="font-weight:600">${x.name}</td><td style="color:#64748b">${x.jobTitle}</td><td style="color:#475569;font-size:11px">${x.email}</td></tr>`).join('')}</tbody></table>`}
+    </div>`;
+  } else if(activeCoTab==='properties'){
+    html=`<div style="display:flex;gap:6px;margin-bottom:10px;align-items:center;flex-wrap:wrap">
+      <select class="f"><option>All statuses</option><option>Sourced</option><option>Due Diligence</option><option>Acquired</option><option>In Refurb</option></select>
+      <select class="f"><option>Newest first</option><option>Guide price ↓</option><option>Auction date</option></select>
+      <select class="f" style="flex:1;min-width:160px"><option value="">Link a property…</option><option>12 New St, Leeds</option><option>3 Oak Ave, Sheffield</option></select>
+    </div>
+    <div class="dcard" style="padding:0;overflow:hidden">
+      ${lprops.length===0?'<p style="padding:24px;text-align:center;color:#94a3b8;font-size:13px">No properties linked</p>':`<table><thead><tr><th>Address</th><th>Status</th><th style="text-align:right">Guide</th><th></th></tr></thead><tbody>${lprops.map(p=>`<tr><td style="font-weight:600;color:#0284c7;cursor:pointer;font-size:11px">${p.address}</td><td><span class="badge" style="${typeStyle('Auction House')}">${p.status}</span></td><td style="text-align:right;font-weight:600">£${(p.guidePrice||0).toLocaleString()}</td><td><button style="background:none;border:none;cursor:pointer;font-size:10px;color:#94a3b8">Unlink</button></td></tr>`).join('')}</tbody></table>`}
+    </div>`;
+  } else {
+    html=`<div class="dcard"><div class="dcard-title">Fees &amp; costs</div>${df("Buyer's premium",c.buyersPremium||'')}${df('Admin fee',c.adminFee||'')}${df('Legal fee',c.legalFee||'')}${df('Survey fee',c.surveyFee||'')}</div>`;
+  }
+  document.getElementById('co-drw-body').innerHTML=html;
+}
+
+function df(label,value,ph=''){return`<div class="dfield"><label>${label}</label><input type="text" value="${value||''}" placeholder="${ph||label}"></div>`;}
+function dsel(label,value,opts,labels){opts=opts||['Auction House','Builder','Estate Agent','Solicitor','Surveyor','Other'];labels=labels||opts;return`<div class="dfield"><label>${label}</label><select>${opts.map((o,i)=>`<option value="${o}"${o===value?' selected':''}>${labels[i]||o}</option>`).join('')}</select></div>`;}
+
+// Contacts table
+function renderCon(){
+  const q=(document.getElementById('cons').value||'').toLowerCase();
+  const role=document.getElementById('conrole').value;
+  const co=document.getElementById('conco').value;
+  const sort=document.getElementById('consort').value;
+  let list=contacts.filter(con=>{
+    if(role!=='ALL'&&con.role!==role) return false;
+    if(co!=='ALL'&&String(con.companyId||'')!==co) return false;
+    const hn=globalNotes.filter(n=>n.targetType==='Contact'&&n.targetId===con.id).length>0;
+    if(tglConNotes==='yes'&&!hn) return false;
+    if(tglConNotes==='no'&&hn) return false;
+    if(q){const hay=[con.name,con.email,con.phone,con.jobTitle,con.role,companies.find(c=>c.id===con.companyId)?.name||''].join(' ').toLowerCase();return hay.includes(q);}
+    return true;
+  }).sort((a,b)=>{
+    let v=0;
+    if(conSortKey==='name') v=a.name.localeCompare(b.name);
+    else if(conSortKey==='title') v=(a.jobTitle||'').localeCompare(b.jobTitle||'');
+    else if(conSortKey==='role') v=(a.role||'').localeCompare(b.role||'');
+    else if(conSortKey==='activity'){const ln=x=>globalNotes.filter(n=>n.targetType==='Contact'&&n.targetId===x.id).sort((p,q)=>q.date.localeCompare(p.date))[0]?.date||x.lastActivity||'';v=ln(b).localeCompare(ln(a));}
+    else{if(sort==='az')return a.name.localeCompare(b.name);if(sort==='za')return b.name.localeCompare(a.name);v=b.id-a.id;}
+    return v*conSortDir;
+  });
+  document.getElementById('conmeta').textContent=`${list.length} of ${contacts.length} contact${contacts.length!==1?'s':''}`;
+  document.getElementById('con-tbody').innerHTML=list.map(con=>{
+    const lco=companies.find(c=>c.id===con.companyId);
+    const ln=conLN(con)||con.lastActivity||'—';
+    const rec=isRecent(ln);
+    return`<tr onclick="openCon(${con.id})" style="cursor:pointer;${con.id===activeConId?'background:#f0fdf4':''}" onmouseenter="if(${con.id}!==${activeConId})this.style.background='#f8fafc'" onmouseleave="if(${con.id}!==${activeConId})this.style.background=''">
+      <td><div style="display:flex;align-items:center;gap:8px">
+        <div class="con-avatar-sm">${initials(con.name)}</div>
+        <span style="font-weight:600;color:#0f172a">${con.name}</span>
+      </div></td>
+      <td style="color:#475569">${con.jobTitle}</td>
+      <td>${lco?`<span class="badge" style="background:#f0fdf4;color:#065f46;font-size:11px">${lco.name}</span>`:'<span style="color:#94a3b8">—</span>'}</td>
+      <td>${con.role?`<span class="badge" style="${roleStyle(con.role)}">${con.role}</span>`:'—'}</td>
+      <td style="color:#475569;font-size:11px">${con.email}</td>
+      <td style="color:#047857;font-size:11px">${con.phone}</td>
+      <td style="font-size:11px;${rec?'color:#059669;font-weight:600':'color:#94a3b8'}">${ln}</td>
+      <td><button onclick="event.stopPropagation();openCon(${con.id})" style="padding:4px 10px;border:1px solid #e2e8f0;border-radius:5px;background:#f8fafc;font-size:11px;color:#475569;cursor:pointer">Open →</button></td>
+    </tr>`;
+  }).join('');
+}
+
+function openCon(id){
+  activeConId=id;
+  renderCon();
+  const con=contacts.find(x=>x.id===id);
+  const lco=companies.find(c=>c.id===con.companyId);
+  document.getElementById('con-drw-avatar').textContent=initials(con.name);
+  document.getElementById('con-drw-name').textContent=con.name;
+  document.getElementById('con-drw-sub').innerHTML=`<span style="font-size:11px;color:#64748b">${con.jobTitle}</span>${lco?`<span class="badge" style="background:#f0fdf4;color:#065f46">${lco.name}</span>`:''}${con.role?`<span class="badge" style="${roleStyle(con.role)}">${con.role}</span>`:''}`;
+  const conNotes=globalNotes.filter(n=>n.targetType==='Contact'&&n.targetId===con.id).sort((a,b)=>b.date.localeCompare(a.date));
+  document.getElementById('con-drw-body').innerHTML=`
+    <div class="dcard">
+      <div class="dcard-title">Contact details</div>
+      ${df('Full name',con.name)} ${df('Job title',con.jobTitle)} ${df('Email',con.email)} ${df('Mobile',con.phone)} ${df('LinkedIn',con.linkedin||'')}
+      <div class="dfield"><label>Company</label><select style="width:100%;padding:7px 9px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;background:#fff;outline:none"><option>None</option>${companies.map(c=>`<option${c.id===con.companyId?' selected':''}>${c.name}</option>`).join('')}</select></div>
+      <div class="dfield"><label>Role</label><select style="width:100%;padding:7px 9px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;background:#fff;outline:none"><option>None</option>${['Agent','Solicitor','Surveyor','Broker','Contractor','Investor','Other'].map(r=>`<option${r===con.role?' selected':''}>${r}</option>`).join('')}</select></div>
+      ${df('How we met',con.origin||'')}
+    </div>
+    <div class="dcard">
+      <div class="dcard-title">Activity notes</div>
+      <div class="act-add"><textarea rows="2" placeholder="Add a note…"></textarea>
+        <div class="act-row"><select><option>📞 Call</option><option>🤝 Meeting</option><option>✉️ Email</option><option>📋 Review</option><option>📝 Task</option><option>🚩 Flag</option></select><button>Add</button></div>
+      </div>
+      ${conNotes.map(n=>`<div class="note-card" style="background:${NOTE_BG[n.type]||'#f8fafc'};color:${NOTE_TEXT[n.type]||'#475569'};border-color:${NOTE_COLORS[n.type]||'#e2e8f0'}33">
+        <button class="note-del">×</button>
+        <span class="note-type-badge" style="background:${NOTE_COLORS[n.type]||'#94a3b8'}">${n.type}</span>
+        <div style="font-size:12px;line-height:1.5">${n.text}</div>
+        <div style="font-size:10px;margin-top:4px;opacity:.7">${n.author} · ${n.date}</div>
+      </div>`).join('')}
+      ${conNotes.length===0?'<p style="font-size:12px;color:#94a3b8">No notes yet</p>':''}
+    </div>
+  `;
+  openDrawer('con');
+}
+
+function openDrawer(which){
+  const isC=which==='co';
+  document.getElementById('co-drawer').classList.toggle('open',isC);
+  document.getElementById('con-drawer').classList.toggle('open',!isC);
+  document.getElementById('overlay').classList.add('open');
+}
+function closeDrawer(){
+  document.getElementById('co-drawer').classList.remove('open');
+  document.getElementById('con-drawer').classList.remove('open');
+  document.getElementById('overlay').classList.remove('open');
+  activeCoId=null; activeConId=null;
+  renderCo(); if(document.getElementById('view-con').style.display!=='none') renderCon();
+}
+
+// Init
+renderCo();
+document.getElementById('view-con').style.display='none';
+</script>
+</body>
+</html>

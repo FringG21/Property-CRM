@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Refurb Quote Builder — Mockup B: Kanban / Board View</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f1f5f9; color: #0f172a; }
+  .shell { display: flex; height: 100vh; overflow: hidden; }
+  .sidebar { width: 64px; background: #0f172a; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; padding: 16px 0; gap: 4px; }
+  .sidebar-icon { width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; border-radius: 10px; font-size: 18px; cursor: pointer; color: #64748b; }
+  .sidebar-icon:hover { background: #1e293b; color: #fff; }
+  .sidebar-icon.active { background: #b45309; color: #fff; }
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .topbar { padding: 0 24px; background: #fff; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; gap: 0; height: 56px; }
+  .topbar h2 { font-size: 15px; font-weight: 700; flex: 1; }
+  .view-tabs { display: flex; height: 100%; }
+  .view-tab { padding: 0 18px; display: flex; align-items: center; font-size: 12px; font-weight: 600; color: #64748b; border-bottom: 2px solid transparent; cursor: pointer; gap: 6px; white-space: nowrap; }
+  .view-tab.active { color: #b45309; border-bottom-color: #b45309; }
+  .topbar-actions { display: flex; gap: 8px; align-items: center; margin-left: 16px; }
+  .btn-primary { padding: 8px 16px; background: #b45309; color: #fff; border: none; border-radius: 8px; font-size: 13px; font-weight: 700; cursor: pointer; }
+  .btn-secondary { padding: 8px 14px; background: #fff; color: #475569; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  .content { flex: 1; overflow: hidden; }
+
+  /* KANBAN */
+  .kanban-wrap { display: flex; height: 100%; overflow-x: auto; gap: 12px; padding: 20px 24px; align-items: flex-start; }
+  .kanban-col { flex-shrink: 0; width: 230px; background: #e8edf2; border-radius: 12px; display: flex; flex-direction: column; max-height: 100%; }
+  .kanban-col-head { padding: 12px 14px; display: flex; align-items: center; justify-content: space-between; }
+  .kanban-col-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #64748b; }
+  .kanban-count { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 8px; background: #fff; color: #475569; }
+  .kanban-cards { padding: 0 10px 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+  .kanban-card { background: #fff; border-radius: 10px; padding: 12px 14px; box-shadow: 0 1px 3px rgba(0,0,0,.06); cursor: pointer; border-left: 3px solid transparent; }
+  .kanban-card:hover { box-shadow: 0 3px 10px rgba(0,0,0,.12); }
+  .kc-trade { font-size: 12px; font-weight: 700; margin-bottom: 2px; }
+  .kc-prop { font-size: 11px; color: #64748b; margin-bottom: 6px; }
+  .kc-amount { font-size: 14px; font-weight: 700; color: #b45309; margin-bottom: 6px; }
+  .kc-footer { display: flex; align-items: center; justify-content: space-between; }
+  .kc-company { font-size: 10px; color: #94a3b8; }
+  .kc-stars { font-size: 10px; color: #eab308; }
+  .badge { display: inline-block; padding: 2px 7px; border-radius: 8px; font-size: 9px; font-weight: 700; }
+  .badge-expiry { background: #fee2e2; color: #991b1b; }
+  .badge-due { background: #fef3c7; color: #92400e; }
+
+  /* WIZARD (mixer view) */
+  .wizard-wrap { height: 100%; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; align-items: center; gap: 20px; }
+  .wizard-steps { display: flex; gap: 0; align-items: center; }
+  .wstep { display: flex; align-items: center; gap: 8px; }
+  .wstep-num { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; background: #e2e8f0; color: #64748b; }
+  .wstep-num.done { background: #b45309; color: #fff; }
+  .wstep-num.active { background: #0f172a; color: #fff; }
+  .wstep-label { font-size: 12px; font-weight: 600; color: #64748b; }
+  .wstep-label.active { color: #0f172a; }
+  .wstep-sep { width: 40px; height: 2px; background: #e2e8f0; margin: 0 4px; }
+  .wstep-sep.done { background: #b45309; }
+  .wizard-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; width: 100%; max-width: 680px; padding: 28px; }
+  .wizard-title { font-size: 16px; font-weight: 700; margin-bottom: 6px; }
+  .wizard-sub { font-size: 13px; color: #64748b; margin-bottom: 24px; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .field-label { font-size: 11px; font-weight: 600; color: #64748b; display: block; margin-bottom: 5px; }
+  .field-input { width: 100%; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 13px; background: #fff; }
+  .field-select { width: 100%; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 13px; background: #fff; }
+  .wizard-footer { display: flex; justify-content: space-between; margin-top: 24px; }
+  .btn-outline { padding: 10px 20px; background: #fff; color: #475569; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; }
+
+  /* TIMELINE / GANTT */
+  .gantt-wrap { height: 100%; overflow: auto; padding: 20px 24px; }
+  .gantt-header { display: flex; margin-bottom: 8px; }
+  .gantt-label-col { width: 200px; flex-shrink: 0; font-size: 10px; font-weight: 700; color: #94a3b8; text-transform: uppercase; letter-spacing: .05em; padding: 4px 0; }
+  .gantt-weeks { flex: 1; display: flex; }
+  .gantt-week { flex: 1; text-align: center; font-size: 10px; color: #94a3b8; font-weight: 600; border-left: 1px solid #f1f5f9; }
+  .gantt-row { display: flex; align-items: center; margin-bottom: 6px; }
+  .gantt-trade { width: 200px; flex-shrink: 0; font-size: 12px; font-weight: 600; padding-right: 12px; }
+  .gantt-track { flex: 1; height: 28px; background: #f8fafc; border-radius: 4px; position: relative; border: 1px solid #f1f5f9; }
+  .gantt-bar { position: absolute; top: 4px; height: 20px; border-radius: 4px; display: flex; align-items: center; padding: 0 8px; font-size: 10px; font-weight: 700; color: #fff; white-space: nowrap; overflow: hidden; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <!-- Slim sidebar -->
+  <nav class="sidebar">
+    <div class="sidebar-icon" title="Dashboard">🏠</div>
+    <div class="sidebar-icon" title="Pipeline">📈</div>
+    <div class="sidebar-icon" title="Companies">🏢</div>
+    <div class="sidebar-icon" title="Contacts">👤</div>
+    <div class="sidebar-icon active" title="Refurb Quotes">🔨</div>
+    <div class="sidebar-icon" title="Tasks">📋</div>
+    <div class="sidebar-icon" style="margin-top:auto" title="Settings">⚙️</div>
+  </nav>
+
+  <div class="main">
+    <div class="topbar">
+      <h2 style="padding-right:24px;border-right:1px solid #f1f5f9">Refurb Quotes</h2>
+      <div class="view-tabs">
+        <div class="view-tab active" onclick="showView('kanban')">📊 Board</div>
+        <div class="view-tab" onclick="showView('quotes')">📋 All Quotes</div>
+        <div class="view-tab" onclick="showView('wizard')">🧮 Quote Mixer</div>
+        <div class="view-tab" onclick="showView('directory')">🏗️ Directory</div>
+        <div class="view-tab" onclick="showView('gantt')">📅 Timeline</div>
+      </div>
+      <div class="topbar-actions">
+        <button class="btn-secondary">Load sample data</button>
+        <button class="btn-primary">+ Add Quote</button>
+      </div>
+    </div>
+
+    <!-- KANBAN view -->
+    <div class="content" id="view-kanban">
+      <div class="kanban-wrap">
+        <!-- Needed -->
+        <div class="kanban-col">
+          <div class="kanban-col-head"><span class="kanban-col-title">Needed</span><span class="kanban-count">2</span></div>
+          <div class="kanban-cards">
+            <div class="kanban-card" style="border-left-color:#d97706">
+              <div class="kc-trade">🪵 Flooring</div>
+              <div class="kc-prop">23 Birchwood Ave</div>
+              <div class="kc-amount">—</div>
+              <div class="kc-footer"><span class="kc-company">No quotes</span><span class="badge badge-due">needed</span></div>
+            </div>
+            <div class="kanban-card" style="border-left-color:#d97706">
+              <div class="kc-trade">🏗️ Scaffolding</div>
+              <div class="kc-prop">7 Maple St</div>
+              <div class="kc-amount">—</div>
+              <div class="kc-footer"><span class="kc-company">No quotes</span><span class="badge badge-due">needed</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Received -->
+        <div class="kanban-col">
+          <div class="kanban-col-head"><span class="kanban-col-title">Received</span><span class="kanban-count">3</span></div>
+          <div class="kanban-cards">
+            <div class="kanban-card" style="border-left-color:#7c3aed">
+              <div class="kc-trade">🔌 Electrician</div>
+              <div class="kc-prop">23 Birchwood Ave</div>
+              <div class="kc-amount">£4,800</div>
+              <div class="kc-footer"><span class="kc-company">Spark Electric Ltd</span><span class="kc-stars">★★★★★</span></div>
+              <div style="margin-top:6px"><span class="badge badge-expiry">⚠ 3 days left</span></div>
+            </div>
+            <div class="kanban-card" style="border-left-color:#7c3aed">
+              <div class="kc-trade">🖌️ Painter/Decorator</div>
+              <div class="kc-prop">23 Birchwood Ave</div>
+              <div class="kc-amount">£2,800</div>
+              <div class="kc-footer"><span class="kc-company">Paul Whitmore</span><span class="kc-stars">★★★★★</span></div>
+            </div>
+            <div class="kanban-card" style="border-left-color:#7c3aed">
+              <div class="kc-trade">🔌 Electrician</div>
+              <div class="kc-prop">23 Birchwood Ave</div>
+              <div class="kc-amount">£5,200</div>
+              <div class="kc-footer"><span class="kc-company">JT Electrical</span><span class="kc-stars">★★★★☆</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Reviewing -->
+        <div class="kanban-col">
+          <div class="kanban-col-head"><span class="kanban-col-title">Reviewing</span><span class="kanban-count">1</span></div>
+          <div class="kanban-cards">
+            <div class="kanban-card" style="border-left-color:#c2410c">
+              <div class="kc-trade">🪣 Plasterer</div>
+              <div class="kc-prop">23 Birchwood Ave</div>
+              <div class="kc-amount">£3,400</div>
+              <div class="kc-footer"><span class="kc-company">D. Parsons</span><span class="kc-stars">★★★★☆</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Accepted -->
+        <div class="kanban-col">
+          <div class="kanban-col-head"><span class="kanban-col-title">Accepted</span><span class="kanban-count">2</span></div>
+          <div class="kanban-cards">
+            <div class="kanban-card" style="border-left-color:#166534">
+              <div class="kc-trade">💧 Damp Specialist</div>
+              <div class="kc-prop">23 Birchwood Ave</div>
+              <div class="kc-amount">£2,100</div>
+              <div class="kc-footer"><span class="kc-company">Damp Solutions Yorks</span><span class="kc-stars">★★★★★</span></div>
+            </div>
+            <div class="kanban-card" style="border-left-color:#166534">
+              <div class="kc-trade">🔧 Plumber/Heating</div>
+              <div class="kc-prop">23 Birchwood Ave</div>
+              <div class="kc-amount">£6,200</div>
+              <div class="kc-footer"><span class="kc-company">Sheffield Plumbing Co</span><span class="kc-stars">★★★★☆</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Booked -->
+        <div class="kanban-col">
+          <div class="kanban-col-head"><span class="kanban-col-title">Booked</span><span class="kanban-count">1</span></div>
+          <div class="kanban-cards">
+            <div class="kanban-card" style="border-left-color:#065f46">
+              <div class="kc-trade">💧 Damp Specialist</div>
+              <div class="kc-prop">7 Maple St</div>
+              <div class="kc-amount">£1,800</div>
+              <div class="kc-footer"><span class="kc-company">Damp Solutions Yorks</span><span class="kc-stars">★★★★★</span></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Complete -->
+        <div class="kanban-col">
+          <div class="kanban-col-head"><span class="kanban-col-title">Complete</span><span class="kanban-count">0</span></div>
+          <div class="kanban-cards">
+            <div style="text-align:center;padding:20px;color:#94a3b8;font-size:12px">No completed quotes yet</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ALL QUOTES (hidden) -->
+    <div class="content" id="view-quotes" style="display:none">
+      <div style="padding:24px;color:#94a3b8;font-size:13px">All Quotes table — same as Mockup A design, shown in kanban mode here</div>
+    </div>
+
+    <!-- WIZARD / MIXER (hidden) -->
+    <div class="content" id="view-wizard" style="display:none;overflow-y:auto">
+      <div class="wizard-wrap">
+        <!-- Step indicators -->
+        <div class="wizard-steps">
+          <div class="wstep"><div class="wstep-num done">✓</div><span class="wstep-label">Property</span></div>
+          <div class="wstep-sep done"></div>
+          <div class="wstep"><div class="wstep-num active">2</div><span class="wstep-label active">Select Quotes</span></div>
+          <div class="wstep-sep"></div>
+          <div class="wstep"><div class="wstep-num">3</div><span class="wstep-label">Contingency</span></div>
+          <div class="wstep-sep"></div>
+          <div class="wstep"><div class="wstep-num">4</div><span class="wstep-label">Summary</span></div>
+        </div>
+
+        <div class="wizard-card">
+          <div class="wizard-title">Step 2 — Select best quote per trade</div>
+          <div class="wizard-sub">23 Birchwood Ave, Sheffield S6 2YT · Choose one quote per trade category</div>
+
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <!-- Electrician -->
+            <div style="border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px">
+              <div style="font-size:12px;font-weight:700;margin-bottom:10px;color:#475569">🔌 Electrician</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                <label style="border:2px solid #b45309;border-radius:8px;padding:10px 12px;cursor:pointer;background:#fffbeb">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><input type="radio" name="elec" checked /> <span style="font-weight:700;font-size:12px">Spark Electric Ltd</span></div>
+                  <div style="font-size:13px;font-weight:700;color:#b45309">£4,800</div>
+                  <div style="font-size:10px;color:#64748b">Fixed · SPARK-001</div>
+                  <div style="color:#eab308;font-size:11px;margin-top:2px">★★★★★</div>
+                </label>
+                <label style="border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;cursor:pointer">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><input type="radio" name="elec" /> <span style="font-weight:700;font-size:12px">JT Electrical</span></div>
+                  <div style="font-size:13px;font-weight:700;color:#0f172a">£5,200</div>
+                  <div style="font-size:10px;color:#64748b">Fixed · VOLT-02</div>
+                  <div style="color:#eab308;font-size:11px;margin-top:2px">★★★★☆</div>
+                </label>
+              </div>
+            </div>
+
+            <!-- Plumber -->
+            <div style="border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px">
+              <div style="font-size:12px;font-weight:700;margin-bottom:10px;color:#475569">🔧 Plumber/Heating</div>
+              <div style="display:grid;grid-template-columns:1fr;gap:8px">
+                <label style="border:2px solid #b45309;border-radius:8px;padding:10px 12px;cursor:pointer;background:#fffbeb">
+                  <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px"><input type="radio" name="plumb" checked /> <span style="font-weight:700;font-size:12px">Sheffield Plumbing Co</span></div>
+                  <div style="font-size:13px;font-weight:700;color:#b45309">£6,200</div>
+                  <div style="font-size:10px;color:#64748b">Fixed · SPC-2026-14</div>
+                  <div style="color:#eab308;font-size:11px;margin-top:2px">★★★★☆</div>
+                </label>
+              </div>
+            </div>
+
+            <!-- Flooring -->
+            <div style="border:2px dashed #e2e8f0;border-radius:10px;padding:14px 16px;background:#fafafa">
+              <div style="font-size:12px;font-weight:700;margin-bottom:6px;color:#94a3b8">🪵 Flooring — no quotes yet</div>
+              <a href="#" style="font-size:12px;color:#b45309;font-weight:600">+ Add quote for this trade</a>
+            </div>
+          </div>
+
+          <div class="wizard-footer">
+            <button class="btn-outline">← Back</button>
+            <button class="btn-primary">Continue →</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DIRECTORY (hidden stub) -->
+    <div class="content" id="view-directory" style="display:none">
+      <div style="padding:24px;color:#94a3b8;font-size:13px">Trade Directory — card grid</div>
+    </div>
+
+    <!-- GANTT TIMELINE (hidden) -->
+    <div class="content" id="view-gantt" style="display:none;overflow:auto">
+      <div class="gantt-wrap">
+        <div style="margin-bottom:16px;display:flex;align-items:center;gap:12px">
+          <label style="font-size:11px;font-weight:600;color:#64748b">Property</label>
+          <select style="padding:8px 12px;border:1px solid #e2e8f0;border-radius:7px;font-size:13px;background:#fff">
+            <option>23 Birchwood Ave, Sheffield S6 2YT</option>
+          </select>
+        </div>
+
+        <!-- Gantt chart -->
+        <div style="background:#fff;border:1px solid #e2e8f0;border-radius:12px;padding:20px;overflow-x:auto">
+          <div class="gantt-header">
+            <div class="gantt-label-col">Trade</div>
+            <div class="gantt-weeks">
+              <div class="gantt-week">W1</div><div class="gantt-week">W2</div><div class="gantt-week">W3</div>
+              <div class="gantt-week">W4</div><div class="gantt-week">W5</div><div class="gantt-week">W6</div>
+              <div class="gantt-week">W7</div><div class="gantt-week">W8</div><div class="gantt-week">W9</div>
+              <div class="gantt-week">W10</div>
+            </div>
+          </div>
+          <div class="gantt-row">
+            <div class="gantt-trade">💧 Damp Specialist</div>
+            <div class="gantt-track">
+              <div class="gantt-bar" style="left:0%;width:10%;background:#b45309">Damp Sols</div>
+            </div>
+          </div>
+          <div class="gantt-row">
+            <div class="gantt-trade">🔌 Electrician</div>
+            <div class="gantt-track">
+              <div class="gantt-bar" style="left:10%;width:15%;background:#7c3aed">Spark Elec</div>
+            </div>
+          </div>
+          <div class="gantt-row">
+            <div class="gantt-trade">🔧 Plumber/Heating</div>
+            <div class="gantt-track">
+              <div class="gantt-bar" style="left:10%;width:10%;background:#0891b2">Shef Plumb</div>
+            </div>
+          </div>
+          <div class="gantt-row">
+            <div class="gantt-trade">🪣 Plasterer</div>
+            <div class="gantt-track">
+              <div class="gantt-bar" style="left:25%;width:15%;background:#059669">D. Parsons</div>
+            </div>
+          </div>
+          <div class="gantt-row">
+            <div class="gantt-trade">🖌️ Painter/Decorator</div>
+            <div class="gantt-track">
+              <div class="gantt-bar" style="left:40%;width:20%;background:#d97706">P. Whitmore</div>
+            </div>
+          </div>
+          <div class="gantt-row">
+            <div class="gantt-trade">🪵 Flooring</div>
+            <div class="gantt-track">
+              <div class="gantt-bar" style="left:60%;width:15%;background:#94a3b8;color:#fff">TBC</div>
+            </div>
+          </div>
+        </div>
+        <div style="margin-top:10px;font-size:11px;color:#94a3b8">Durations based on estimatedDurationWeeks from each accepted quote. Sequenced by trade order.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function showView(id) {
+  document.querySelectorAll('[id^="view-"]').forEach(el => el.style.display = 'none');
+  document.querySelectorAll('.view-tab').forEach(b => b.classList.remove('active'));
+  document.getElementById('view-' + id).style.display = 'block';
+  event.target.classList.add('active');
+}
+</script>
+</body>
+</html>

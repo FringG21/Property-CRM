@@ -11,6 +11,7 @@
 		"deploy": "npm run build && wrangler deploy"
 	},
 	"dependencies": {
+		"@cloudflare/puppeteer": "^1.1.0",
 		"@tailwindcss/postcss": "^4.3.1",
 		"leaflet": "^1.9.4",
 		"lucide-react": "^1.21.0",

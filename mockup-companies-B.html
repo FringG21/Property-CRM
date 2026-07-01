@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Companies & Contacts — Mockup B: Card Grid</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f1f5f9; color: #0f172a; height: 100vh; display: flex; overflow: hidden; }
+  .sidebar-nav { width: 200px; background: #0f172a; flex-shrink: 0; display: flex; flex-direction: column; }
+  .sidebar-logo { padding: 18px 16px; border-bottom: 1px solid #1e293b; }
+  .sidebar-logo h1 { font-size: 13px; font-weight: 700; color: #fff; }
+  .sidebar-logo p { font-size: 10px; color: #64748b; margin-top: 2px; }
+  .nav-item { display: flex; align-items: center; gap: 9px; padding: 9px 16px; font-size: 12px; font-weight: 500; color: #94a3b8; cursor: pointer; border: none; background: none; width: 100%; text-align: left; }
+  .nav-item.active { color: #fff; background: #1e293b; border-left: 3px solid #059669; padding-left: 13px; }
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  /* Top bar */
+  .topbar { padding: 0 24px; background: #fff; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; flex-shrink: 0; }
+  .tab-btn { padding: 14px 18px; font-size: 13px; font-weight: 600; background: none; border: none; cursor: pointer; color: #64748b; border-bottom: 2px solid transparent; }
+  .tab-btn.active { color: #059669; border-bottom-color: #059669; }
+  /* Filter bar */
+  .filter-bar { padding: 10px 20px; background: #fff; border-bottom: 1px solid #e2e8f0; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-shrink: 0; }
+  .filter-bar input { padding: 7px 10px 7px 32px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 12px; background: #f8fafc; outline: none; width: 200px; }
+  .search-wrap { position: relative; }
+  .search-wrap svg { position: absolute; top: 8px; left: 9px; color: #94a3b8; width: 13px; height: 13px; pointer-events: none; }
+  .filter-bar select { padding: 6px 9px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 11px; background: #fff; outline: none; }
+  .tgl-group { display: flex; gap: 3px; align-items: center; }
+  .tgl-group label { font-size: 10px; font-weight: 600; color: #64748b; margin-right: 2px; }
+  .tgl { padding: 5px 9px; border-radius: 4px; font-size: 10px; font-weight: 600; cursor: pointer; border: 1px solid #e2e8f0; background: #f1f5f9; color: #64748b; }
+  .tgl.on { background: #0f172a; color: #fff; border-color: #0f172a; }
+  .filter-meta { font-size: 10px; color: #94a3b8; margin-left: auto; }
+  .clear-btn { font-size: 10px; color: #059669; background: none; border: none; cursor: pointer; font-weight: 600; }
+  .btn-primary { padding: 7px 14px; background: #059669; color: #fff; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; }
+  /* Content */
+  .content { flex: 1; overflow-y: auto; padding: 20px; }
+  /* Cards grid */
+  .cards-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .company-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; cursor: pointer; transition: box-shadow .15s, border-color .15s; position: relative; }
+  .company-card:hover { border-color: #cbd5e1; box-shadow: 0 2px 8px rgba(0,0,0,.06); }
+  .company-card.active { border-color: #059669; box-shadow: 0 0 0 2px #059669, 0 2px 8px rgba(5,150,105,.12); }
+  .card-avatar { width: 44px; height: 44px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 18px; font-weight: 700; flex-shrink: 0; margin-bottom: 10px; }
+  .card-name { font-size: 14px; font-weight: 700; color: #0f172a; margin-bottom: 4px; }
+  .card-badges { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 8px; }
+  .badge { display: inline-block; font-size: 9px; padding: 2px 6px; border-radius: 4px; font-weight: 700; }
+  .badge-tier-gold   { background: #fef3c7; color: #92400e; }
+  .badge-tier-silver { background: #f1f5f9; color: #475569; }
+  .badge-tier-bronze { background: #fff7ed; color: #b45309; }
+  .card-stats { display: flex; gap: 12px; padding-top: 10px; border-top: 1px solid #f1f5f9; }
+  .stat-item { text-align: center; }
+  .stat-val { font-size: 18px; font-weight: 700; color: #0f172a; }
+  .stat-label { font-size: 9px; color: #94a3b8; font-weight: 600; text-transform: uppercase; margin-top: 1px; }
+  .card-footer { margin-top: 8px; font-size: 10px; color: #94a3b8; }
+  .card-new-btn { border: 2px dashed #e2e8f0; border-radius: 12px; padding: 28px 16px; cursor: pointer; text-align: center; color: #94a3b8; font-size: 13px; background: transparent; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .card-new-btn:hover { border-color: #059669; color: #059669; }
+  /* Accordion detail */
+  .accordion-detail { background: #fff; border: 1px solid #059669; border-radius: 12px; padding: 0; overflow: hidden; margin-bottom: 14px; }
+  .acc-head { padding: 16px 20px; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center; }
+  .acc-title { font-size: 16px; font-weight: 700; color: #0f172a; }
+  .acc-sub { font-size: 11px; color: #64748b; margin-top: 2px; display: flex; gap: 8px; align-items: center; }
+  .acc-close { background: none; border: none; font-size: 20px; color: #94a3b8; cursor: pointer; line-height: 1; padding: 0; }
+  .acc-tabs { display: flex; gap: 0; padding: 0 20px; border-bottom: 1px solid #e2e8f0; background: #fafafa; }
+  .atab { padding: 10px 16px 10px 0; font-size: 12px; font-weight: 500; background: none; border: none; cursor: pointer; color: #94a3b8; border-bottom: 2px solid transparent; }
+  .atab.active { color: #059669; border-bottom-color: #059669; }
+  .acc-body { padding: 20px; background: #f8fafc; }
+  .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .field { margin-bottom: 12px; }
+  .field label { display: block; font-size: 10px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
+  .field input, .field select, .field textarea { width: 100%; padding: 7px 9px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 12px; background: #fff; color: #0f172a; outline: none; font-family: inherit; }
+  .card-inner { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  .card-inner-title { font-size: 10px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 12px; }
+  .note-card { padding: 9px 10px; border-radius: 7px; border: 1px solid; margin-bottom: 6px; position: relative; }
+  .note-type-badge { font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 4px; color: #fff; display: inline-block; margin-bottom: 4px; }
+  .note-del { position: absolute; top: 7px; right: 8px; background: none; border: none; font-size: 13px; cursor: pointer; opacity: .4; line-height: 1; }
+  .note-del:hover { opacity: 1; }
+  .act-add textarea { width: 100%; padding: 8px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 12px; resize: none; font-family: inherit; outline: none; margin-bottom: 6px; }
+  .act-add-row { display: flex; gap: 6px; }
+  .act-add-row select { flex: 1; padding: 5px 8px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 11px; background: #fff; outline: none; }
+  .act-add-row button { padding: 5px 12px; background: #0f172a; color: #fff; border: none; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; }
+  /* Contacts tab */
+  .con-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin-top: 0; }
+  .con-card { background: #fff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px; cursor: pointer; }
+  .con-card:hover { border-color: #059669; }
+  .con-avatar { width: 40px; height: 40px; border-radius: 50%; background: #e0f2fe; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: #0369a1; margin: 0 auto 8px; }
+  .con-card-name { font-size: 13px; font-weight: 600; text-align: center; }
+  .con-card-meta { font-size: 11px; color: #64748b; text-align: center; margin-top: 2px; }
+  /* Contacts view (full) */
+  .contacts-view-wrap { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+  .contacts-toolbar { padding: 10px 14px; background: #fff; border-bottom: 1px solid #e2e8f0; display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
+  .contacts-body { flex: 1; display: flex; overflow: hidden; }
+  .contacts-table-scroll { flex: 1; overflow-y: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { padding: 8px 12px; text-align: left; font-weight: 600; color: #64748b; font-size: 10px; text-transform: uppercase; background: #f8fafc; border-bottom: 1px solid #e2e8f0; position: sticky; top: 0; z-index: 1; }
+  td { padding: 9px 12px; border-bottom: 1px solid #f1f5f9; }
+  .con-right { width: 300px; border-left: 1px solid #e2e8f0; display: flex; flex-direction: column; flex-shrink: 0; }
+  .con-right-head { padding: 12px 14px; border-bottom: 1px solid #e2e8f0; display: flex; justify-content: space-between; align-items: center; }
+  .con-right-body { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .section-label { font-size: 10px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="sidebar-nav">
+  <div class="sidebar-logo"><h1>Property CRM</h1><p>AA Investment Partners</p></div>
+  <button class="nav-item">🏠 Dashboard</button>
+  <button class="nav-item">🏗️ Pipeline</button>
+  <button class="nav-item active">🏢 Companies &amp; Contacts</button>
+  <button class="nav-item">📋 Tasks</button>
+  <button class="nav-item">🔧 Refurb Quotes</button>
+</div>
+<div class="main">
+  <div class="topbar">
+    <button class="tab-btn active" id="tab-co" onclick="switchTab('companies')">Companies</button>
+    <button class="tab-btn" id="tab-con" onclick="switchTab('contacts')">Contacts</button>
+  </div>
+
+  <!-- COMPANIES VIEW -->
+  <div id="view-companies" style="display:flex;flex-direction:column;flex:1;overflow:hidden">
+    <div class="filter-bar">
+      <div class="search-wrap">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input type="text" placeholder="Search companies…" oninput="render()" id="cs">
+      </div>
+      <select onchange="render()" id="csort">
+        <option value="newest">Newest first</option><option value="az">A → Z</option><option value="contacts">Most contacts</option><option value="properties">Most properties</option>
+      </select>
+      <select onchange="render()" id="ctype">
+        <option value="ALL">All types</option>
+        <option>Auction House</option><option>Builder</option><option>Estate Agent</option><option>Letting Agent</option>
+        <option>Mortgage Broker</option><option>Solicitor</option><option>Surveyor</option><option>Trade / Contractor</option><option>Other</option>
+      </select>
+      <select onchange="render()" id="ccity">
+        <option value="ALL">All cities</option><option>London</option><option>Sheffield</option><option>Edinburgh</option><option>Coventry</option>
+      </select>
+      <div class="tgl-group">
+        <label>Contacts</label>
+        <button class="tgl on" onclick="setTgl('cc','ALL',this)">All</button>
+        <button class="tgl" onclick="setTgl('cc','yes',this)">Yes</button>
+        <button class="tgl" onclick="setTgl('cc','no',this)">No</button>
+      </div>
+      <div class="tgl-group">
+        <label>Properties</label>
+        <button class="tgl on" onclick="setTgl('cp','ALL',this)">All</button>
+        <button class="tgl" onclick="setTgl('cp','yes',this)">Yes</button>
+        <button class="tgl" onclick="setTgl('cp','no',this)">No</button>
+      </div>
+      <span class="filter-meta" id="cmeta">6 of 6 companies</span>
+      <button class="clear-btn" onclick="clearCo()">Clear filters</button>
+      <button class="btn-primary" onclick="">+ New company</button>
+    </div>
+    <div class="content" id="co-content"></div>
+  </div>
+
+  <!-- CONTACTS VIEW -->
+  <div id="view-contacts" class="hidden contacts-view-wrap">
+    <div class="contacts-toolbar">
+      <div class="search-wrap">
+        <svg fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input type="text" placeholder="Search contacts…" oninput="renderContacts()" id="consearch" style="padding:7px 7px 7px 26px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;background:#f8fafc;outline:none;width:180px">
+      </div>
+      <select id="consort" onchange="renderContacts()" style="padding:6px 9px;border:1px solid #e2e8f0;border-radius:6px;font-size:11px;background:#fff;outline:none">
+        <option value="newest">Newest added</option><option value="az">A → Z</option><option value="activity">Last activity</option>
+      </select>
+      <select id="conrole" onchange="renderContacts()" style="padding:6px 9px;border:1px solid #e2e8f0;border-radius:6px;font-size:11px;background:#fff;outline:none">
+        <option value="ALL">All roles</option><option>Agent</option><option>Solicitor</option><option>Surveyor</option><option>Broker</option><option>Contractor</option>
+      </select>
+      <select id="conco" onchange="renderContacts()" style="padding:6px 9px;border:1px solid #e2e8f0;border-radius:6px;font-size:11px;background:#fff;outline:none">
+        <option value="ALL">All companies</option>
+        <option value="1">Allsop LLP</option><option value="2">Savills Sheffield</option><option value="3">DM Hall</option><option value="4">Brindley Twist</option><option value="5">RJ Property Services</option>
+      </select>
+      <div class="tgl-group">
+        <label style="font-size:10px;font-weight:600;color:#64748b;margin-right:2px">Notes</label>
+        <button class="tgl on" onclick="setConTgl('notes','ALL',this)">All</button>
+        <button class="tgl" onclick="setConTgl('notes','yes',this)">Has notes</button>
+        <button class="tgl" onclick="setConTgl('notes','no',this)">None</button>
+      </div>
+      <span style="font-size:10px;color:#94a3b8" id="conmeta">5 of 5 contacts</span>
+      <button class="clear-btn" onclick="clearCon()">Clear</button>
+      <button class="btn-primary" style="margin-left:auto">+ New contact</button>
+    </div>
+    <div class="contacts-body">
+      <div class="contacts-table-scroll">
+        <table><thead><tr><th>Name</th><th>Job Title</th><th>Company</th><th>Role</th><th>Email</th><th>Phone</th><th>Last activity</th><th></th></tr></thead>
+        <tbody id="con-tbody"></tbody></table>
+      </div>
+      <div class="con-right hidden" id="con-panel">
+        <div class="con-right-head">
+          <div style="display:flex;align-items:center;gap:10px">
+            <div style="width:36px;height:36px;border-radius:50%;background:#e0f2fe;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#0369a1;flex-shrink:0" id="cp-avatar"></div>
+            <div><div style="font-size:13px;font-weight:600" id="cp-name"></div><div style="font-size:11px;color:#64748b" id="cp-title"></div></div>
+          </div>
+          <button onclick="document.getElementById('con-panel').classList.add('hidden')" style="background:none;border:none;cursor:pointer;color:#94a3b8;font-size:18px">×</button>
+        </div>
+        <div class="con-right-body" id="cp-body"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const companies = [
+  { id:1, name:'Allsop LLP', type:'Auction House', tier:'Gold', city:'London', phone:'020 7494 4450', website:'allsop.co.uk', buyersPremium:"4% + VAT", adminFee:"£1,500 + VAT", createdDate:'2024-01-10' },
+  { id:2, name:'Savills Sheffield', type:'Estate Agent', tier:'Gold', city:'Sheffield', phone:'0114 263 6900', website:'savills.com', createdDate:'2024-02-15' },
+  { id:3, name:'DM Hall', type:'Surveyor', tier:'Silver', city:'Edinburgh', phone:'0131 200 1200', website:'dmhall.co.uk', createdDate:'2024-03-01' },
+  { id:4, name:'Brindley Twist Tafft & James', type:'Solicitor', tier:'Bronze', city:'Coventry', phone:'024 7653 1532', website:'bttj.co.uk', createdDate:'2024-04-12' },
+  { id:5, name:'RJ Property Services', type:'Builder', tier:'', city:'Sheffield', phone:'07890 123456', website:'', createdDate:'2024-05-20' },
+  { id:6, name:'Brightstone Mortgages', type:'Mortgage Broker', tier:'', city:'London', phone:'020 3456 7890', website:'brightstonemortgages.co.uk', createdDate:'2024-06-01' },
+];
+const contacts = [
+  { id:101, name:'James Hartley', jobTitle:'Director', role:'Agent', email:'j.hartley@allsop.co.uk', phone:'07711 234567', companyId:1, origin:'Direct approach', lastActivity:'2025-06-27' },
+  { id:102, name:'Sarah Chen', jobTitle:'Senior Surveyor', role:'Surveyor', email:'s.chen@dmhall.co.uk', phone:'07822 345678', companyId:3, origin:'Referral', lastActivity:'2025-06-15' },
+  { id:103, name:'Mark Okonkwo', jobTitle:'Partner', role:'Solicitor', email:'m.okonkwo@bttj.co.uk', phone:'07933 456789', companyId:4, origin:'Auction', lastActivity:'2025-06-26' },
+  { id:104, name:'Emily Watson', jobTitle:'Lettings Manager', role:'Agent', email:'e.watson@savills.com', phone:'07644 567890', companyId:2, origin:'LinkedIn', lastActivity:'' },
+  { id:105, name:'Tom Briggs', jobTitle:'Site Manager', role:'Contractor', email:'tom@rjpropertyservices.co.uk', phone:'07555 678901', companyId:5, origin:'Recommendation', lastActivity:'2025-06-28' },
+];
+const globalNotes = [
+  { id:201, targetType:'company', targetId:1, type:'Call', text:'Spoke to James re the Manchester catalogue — 120 lots expected in September. Added to priority preview list.', author:'Ashley', date:'2025-06-27' },
+  { id:202, targetType:'company', targetId:1, type:'Meeting', text:'Site visit — Sheffield S3 lot. Allsop confirmed no structural issues flagged by their team.', author:'Ashley', date:'2025-05-14' },
+  { id:203, targetType:'company', targetId:3, type:'Email', text:'Requested updated fee schedule. Sarah confirmed rate stays at £650 for properties under £300k.', author:'Ashley', date:'2025-06-15' },
+  { id:204, targetType:'Contact', targetId:101, type:'Call', text:'James confirmed the S6 lot went under offer. Watching two similar lots in Leeds next month.', author:'Ashley', date:'2025-06-27' },
+  { id:205, targetType:'Contact', targetId:103, type:'Meeting', text:'Reviewed title pack for 14 Burncross Rd — no restrictions, completion in 8 weeks.', author:'Ashley', date:'2025-06-26' },
+  { id:206, targetType:'Contact', targetId:105, type:'Call', text:'Tom quoted £28,500 all-in for kitchen/bathroom/rewire on S9 property. 6-week timeline.', author:'Ashley', date:'2025-06-28' },
+];
+const properties = [
+  { id:301, address:'14 Burncross Road, Sheffield', linkedCompanyIds:[1,4], status:'Due Diligence', guidePrice:85000, auctionDate:'2025-07-10' },
+  { id:302, address:'22 Abbeydale Road, Sheffield', linkedCompanyIds:[1], status:'Sourced', guidePrice:72000, auctionDate:'2025-07-10' },
+  { id:303, address:'7 Firth Park Ave, Sheffield', linkedCompanyIds:[2], status:'Acquired', guidePrice:110000, auctionDate:'2025-03-15' },
+  { id:304, address:'9 Nether Edge Rd, Sheffield', linkedCompanyIds:[2,5], status:'In Refurb', guidePrice:95000, auctionDate:'2025-04-01' },
+  { id:305, address:'45 Royal Mile, Edinburgh', linkedCompanyIds:[3], status:'Sourced', guidePrice:180000, auctionDate:'2025-08-20' },
+];
+const NOTE_COLORS = { Call:'#0ea5e9',Meeting:'#8b5cf6',Email:'#f59e0b',Review:'#7f77dd','Survey update':'#1d9e75',Legal:'#ba7517',Finance:'#378add',Task:'#8b5cf6',Flag:'#e24b4a' };
+const NOTE_BG     = { Call:'#e0f2fe',Meeting:'#ede9fe',Email:'#fefce8',Review:'#eeedfe','Survey update':'#e1f5ee',Legal:'#faeeda',Finance:'#e6f1fb',Task:'#ede9fe',Flag:'#fcebeb' };
+const NOTE_TEXT   = { Call:'#0c4a6e',Meeting:'#4c1d95',Email:'#713f12',Review:'#3c3489','Survey update':'#085041',Legal:'#633806',Finance:'#0c447c',Task:'#5b21b6',Flag:'#791f1f' };
+
+const typeStyle = t => ({ 'Auction House':'background:#dcfce7;color:#166534',Solicitor:'background:#eff6ff;color:#1d4ed8',Surveyor:'background:#fff7ed;color:#c2410c',Builder:'background:#f5f3ff;color:#6d28d9','Estate Agent':'background:#f0f9ff;color:#0369a1','Mortgage Broker':'background:#fdf4ff;color:#7c3aed' }[t]||'background:#f1f5f9;color:#475569');
+const tierMap = { Gold:'badge-tier-gold', Silver:'badge-tier-silver', Bronze:'badge-tier-bronze' };
+const initials = n => n.split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase();
+const compProps = c => properties.filter(p=>(p.linkedCompanyIds||[]).includes(c.id)).length;
+const compCons  = c => contacts.filter(x=>x.companyId===c.id).length;
+const compLN    = c => globalNotes.filter(n=>n.targetType==='company'&&n.targetId===c.id).sort((a,b)=>b.date.localeCompare(a.date))[0]?.date||null;
+const conLN     = c => globalNotes.filter(n=>n.targetType==='Contact'&&n.targetId===c.id).sort((a,b)=>b.date.localeCompare(a.date))[0]?.date||null;
+const isRecent  = d => d&&(new Date()-new Date(d))<7*86400000;
+
+let tglCC='ALL',tglCP='ALL',tglConNotes='ALL';
+let activeCoId=null,activeCoTab='overview',activeConId=null;
+
+function setTgl(g,v,el){ if(g==='cc')tglCC=v; else tglCP=v; el.closest('.tgl-group').querySelectorAll('.tgl').forEach(b=>b.classList.remove('on')); el.classList.add('on'); render(); }
+function setConTgl(g,v,el){ tglConNotes=v; el.closest('.tgl-group').querySelectorAll('.tgl').forEach(b=>b.classList.remove('on')); el.classList.add('on'); renderContacts(); }
+function clearCo(){ document.getElementById('cs').value=''; document.getElementById('csort').value='newest'; document.getElementById('ctype').value='ALL'; document.getElementById('ccity').value='ALL'; tglCC='ALL';tglCP='ALL'; document.querySelectorAll('#view-companies .tgl').forEach((b,i)=>b.classList.toggle('on',i%3===0)); render(); }
+function clearCon(){ document.getElementById('consearch').value=''; document.getElementById('consort').value='newest'; document.getElementById('conrole').value='ALL'; document.getElementById('conco').value='ALL'; tglConNotes='ALL'; document.querySelectorAll('#view-contacts .tgl').forEach((b,i)=>b.classList.toggle('on',i%3===0)); renderContacts(); }
+
+function switchTab(t){
+  document.getElementById('view-companies').classList.toggle('hidden',t!=='companies');
+  document.getElementById('view-contacts').classList.toggle('hidden',t!=='contacts');
+  document.getElementById('view-companies').style.display=t==='companies'?'flex':'none';
+  document.getElementById('view-contacts').style.display=t==='contacts'?'flex':'none';
+  document.getElementById('tab-co').classList.toggle('active',t==='companies');
+  document.getElementById('tab-con').classList.toggle('active',t==='contacts');
+  if(t==='contacts') renderContacts();
+}
+
+function render(){
+  const q=(document.getElementById('cs').value||'').toLowerCase();
+  const type=document.getElementById('ctype').value;
+  const city=document.getElementById('ccity').value;
+  const sort=document.getElementById('csort').value;
+  let list=companies.filter(c=>{
+    if(type!=='ALL'&&c.type!==type) return false;
+    if(city!=='ALL'&&c.city!==city) return false;
+    if(tglCC==='yes'&&compCons(c)===0) return false;
+    if(tglCC==='no'&&compCons(c)>0) return false;
+    if(tglCP==='yes'&&compProps(c)===0) return false;
+    if(tglCP==='no'&&compProps(c)>0) return false;
+    if(q) return [c.name,c.city,c.type,c.phone].join(' ').toLowerCase().includes(q);
+    return true;
+  }).sort((a,b)=>{
+    if(sort==='az') return a.name.localeCompare(b.name);
+    if(sort==='contacts') return compCons(b)-compCons(a);
+    if(sort==='properties') return compProps(b)-compProps(a);
+    return b.id-a.id;
+  });
+  document.getElementById('cmeta').textContent=`${list.length} of ${companies.length} compan${companies.length!==1?'ies':'y'}`;
+
+  let html='';
+  // Insert accordion after the active card
+  const accIdx = list.findIndex(c=>c.id===activeCoId);
+  // Find which row the active card is in (3-col grid)
+  const row = accIdx === -1 ? -1 : Math.floor(accIdx/3);
+
+  list.forEach((c,i)=>{
+    const pc=compProps(c),cc=compCons(c),ln=compLN(c);
+    html+=`<div class="company-card${c.id===activeCoId?' active':''}" onclick="selectCo(${c.id})">
+      <div class="card-avatar" style="${typeStyle(c.type)}">${c.name[0]}</div>
+      <div class="card-name">${c.name}</div>
+      <div class="card-badges">
+        <span class="badge" style="${typeStyle(c.type)}">${c.type}</span>
+        ${c.tier?`<span class="badge ${tierMap[c.tier]||''}">${c.tier}</span>`:''}
+        ${c.city&&c.city!=='--'?`<span class="badge" style="background:#f8fafc;color:#475569">📍 ${c.city}</span>`:''}
+      </div>
+      <div class="card-stats">
+        <div class="stat-item"><div class="stat-val">${cc}</div><div class="stat-label">Contacts</div></div>
+        <div class="stat-item"><div class="stat-val">${pc}</div><div class="stat-label">Properties</div></div>
+        ${ln?`<div class="stat-item" style="text-align:left;flex:1"><div style="font-size:10px;color:#94a3b8">Last note</div><div style="font-size:11px;font-weight:600;color:#475569;margin-top:1px">${ln}</div></div>`:''}
+      </div>
+    </div>`;
+    // After every 3 cards, if accordion row matches, insert it
+    if(activeCoId && (i===list.length-1||(i+1)%3===0)){
+      const thisRow=Math.floor(i/3);
+      if(thisRow===row){
+        html+=`</div><div id="acc-detail" class="accordion-detail">${renderAccordion(companies.find(x=>x.id===activeCoId))}</div><div class="cards-grid">`;
+      }
+    }
+  });
+  // New card button
+  html+=`<button class="card-new-btn" onclick=""><div style="font-size:24px">+</div><div>New company</div></button>`;
+  document.getElementById('co-content').innerHTML=`<div class="cards-grid">${html}</div>`;
+}
+
+function selectCo(id){
+  activeCoId = activeCoId===id ? null : id;
+  activeCoTab='overview';
+  render();
+  if(activeCoId){
+    setTimeout(()=>{ const el=document.getElementById('acc-detail'); if(el) el.scrollIntoView({behavior:'smooth',block:'nearest'}); },50);
+  }
+}
+function setAccTab(t){ activeCoTab=t; const c=companies.find(x=>x.id===activeCoId); if(c) document.getElementById('acc-detail').innerHTML=renderAccordion(c); }
+
+function renderAccordion(c){
+  if(!c) return '';
+  const linkedContacts=contacts.filter(x=>x.companyId===c.id);
+  const linkedProps=properties.filter(p=>(p.linkedCompanyIds||[]).includes(c.id));
+  const compNotes=globalNotes.filter(n=>n.targetType==='company'&&n.targetId===c.id).sort((a,b)=>b.date.localeCompare(a.date));
+  return `
+    <div class="acc-head">
+      <div>
+        <div class="acc-title">${c.name}</div>
+        <div class="acc-sub">
+          <span class="badge" style="${typeStyle(c.type)}">${c.type}</span>
+          ${c.phone?`<span>${c.phone}</span>`:''}
+          ${c.website?`<span style="color:#0369a1">${c.website}</span>`:''}
+          ${c.tier?`<span class="badge ${tierMap[c.tier]||''}">${c.tier}</span>`:''}
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button style="padding:6px 12px;border:1px solid #fca5a5;border-radius:6px;background:#fef2f2;font-size:12px;color:#dc2626;cursor:pointer">Delete</button>
+        <button class="acc-close" onclick="activeCoId=null;render()">×</button>
+      </div>
+    </div>
+    <div class="acc-tabs">
+      ${['overview','contacts','properties','costs'].map(t=>`<button class="atab${t===activeCoTab?' active':''}" onclick="setAccTab('${t}')">${t.charAt(0).toUpperCase()+t.slice(1)}${t==='contacts'?` (${linkedContacts.length})`:t==='properties'?` (${linkedProps.length})`:''}</button>`).join('')}
+    </div>
+    <div class="acc-body">
+      ${activeCoTab==='overview' ? `
+        <div class="field-grid">
+          <div>
+            <div class="card-inner"><div class="card-inner-title">Company details</div>
+              ${f('Company name',c.name)} ${sel('Type',c.type)} ${sel('Relationship tier',c.tier||'',['','Gold','Silver','Bronze'],['— None —','Gold','Silver','Bronze'])} ${f('Phone',c.phone)} ${f('Website',c.website||'')} ${f('City',c.city)}
+            </div>
+          </div>
+          <div>
+            <div class="card-inner"><div class="card-inner-title">Activity notes</div>
+              <div class="act-add">
+                <textarea rows="2" placeholder="Add a note…"></textarea>
+                <div class="act-add-row"><select><option>📞 Call</option><option>🤝 Meeting</option><option>✉️ Email</option><option>📋 Review</option></select><button>Add</button></div>
+              </div>
+              ${compNotes.map(n=>`<div class="note-card" style="background:${NOTE_BG[n.type]||'#f8fafc'};color:${NOTE_TEXT[n.type]||'#475569'};border-color:${NOTE_COLORS[n.type]||'#e2e8f0'}33">
+                <button class="note-del">×</button>
+                <span class="note-type-badge" style="background:${NOTE_COLORS[n.type]||'#94a3b8'}">${n.type}</span>
+                <div style="font-size:12px;line-height:1.5">${n.text}</div>
+                <div style="font-size:10px;margin-top:4px;opacity:.7">${n.author} · ${n.date}</div>
+              </div>`).join('')}
+              ${compNotes.length===0?'<p style="font-size:12px;color:#94a3b8">No notes yet</p>':''}
+            </div>
+          </div>
+        </div>
+      ` : activeCoTab==='contacts' ? `
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <span style="font-size:12px;font-weight:600;color:#475569">${linkedContacts.length} contact${linkedContacts.length!==1?'s':''} at ${c.name}</span>
+          <button class="btn-primary" style="padding:6px 14px;font-size:11px">+ Add contact</button>
+        </div>
+        <div class="con-grid">
+          ${linkedContacts.map(x=>`<div class="con-card"><div class="con-avatar">${initials(x.name)}</div><div class="con-card-name">${x.name}</div><div class="con-card-meta">${x.jobTitle}</div><div class="con-card-meta" style="margin-top:4px"><span class="badge" style="background:#f8fafc;color:#475569">${x.role}</span></div></div>`).join('')}
+          ${linkedContacts.length===0?'<p style="font-size:13px;color:#94a3b8;padding:20px 0;grid-column:1/-1;text-align:center">No contacts linked</p>':''}
+        </div>
+      ` : activeCoTab==='properties' ? `
+        <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+          <select style="padding:6px 9px;border:1px solid #e2e8f0;border-radius:6px;font-size:11px;background:#fff;outline:none"><option>All statuses</option><option>Sourced</option><option>Due Diligence</option><option>Acquired</option><option>In Refurb</option></select>
+          <select style="padding:6px 9px;border:1px solid #e2e8f0;border-radius:6px;font-size:11px;background:#fff;outline:none"><option>Newest first</option><option>Guide price ↓</option><option>Auction date</option></select>
+          <span style="font-size:12px;color:#64748b;font-weight:600">Link:</span>
+          <select style="padding:6px 9px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;background:#fff;outline:none;min-width:200px"><option value="">Select a property…</option></select>
+        </div>
+        <div class="card-inner" style="padding:0;overflow:hidden">
+          <table><thead><tr><th>Address</th><th>Status</th><th style="text-align:right">Guide</th><th>Auction date</th><th></th></tr></thead>
+          <tbody>${linkedProps.map(p=>`<tr><td style="font-weight:600;color:#0284c7;cursor:pointer">${p.address}</td><td><span class="badge" style="${typeStyle('Estate Agent')}">${p.status}</span></td><td style="text-align:right;font-weight:600">£${(p.guidePrice||0).toLocaleString()}</td><td style="color:#64748b">${p.auctionDate||'—'}</td><td><button style="background:none;border:none;cursor:pointer;font-size:11px;color:#94a3b8;font-weight:600">Unlink</button></td></tr>`).join('')}</tbody>
+          </table>
+        </div>
+      ` : `<div class="card-inner" style="max-width:480px"><div class="card-inner-title">Auction fees &amp; costs</div>${f("Buyer's premium",c.buyersPremium||'')}${f('Admin fee',c.adminFee||'')}</div>`}
+    </div>
+  `;
+}
+
+function f(label,value,ph=''){return`<div class="field"><label>${label}</label><input type="text" value="${value||''}" placeholder="${ph||label}"></div>`;}
+function sel(label,value,opts,labels){opts=opts||['Auction House','Builder','Estate Agent','Mortgage Broker','Solicitor','Surveyor','Other'];labels=labels||opts;return`<div class="field"><label>${label}</label><select>${opts.map((o,i)=>`<option value="${o}"${o===value?' selected':''}>${labels[i]||o}</option>`).join('')}</select></div>`;}
+
+// Contacts
+function renderContacts(){
+  const q=(document.getElementById('consearch').value||'').toLowerCase();
+  const role=document.getElementById('conrole').value;
+  const co=document.getElementById('conco').value;
+  const sort=document.getElementById('consort').value;
+  let list=contacts.filter(con=>{
+    if(role!=='ALL'&&con.role!==role) return false;
+    if(co!=='ALL'&&String(con.companyId||'')!==co) return false;
+    const hn=globalNotes.filter(n=>n.targetType==='Contact'&&n.targetId===con.id).length>0;
+    if(tglConNotes==='yes'&&!hn) return false;
+    if(tglConNotes==='no'&&hn) return false;
+    if(q){const hay=[con.name,con.email,con.phone,con.jobTitle,con.role,companies.find(c=>c.id===con.companyId)?.name||''].join(' ').toLowerCase();return hay.includes(q);}
+    return true;
+  }).sort((a,b)=>{
+    if(sort==='az') return a.name.localeCompare(b.name);
+    if(sort==='activity'){const ln=x=>globalNotes.filter(n=>n.targetType==='Contact'&&n.targetId===x.id).sort((p,q)=>q.date.localeCompare(p.date))[0]?.date||'';return ln(b).localeCompare(ln(a));}
+    return b.id-a.id;
+  });
+  document.getElementById('conmeta').textContent=`${list.length} of ${contacts.length} contact${contacts.length!==1?'s':''}`;
+  const roleColors={Surveyor:'background:#eff6ff;color:#1d4ed8',Agent:'background:#f0fdf4;color:#166534',Solicitor:'background:#fdf4ff;color:#7c3aed',Broker:'background:#fef3c7;color:#92400e',Contractor:'background:#fff7ed;color:#c2410c'};
+  document.getElementById('con-tbody').innerHTML=list.map(con=>{
+    const lco=companies.find(c=>c.id===con.companyId);
+    const ln=conLN(con)||con.lastActivity||'—';
+    const rec=isRecent(ln);
+    return`<tr onclick="selectCon(${con.id})" style="cursor:pointer;background:${con.id===activeConId?'#f0fdf4':'#fff'}">
+      <td><div style="display:flex;align-items:center;gap:8px"><div style="width:28px;height:28px;border-radius:50%;background:#e0f2fe;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#0369a1">${initials(con.name)}</div><span style="font-weight:600">${con.name}</span></div></td>
+      <td style="color:#475569">${con.jobTitle}</td>
+      <td>${lco?`<span class="badge" style="background:#f0fdf4;color:#065f46;font-size:11px">${lco.name}</span>`:'<span style="color:#94a3b8">—</span>'}</td>
+      <td>${con.role?`<span class="badge" style="${roleColors[con.role]||'background:#f8fafc;color:#475569'}">${con.role}</span>`:'—'}</td>
+      <td style="color:#475569;font-size:11px">${con.email}</td>
+      <td style="color:#047857;font-size:11px">${con.phone}</td>
+      <td style="font-size:11px;${rec?'color:#059669;font-weight:600':'color:#94a3b8'}">${ln}</td>
+      <td style="color:#fca5a5">🗑</td>
+    </tr>`;
+  }).join('');
+}
+
+function selectCon(id){
+  activeConId=id;
+  const con=contacts.find(x=>x.id===id);
+  const panel=document.getElementById('con-panel');
+  panel.classList.remove('hidden');
+  document.getElementById('cp-avatar').textContent=initials(con.name);
+  document.getElementById('cp-name').textContent=con.name;
+  document.getElementById('cp-title').textContent=con.jobTitle||'No title';
+  const conNotes=globalNotes.filter(n=>n.targetType==='Contact'&&n.targetId===con.id).sort((a,b)=>b.date.localeCompare(a.date));
+  const lco=companies.find(c=>c.id===con.companyId);
+  document.getElementById('cp-body').innerHTML=`
+    ${[['Full name',con.name,'text'],['Job title',con.jobTitle,'text'],['Email',con.email,'email'],['Mobile',con.phone,'tel']].map(([l,v,t])=>`<div><label style="display:block;font-size:10px;font-weight:600;color:#94a3b8;text-transform:uppercase;margin-bottom:3px">${l}</label><input type="${t}" value="${v||''}" style="width:100%;padding:7px 9px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;outline:none;box-sizing:border-box"></div>`).join('')}
+    <div><label style="display:block;font-size:10px;font-weight:600;color:#94a3b8;text-transform:uppercase;margin-bottom:3px">Company</label>
+      <select style="width:100%;padding:7px 9px;border:1px solid #e2e8f0;border-radius:6px;font-size:12px;background:#fff;outline:none"><option>None</option>${companies.map(c=>`<option${c.id===con.companyId?' selected':''}>${c.name}</option>`).join('')}</select>
+    </div>
+    <div style="border-top:1px solid #f1f5f9;padding-top:10px">
+      <div class="section-label">Activity notes</div>
+      ${conNotes.map(n=>`<div class="note-card" style="background:${NOTE_BG[n.type]||'#f8fafc'};color:${NOTE_TEXT[n.type]||'#475569'};border-color:${NOTE_COLORS[n.type]||'#e2e8f0'}33">
+        <button class="note-del">×</button>
+        <span class="note-type-badge" style="background:${NOTE_COLORS[n.type]||'#94a3b8'}">${n.type}</span>
+        <div style="font-size:12px;line-height:1.5">${n.text}</div>
+        <div style="font-size:10px;margin-top:4px;opacity:.7">${n.author} · ${n.date}</div>
+      </div>`).join('')}
+      ${conNotes.length===0?'<p style="font-size:12px;color:#94a3b8">No notes yet</p>':''}
+      <div class="act-add" style="margin-top:8px">
+        <textarea rows="3" placeholder="Add a note…"></textarea>
+        <div class="act-add-row"><select><option>📞 Call</option><option>🤝 Meeting</option><option>✉️ Email</option><option>📋 Review</option></select><button>Add</button></div>
+      </div>
+    </div>
+  `;
+  renderContacts();
+}
+
+// Init
+render();
+document.getElementById('view-contacts').style.display='none';
+</script>
+</body>
+</html>
