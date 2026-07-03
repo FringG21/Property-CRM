@@ -8,7 +8,8 @@ import {
   SlidersHorizontal, Home, CheckCircle2, AlertCircle, X, Check, ChevronDown,
   ChevronUp, ChevronLeft, ChevronRight, Undo2, Bookmark, User, Gavel, Settings, Users, Link2, Plus, Trash2,
   Briefcase, Contact, Search, Globe, Mail, Phone, ClipboardList, TrendingUp, LogOut, Filter, Map, BarChart2, Pencil,
-  Bell, Download, MessageSquare, ListChecks, Activity, AlertTriangle, MoreHorizontal, Layers, RefreshCw
+  Bell, Download, MessageSquare, ListChecks, Activity, AlertTriangle, MoreHorizontal, Layers, RefreshCw,
+  Bold, Italic, Underline, List, ListOrdered
 } from 'lucide-react';
 
 // Fix Leaflet default marker icons
@@ -33,6 +34,89 @@ const NOTE_TYPE_PLACEHOLDERS = {
   Meeting: 'Describe the meeting — agenda, outcomes, follow-ups…',
   Email: 'Summarise the email thread — subject, decision, next step…',
 };
+
+// ============================================================
+// TASK NOTES/COMMENTS — lightweight markdown rendering (bold/italic/underline/lists)
+// ============================================================
+function renderInlineMarkdown(text) {
+  const parts = [];
+  const regex = /(\*\*.+?\*\*|\*.+?\*|_.+?_)/g;
+  let last = 0, m, key = 0;
+  while ((m = regex.exec(text))) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    const token = m[0];
+    if (token.startsWith('**')) parts.push(<strong key={key++}>{token.slice(2, -2)}</strong>);
+    else if (token.startsWith('_')) parts.push(<u key={key++}>{token.slice(1, -1)}</u>);
+    else parts.push(<em key={key++}>{token.slice(1, -1)}</em>);
+    last = regex.lastIndex;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
+}
+
+function renderTaskMarkdown(text) {
+  if (!text) return null;
+  const lines = text.split('\n');
+  const blocks = [];
+  let list = null; // { type: 'ul'|'ol', items: [] }
+  const flushList = () => { if (list) { blocks.push(list); list = null; } };
+  lines.forEach((line, i) => {
+    const bulletMatch = /^\s*-\s+(.*)$/.exec(line);
+    const numberedMatch = /^\s*\d+\.\s+(.*)$/.exec(line);
+    if (bulletMatch) {
+      if (!list || list.type !== 'ul') { flushList(); list = { type: 'ul', items: [] }; }
+      list.items.push(bulletMatch[1]);
+    } else if (numberedMatch) {
+      if (!list || list.type !== 'ol') { flushList(); list = { type: 'ol', items: [] }; }
+      list.items.push(numberedMatch[1]);
+    } else {
+      flushList();
+      blocks.push({ type: 'p', text: line, key: i });
+    }
+  });
+  flushList();
+  return blocks.map((b, i) => {
+    if (b.type === 'ul') return <ul key={i} style={{ margin: '2px 0', paddingLeft: '18px' }}>{b.items.map((it, j) => <li key={j}>{renderInlineMarkdown(it)}</li>)}</ul>;
+    if (b.type === 'ol') return <ol key={i} style={{ margin: '2px 0', paddingLeft: '18px' }}>{b.items.map((it, j) => <li key={j}>{renderInlineMarkdown(it)}</li>)}</ol>;
+    if (b.text === '') return <div key={i} style={{ height: '8px' }} />;
+    return <div key={i}>{renderInlineMarkdown(b.text)}</div>;
+  });
+}
+
+function MarkdownToolbar({ textareaId, value, onChange }) {
+  const wrapSelection = (before, after = before) => {
+    const el = document.getElementById(textareaId);
+    if (!el) return;
+    const start = el.selectionStart, end = el.selectionEnd;
+    const selected = value.slice(start, end) || 'text';
+    const next = value.slice(0, start) + before + selected + after + value.slice(end);
+    onChange(next);
+    requestAnimationFrame(() => { el.focus(); el.setSelectionRange(start + before.length, start + before.length + selected.length); });
+  };
+  const prefixLines = (prefix, ordered = false) => {
+    const el = document.getElementById(textareaId);
+    if (!el) return;
+    const start = el.selectionStart, end = el.selectionEnd;
+    const lineStart = value.lastIndexOf('\n', start - 1) + 1;
+    let lineEnd = value.indexOf('\n', end);
+    if (lineEnd === -1) lineEnd = value.length;
+    const block = value.slice(lineStart, lineEnd);
+    const newBlock = block.split('\n').map((l, i) => ordered ? `${i + 1}. ${l}` : `- ${l}`).join('\n');
+    const next = value.slice(0, lineStart) + newBlock + value.slice(lineEnd);
+    onChange(next);
+    requestAnimationFrame(() => { el.focus(); });
+  };
+  const btnStyle = { padding: '4px 6px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', cursor: 'pointer', display: 'flex', color: '#475569' };
+  return (
+    <div style={{ display: 'flex', gap: '4px', marginBottom: '6px' }}>
+      <button type="button" title="Bold" onClick={() => wrapSelection('**')} style={btnStyle}><Bold size={12} /></button>
+      <button type="button" title="Italic" onClick={() => wrapSelection('*')} style={btnStyle}><Italic size={12} /></button>
+      <button type="button" title="Underline" onClick={() => wrapSelection('_')} style={btnStyle}><Underline size={12} /></button>
+      <button type="button" title="Bullet list" onClick={() => prefixLines('-')} style={btnStyle}><List size={12} /></button>
+      <button type="button" title="Numbered list" onClick={() => prefixLines('', true)} style={btnStyle}><ListOrdered size={12} /></button>
+    </div>
+  );
+}
 
 // ============================================================
 // REFURB QUOTE BUILDER — CONSTANTS (outside component for performance)
@@ -369,6 +453,7 @@ export default function App({ user = {}, onLogout }) {
   const [lastInviteLink, setLastInviteLink] = useState(null);
   const [auctionScanLoading, setAuctionScanLoading] = useState(false);
   const [auctionScanResults, setAuctionScanResults] = useState(null);
+  const [auctionScanSettings, setAuctionScanSettings] = useState({ keywords: 'sheffield, doncaster, rotherham, barnsley, south yorkshire', postcodeAreas: 'S, DN', maxGuidePrice: 100000, propertyTypes: 'all' });
   const [openStatCard, setOpenStatCard] = useState(null);
   const [showListingEdit, setShowListingEdit] = useState(false);
 
@@ -449,6 +534,10 @@ export default function App({ user = {}, onLogout }) {
   const [selectedGDVScenario, setSelectedGDVScenario] = useState('Base');
   const [editingKpi, setEditingKpi] = useState(false);
   const [propCanvasTab, setPropCanvasTab] = useState('overview');
+  const [propSidebarCollapsed, setPropSidebarCollapsed] = useState(() => {
+    try { return localStorage.getItem('propSidebarCollapsed') === '1'; } catch (e) { return false; }
+  });
+  const togglePropSidebar = () => setPropSidebarCollapsed(c => { const n = !c; try { localStorage.setItem('propSidebarCollapsed', n ? '1' : '0'); } catch (e) {} return n; });
   const [propMapOpen, setPropMapOpen] = useState(false);
   const openPropertyView = (p) => { setCurrentViewProperty(p); setPropCanvasTab('overview'); setPropMapOpen(false); };
 
@@ -540,7 +629,7 @@ export default function App({ user = {}, onLogout }) {
   const [auctionDates, setAuctionDates] = useState([]);
   const [auctionLots, setAuctionLots] = useState([]);
   const [auctionSelectedDateId, setAuctionSelectedDateId] = useState(null);
-  const [auctionLotFilter, setAuctionLotFilter] = useState({ status: 'all', type: 'all', search: '' });
+  const [auctionLotFilter, setAuctionLotFilter] = useState({ status: 'all', type: 'all', search: '', house: 'all', date: 'all' });
   const [auctionSelectedLotIds, setAuctionSelectedLotIds] = useState(new Set());
   const [auctionTabLoading, setAuctionTabLoading] = useState(false);
 
@@ -776,6 +865,8 @@ export default function App({ user = {}, onLogout }) {
       'refurbLight', 'refurbMedium', 'refurbHeavy',
       // Metadata
       'completionDate', 'auctionHouseFromReport', 'propertyTypeFromReport', 'comps',
+      // Parsed comparable sales rows (report's own confirmed-sold picks)
+      'compsList',
       // AI / risk summary
       'aiSummary', 'redFlags',
     ];
@@ -1092,6 +1183,40 @@ export default function App({ user = {}, onLogout }) {
     const compM = htmlText.match(/(\d+)\+?\s*comparables/i);
     if (compM) a.comps = parseInt(compM[1]);
 
+    // ── Report comparables: the confirmed-sold table whose header carries
+    // both Date and Beds columns (Tier-1 sold comps). The asking-price table
+    // has neither, so this uniquely selects the real sold comparables. ──
+    try {
+      const tableRe = /<table[^>]*>([\s\S]*?)<\/table>/gi;
+      let tm;
+      while ((tm = tableRe.exec(htmlText)) !== null) {
+        const tbl = tm[1];
+        const head = (tbl.match(/<thead[^>]*>([\s\S]*?)<\/thead>/i) || [])[1] || '';
+        if (!/>\s*Date\s*</i.test(head) || !/>\s*Beds\s*</i.test(head)) continue;
+        const body = (tbl.match(/<tbody[^>]*>([\s\S]*?)<\/tbody>/i) || [])[1] || tbl;
+        const rows = [];
+        const trRe = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+        let rm;
+        while ((rm = trRe.exec(body)) !== null) {
+          const cells = [...rm[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(c => c[1].replace(/<[^>]+>/g, '').replace(/&amp;/g, '&').trim());
+          if (cells.length < 5) continue;
+          const price = parseInt((cells[1] || '').replace(/[^\d]/g, ''));
+          if (!price) continue;
+          rows.push({
+            address: cells[0] || '',
+            soldPrice: price,
+            soldDate: cells[2] || '',
+            propertyType: cells[3] || '',
+            bedrooms: /^\d+$/.test(cells[4] || '') ? parseInt(cells[4]) : null,
+            floorArea: (cells[5] && /\d/.test(cells[5])) ? parseInt(cells[5]) : null,
+            tier: (cells[6] || '').replace(/★/g, '').trim(),
+            source: 'Report',
+          });
+        }
+        if (rows.length) { a.compsList = rows; break; }
+      }
+    } catch (e) {}
+
     // ── GDV scenarios: anchor on class="label-sm" headings ──────────────
     // Each GDV section is a card containing:
     //   <div class="label-sm">Conservative GDV (Lender Floor)</div>
@@ -1402,13 +1527,22 @@ export default function App({ user = {}, onLogout }) {
     try {
       const token = localStorage.getItem('crm_session');
       const h = { 'Authorization': `Bearer ${token}` };
-      const [dRes, lRes] = await Promise.all([
+      const [dRes, lRes, sRes] = await Promise.all([
         fetch('/api/auction/dates', { headers: h }),
         fetch('/api/auction/lots', { headers: h }),
+        fetch('/api/scan-settings', { headers: h }),
       ]);
-      const [dData, lData] = await Promise.all([dRes.json(), lRes.json()]);
+      const [dData, lData, sData] = await Promise.all([dRes.json(), lRes.json(), sRes.json().catch(() => null)]);
       const dates = dData.dates || [];
       let lots = lData.lots || [];
+      if (sData?.success && sData.settings) {
+        setAuctionScanSettings({
+          keywords: (sData.settings.keywords || []).join(', '),
+          postcodeAreas: (sData.settings.postcodeAreas || []).join(', '),
+          maxGuidePrice: sData.settings.maxGuidePrice || 100000,
+          propertyTypes: sData.settings.propertyTypes || 'all',
+        });
+      }
 
       // One-time import: legacy watchlist items become manual leads in the unified
       // triage queue. Deterministic ids make this idempotent (server ignores dupes).
@@ -1434,7 +1568,7 @@ export default function App({ user = {}, onLogout }) {
 
       setAuctionDates(dates);
       setAuctionLots(lots);
-      setAuctionSelectedDateId(prev => prev || (dates.length > 0 ? dates[0].id : 'manual'));
+      setAuctionSelectedDateId(prev => prev || 'all');
     } catch (e) { console.error('Failed to load auction data', e); }
     setAuctionTabLoading(false);
   };
@@ -1985,6 +2119,15 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
   const [newTaskAssignee, setNewTaskAssignee] = useState('');
   const [newTaskStatus, setNewTaskStatus] = useState('not_started');
   const [newTaskWaitingOn, setNewTaskWaitingOn] = useState('');
+  const [drawerMode, setDrawerMode] = useState('edit'); // 'edit' | 'create'
+  const [draftTask, setDraftTask] = useState(null);
+  const [drawerSize, setDrawerSize] = useState(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem('taskDrawerSize') || 'null');
+      if (saved && saved.width && saved.height) return saved;
+    } catch (e) {}
+    return { width: 820, height: null };
+  });
 
   // Feature 2: Deal Calculator
   const [dealCalcStrategy, setDealCalcStrategy] = useState('Flip');
@@ -2956,49 +3099,39 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       )}
                     </div>
                   </div>
-                  {/* Badges */}
-                  <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '8px' }}>
+                  {/* Status chip — bid strength / EPC / days shown once elsewhere (sidebar, KPIs, countdown) */}
+                  <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '6px' }}>
                     <span style={{ padding: '2px 8px', borderRadius: '10px', fontSize: '10px', fontWeight: '500', background: '#1e3a5f', color: '#60a5fa' }}>{st}</span>
-                    {an.bidStrength === 'Strong' && <span style={{ padding: '2px 8px', borderRadius: '10px', fontSize: '10px', fontWeight: '500', background: '#052e16', color: '#4ade80' }}>✓ Strong Bid</span>}
-                    {an.bidStrength === 'Conservative' && <span style={{ padding: '2px 8px', borderRadius: '10px', fontSize: '10px', fontWeight: '500', background: '#451a03', color: '#fcd34d' }}>Conservative</span>}
-                    {an.bidStrength === 'Weak' && <span style={{ padding: '2px 8px', borderRadius: '10px', fontSize: '10px', fontWeight: '500', background: '#3f1515', color: '#fca5a5' }}>Weak bid</span>}
-                    {daysLeft != null && daysLeft >= 0 && <span style={{ padding: '2px 8px', borderRadius: '10px', fontSize: '10px', fontWeight: '500', background: '#3f1a00', color: '#fbbf24' }}>⏱ {daysLeft === 0 ? 'Today' : `${daysLeft} days`}</span>}
-                    {(an.epcRating || an.floorArea) && <span style={{ padding: '2px 8px', borderRadius: '10px', fontSize: '10px', fontWeight: '500', background: '#1e1b4b', color: '#a5b4fc' }}>{an.epcRating ? `EPC ${an.epcRating}` : ''}{an.epcRating && an.floorArea ? ' · ' : ''}{an.floorArea ? `${an.floorArea}m²` : ''}</span>}
                     {currentViewProperty.planningToBid && <span style={{ padding: '2px 8px', borderRadius: '10px', fontSize: '10px', fontWeight: '500', background: '#1e3a5f', color: '#93c5fd' }}>Planning to bid</span>}
                   </div>
                 </div>
 
-                {/* KPI strip — dark, 5 tiles */}
-                <div style={{ borderBottom: '1px solid #1e293b', background: '#0f172a', flexShrink: 0 }}>
-                  <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2,1fr)' : 'repeat(5,1fr)' }}>
-                    {[
-                      { l: 'Guide price', v: gp ? fmtNum(gp) : '—', vc: '#f1f5f9', editKey: 'guidePrice', src: gp ? 'Listing' : '' },
-                      { l: 'Max bid', v: maxBid ? fmtNum(maxBid) : '—', vc: maxBid ? '#4ade80' : '#f1f5f9', editKey: 'maxBid', src: an.maxBid ? 'Report' : (currentViewProperty.maxBid ? 'Manual' : '') },
-                      { l: 'Net profit', v: netProfit ? fmtNum(netProfit) : '—', vc: netProfit ? '#4ade80' : '#f1f5f9', src: an.netProfit ? 'Report' : '' },
-                      { l: 'Margin', v: margin != null ? `${margin.toFixed(1)}%` : '—', vc: margin >= 20 ? '#4ade80' : margin >= 10 ? '#fbbf24' : margin != null ? '#f87171' : '#f1f5f9', src: (an.profitMargin != null || an.margin != null) ? 'Report' : '' },
-                      { l: 'ROI', v: (an.roi != null && an.roi !== '') ? `${parseFloat(an.roi).toFixed(1)}%` : '—', vc: (an.roi != null && an.roi !== '') ? '#4ade80' : '#f1f5f9', src: (an.roi != null && an.roi !== '') ? 'Report' : '' },
-                    ].map((k, i) => (
-                      <div key={k.l} style={{ padding: '8px 13px', borderRight: i < 4 ? '1px solid #1e293b' : 'none', position: 'relative' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2px' }}>
-                          <div style={{ fontSize: '10px', color: '#475569', textTransform: 'uppercase', letterSpacing: '.05em' }}>{k.l}</div>
-                          {i === 0 && (
-                            <button onClick={() => setEditingKpi(e => !e)} title="Edit figures" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0', fontSize: '11px', color: editingKpi ? '#a78bfa' : '#475569', lineHeight: 1 }}>⚙</button>
-                          )}
-                        </div>
-                        {editingKpi && k.editKey ? (
-                          <input
-                            type="number"
-                            value={k.editKey === 'guidePrice' ? (currentViewProperty.guidePrice || '') : (currentViewProperty.maxBid || '')}
-                            onChange={e => updateFieldInView(k.editKey, parseInt(e.target.value) || 0)}
-                            style={{ width: '100%', fontSize: '14px', fontWeight: '600', border: 'none', borderBottom: '1px solid #7C3AED', background: 'transparent', color: k.vc, outline: 'none', fontFamily: 'inherit', padding: '2px 0' }}
-                          />
-                        ) : (
-                          <div style={{ fontSize: '15px', fontWeight: '600', color: k.vc }}>{k.v}</div>
-                        )}
-                        {k.src && <div style={{ display: 'inline-block', marginTop: '3px', fontSize: '10px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.04em', padding: '1px 5px', borderRadius: '3px', background: k.src === 'Report' ? '#0c2a3d' : '#1e293b', color: k.src === 'Report' ? '#60a5fa' : '#64748b' }}>{k.src}</div>}
-                      </div>
-                    ))}
-                  </div>
+                {/* KPI strip — compact inline bar (label value, colour-coded) */}
+                <div style={{ borderBottom: '1px solid #1e293b', background: '#0b1120', flexShrink: 0, display: 'flex', alignItems: 'center', flexWrap: 'wrap', padding: '7px 13px' }}>
+                  {[
+                    { l: 'Guide', v: gp ? fmtNum(gp) : '—', vc: '#f1f5f9', editKey: 'guidePrice', src: gp ? 'Listing' : '' },
+                    { l: 'Max bid', v: maxBid ? fmtNum(maxBid) : '—', vc: maxBid ? '#4ade80' : '#f1f5f9', editKey: 'maxBid', src: an.maxBid ? 'Report' : (currentViewProperty.maxBid ? 'Manual' : '') },
+                    { l: 'Net profit', v: netProfit ? fmtNum(netProfit) : '—', vc: netProfit ? '#4ade80' : '#f1f5f9', src: an.netProfit ? 'Report' : '' },
+                    { l: 'Margin', v: margin != null ? `${margin.toFixed(1)}%` : '—', vc: margin >= 20 ? '#4ade80' : margin >= 10 ? '#fbbf24' : margin != null ? '#f87171' : '#f1f5f9', src: (an.profitMargin != null || an.margin != null) ? 'Report' : '' },
+                    { l: 'ROI', v: (an.roi != null && an.roi !== '') ? `${parseFloat(an.roi).toFixed(1)}%` : '—', vc: (an.roi != null && an.roi !== '') ? '#4ade80' : '#f1f5f9', src: (an.roi != null && an.roi !== '') ? 'Report' : '' },
+                  ].map((k, i) => (
+                    <div key={k.l} style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '0 13px 0 0', marginRight: '13px', borderRight: i < 4 ? '1px solid #1e293b' : 'none' }}>
+                      <span style={{ fontSize: '10px', color: '#475569', textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap' }}>{k.l}</span>
+                      {editingKpi && k.editKey ? (
+                        <input
+                          type="number"
+                          value={k.editKey === 'guidePrice' ? (currentViewProperty.guidePrice || '') : (currentViewProperty.maxBid || '')}
+                          onChange={e => updateFieldInView(k.editKey, parseInt(e.target.value) || 0)}
+                          style={{ width: '78px', fontSize: '14px', fontWeight: '600', border: 'none', borderBottom: '1px solid #7C3AED', background: 'transparent', color: k.vc, outline: 'none', fontFamily: 'inherit', padding: '0' }}
+                        />
+                      ) : (
+                        <span style={{ fontSize: '14px', fontWeight: '600', color: k.vc, whiteSpace: 'nowrap' }}>{k.v}</span>
+                      )}
+                      {k.src && <span style={{ fontSize: '9px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.04em', padding: '1px 4px', borderRadius: '3px', background: k.src === 'Report' ? '#0c2a3d' : '#1e293b', color: k.src === 'Report' ? '#60a5fa' : '#64748b' }}>{k.src}</span>}
+                    </div>
+                  ))}
+                  <span style={{ flex: 1 }} />
+                  <button onClick={() => setEditingKpi(e => !e)} title="Edit guide / max bid" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0', fontSize: '13px', color: editingKpi ? '#a78bfa' : '#475569', lineHeight: 1 }}>⚙</button>
                 </div>
 
                 {/* Inline map panel */}
@@ -3013,6 +3146,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 <div style={{ display: 'flex', borderBottom: '1px solid #1e293b', background: '#0f172a', flexShrink: 0, overflowX: 'auto', padding: '0 8px' }}>
                   {[
                     { k: 'overview', l: 'Overview' },
+                    { k: 'comparables', l: 'Comparables', count: ((an.compsList?.length || 0) + (intel.connectors?.landRegistry?.data?.items?.length || 0) + ((currentViewProperty.comparables || []).filter(c => !c.fromIntelligence).length)) || null },
                     { k: 'intel', l: 'Intelligence', dot: intel.lastRun },
                     { k: 'financials', l: 'Deal Analysis' },
                     { k: 'documents', l: 'Documents', count: (Object.values(propFiles).filter(Boolean).length + (currentViewProperty.customDocs?.length || 0)) || null },
@@ -3033,13 +3167,27 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0, flexDirection: isMobile ? 'column' : 'row' }}>
 
                 {/* ════ INTELLIGENCE SIDEBAR ════ */}
-                <div style={{ width: isMobile ? '100%' : '260px', minWidth: isMobile ? 'auto' : '260px', background: '#0f172a', display: isMobile ? (propSidebarOpen ? 'flex' : 'none') : 'flex', flexDirection: 'column', overflowY: 'auto', flexShrink: 0, maxHeight: isMobile ? '50vh' : 'none' }}>
+                <div style={{ width: isMobile ? '100%' : (propSidebarCollapsed ? '46px' : '260px'), minWidth: isMobile ? 'auto' : (propSidebarCollapsed ? '46px' : '260px'), background: '#0f172a', display: isMobile ? (propSidebarOpen ? 'flex' : 'none') : 'flex', flexDirection: 'column', overflowY: 'auto', flexShrink: 0, maxHeight: isMobile ? '50vh' : 'none' }}>
+
+                  {!isMobile && propSidebarCollapsed && (
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '16px', padding: '14px 0', color: '#64748b' }}>
+                      <button onClick={togglePropSidebar} title="Expand panel" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#7C3AED', display: 'flex', padding: 0 }}><ChevronRight size={16} /></button>
+                      <button onClick={() => setCurrentViewProperty(null)} title="Back to pipeline" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', display: 'flex', padding: 0 }}><ArrowLeft size={15} /></button>
+                    </div>
+                  )}
+
+                  {(isMobile || !propSidebarCollapsed) && (<>
 
                   {/* Back + title */}
                   <div style={{ padding: '14px 16px', borderBottom: '1px solid #1e293b' }}>
-                    {!isMobile && <button onClick={() => setCurrentViewProperty(null)} style={{ display: 'flex', alignItems: 'center', gap: '5px', color: '#64748b', fontSize: '11px', background: 'none', border: 'none', cursor: 'pointer', marginBottom: '10px', padding: 0, fontFamily: 'inherit' }}>
-                      <ArrowLeft size={12} /> Pipeline
-                    </button>}
+                    {!isMobile && (
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                        <button onClick={() => setCurrentViewProperty(null)} style={{ display: 'flex', alignItems: 'center', gap: '5px', color: '#64748b', fontSize: '11px', background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: 'inherit' }}>
+                          <ArrowLeft size={12} /> Pipeline
+                        </button>
+                        <button onClick={togglePropSidebar} title="Collapse panel" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', display: 'flex', padding: 0 }}><ChevronLeft size={14} /></button>
+                      </div>
+                    )}
                     <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '3px' }}>
                       <input
                         type="text"
@@ -3282,6 +3430,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       </a>
                     )}
                   </div>
+                  </>)}
                 </div>
 
                 {/* ════════════════════════════════════
@@ -3289,6 +3438,110 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 ════════════════════════════════════ */}
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', minWidth: 0 }}>
 
+                  {/* Comparables tab — merged report + Land Registry */}
+                  {propCanvasTab === 'comparables' && (() => {
+                    const lrData = intel.connectors?.landRegistry?.data || {};
+                    const lrItems = lrData.items || [];
+                    const reportComps = an.compsList || [];
+                    const reportCount = an.comps || 0;
+                    const otherComps = (currentViewProperty.comparables || []).filter(c => !c.fromIntelligence);
+                    const total = reportComps.length + lrItems.length + otherComps.length;
+                    const EPC_COL = { A:'#00a550',B:'#50b848',C:'#b3ce3e',D:'#fff200',E:'#f8b832',F:'#f07f30',G:'#ed1c24' };
+                    const tag = (label, kind) => {
+                      const c = kind === 'report' ? { bg:'#ede9fe', fg:'#5b21b6' } : kind === 'manual' ? { bg:'#f1f5f9', fg:'#475569' } : { bg:'#dbeafe', fg:'#1e40af' };
+                      return <span style={{ fontSize:'10px', padding:'1px 6px', borderRadius:'8px', background:c.bg, color:c.fg, whiteSpace:'nowrap', alignSelf:'center' }}>{label}</span>;
+                    };
+                    const metaLine = (parts) => parts.filter(Boolean).length > 0 && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginTop: '2px', flexWrap: 'wrap', color: '#94a3b8', fontSize: '10px' }}>{parts.filter(Boolean).map((p, j) => <span key={j}>{p}</span>)}</div>
+                    );
+                    return (
+                      <div style={{ padding: '14px 20px 20px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap', gap: '8px' }}>
+                          <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8' }}>Comparable sales</div>
+                          <div style={{ fontSize: '11px', color: '#94a3b8' }}>{total} on record{reportComps.length ? ` · ${reportComps.length} from report` : (reportCount ? ` · report cited ${reportCount}` : '')}{lrData.compsEnriched ? ' · EPC enriched' : ''}</div>
+                        </div>
+                        {reportCount > 0 && reportComps.length === 0 && (
+                          <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '8px', padding: '9px 12px', fontSize: '11px', color: '#5b21b6', marginBottom: '10px', lineHeight: '1.5' }}>
+                            The report references {reportCount} comparables but this deal's report predates comp parsing — re-upload the report to pull in its own picks. Sales below come from Land Registry{otherComps.length ? ' plus your manual adds' : ''}.
+                          </div>
+                        )}
+                        {total === 0 ? (
+                          <div style={{ textAlign: 'center', padding: '30px', border: '1px dashed #e2e8f0', borderRadius: '10px', color: '#94a3b8', fontSize: '12px' }}>
+                            No comparables yet — run intelligence to fetch Land Registry sales for {propPostcode || 'this postcode'}.
+                          </div>
+                        ) : (
+                          <div style={{ border: '0.5px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden', background: '#fff' }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '8px', padding: '6px 12px', background: '#f8fafc', borderBottom: '0.5px solid #e2e8f0', fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em' }}>
+                              <span>Address</span><span>Source</span><span style={{ textAlign: 'right' }}>Sold</span>
+                            </div>
+                            {reportComps.map((c, i) => (
+                              <div key={'rc' + i} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '8px', padding: '7px 12px', borderBottom: '0.5px solid #f1f5f9', fontSize: '11px', alignItems: 'center' }}>
+                                <div style={{ minWidth: 0 }}>
+                                  <div style={{ color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.address || '—'}</div>
+                                  {metaLine([
+                                    c.propertyType && <span style={{ color: '#64748b' }}>{c.propertyType}</span>,
+                                    c.bedrooms ? `${c.bedrooms} bed` : null,
+                                    c.floorArea ? `${c.floorArea}m²` : null,
+                                    (c.floorArea && c.soldPrice) ? `£${Math.round(c.soldPrice / Number(c.floorArea)).toLocaleString()}/m²` : null,
+                                    c.tier ? <span style={{ color: '#7c3aed' }}>{c.tier}</span> : null,
+                                  ])}
+                                </div>
+                                {tag('Report', 'report')}
+                                <div style={{ textAlign: 'right' }}>
+                                  <div style={{ color: '#0f172a', fontWeight: '600' }}>{c.soldPrice ? `£${Number(c.soldPrice).toLocaleString()}` : '—'}</div>
+                                  <div style={{ color: '#94a3b8', fontSize: '10px' }}>{c.soldDate || ''}</div>
+                                </div>
+                              </div>
+                            ))}
+                            {lrItems.map((item, i) => {
+                              const epcBg = EPC_COL[item.epcRating] || null;
+                              const epcTxt = item.epcRating ? (['A','B','C'].includes(item.epcRating) ? '#fff' : '#000') : '#000';
+                              return (
+                                <div key={'lr' + i} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '8px', padding: '7px 12px', borderBottom: '0.5px solid #f1f5f9', fontSize: '11px', alignItems: 'center' }}>
+                                  <div style={{ minWidth: 0 }}>
+                                    <div style={{ color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{[item.address, item.town].filter(Boolean).join(', ')}</div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginTop: '2px', flexWrap: 'wrap' }}>
+                                      {item.propertyType && <span style={{ color: '#64748b', fontSize: '10px' }}>{item.propertyType}{item.newBuild ? ' · New build' : ''}</span>}
+                                      {item.epcRating && <span style={{ fontSize: '10px', padding: '0 4px', borderRadius: '3px', background: epcBg, color: epcTxt, fontWeight: '700', lineHeight: '14px' }}>EPC {item.epcRating}</span>}
+                                      {item.habitableRooms && <span style={{ fontSize: '10px', color: '#475569' }}>{item.habitableRooms} rooms</span>}
+                                      {item.floorArea && <span style={{ fontSize: '10px', color: '#475569' }}>{item.floorArea}m²</span>}
+                                      {item.floorArea && item.price && <span style={{ fontSize: '10px', color: '#94a3b8' }}>£{Math.round(item.price / Number(item.floorArea)).toLocaleString()}/m²</span>}
+                                    </div>
+                                  </div>
+                                  {tag('Land Reg', 'lr')}
+                                  <div style={{ textAlign: 'right' }}>
+                                    <div style={{ color: '#0f172a', fontWeight: '600' }}>{item.price ? `£${item.price.toLocaleString()}` : '—'}</div>
+                                    <div style={{ color: '#94a3b8', fontSize: '10px' }}>{item.date?.slice(0, 7)}</div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                            {otherComps.map((c, i) => {
+                              const price = c.soldPrice ?? c.price;
+                              const date = c.soldDate || c.date;
+                              const isReport = /report/i.test(c.source || '');
+                              return (
+                                <div key={'o' + i} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '8px', padding: '7px 12px', borderBottom: '0.5px solid #f1f5f9', fontSize: '11px', alignItems: 'center' }}>
+                                  <div style={{ minWidth: 0 }}>
+                                    <div style={{ color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.address || '—'}</div>
+                                    {metaLine([
+                                      c.bedrooms ? `${c.bedrooms} bed` : null,
+                                      c.notes || null,
+                                    ])}
+                                  </div>
+                                  {tag(isReport ? 'Report' : (c.source || 'Manual'), isReport ? 'report' : 'manual')}
+                                  <div style={{ textAlign: 'right' }}>
+                                    <div style={{ color: '#0f172a', fontWeight: '600' }}>{price ? `£${Number(price).toLocaleString()}` : '—'}</div>
+                                    <div style={{ color: '#94a3b8', fontSize: '10px' }}>{date ? String(date).slice(0, 7) : ''}</div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* AI deal summary — Overview tab */}
                   {propCanvasTab === 'overview' && an.aiSummary && (
@@ -3905,13 +4158,17 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                         <div style={{ border: '0.5px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden' }}>
                           {[
                             { l: 'Purchase price', v: pp2 },
-                            { l: 'Acquisition fees', v: acqFees },
+                            { l: "Buyer's premium", v: pp2 * (parseFloat(dc2.buyersPremium) || 0) / 100, sub: true },
+                            { l: 'SDLT', v: pp2 > 0 ? calcSDLT(pp2, true) : 0, sub: true },
+                            { l: 'Legal fees', v: parseFloat(dc2.legalFees) || 0, sub: true },
+                            { l: 'Survey', v: parseFloat(dc2.surveyCost) || 0, sub: true },
+                            { l: 'Admin fee', v: parseFloat(dc2.adminFee) || 0, sub: true },
                             { l: 'Refurb', v: refurbCost },
+                            { l: 'Contingency', v: contingency, sub: true },
                             { l: 'Holding costs', v: holdingCost },
-                            { l: 'Contingency', v: contingency },
                           ].filter(r => r.v > 0).map(r => (
                             <div key={r.l} style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 12px', fontSize: '12px', borderBottom: '0.5px solid #f1f5f9', color: '#64748b' }}>
-                              <span>{r.l}</span><span>£{Math.round(r.v).toLocaleString()}</span>
+                              <span style={{ paddingLeft: r.sub ? '12px' : 0 }}>{r.l}</span><span>£{Math.round(r.v).toLocaleString()}</span>
                             </div>
                           ))}
                           <div style={{ display: 'flex', justifyContent: 'space-between', padding: '7px 12px', fontSize: '12px', fontWeight: '500', background: '#f8fafc' }}>
@@ -4521,59 +4778,13 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                             </div>
                           )}
 
-                          {/* Land Registry comparables */}
-                          {lr?.items?.length > 0 && (() => {
-                            const subjectRooms = epc?.habitableRooms ? parseInt(epc.habitableRooms) : null;
-                            const matchedItems = subjectRooms && lr.compsEnriched
-                              ? lr.items.filter(it => !it.habitableRooms || parseInt(it.habitableRooms) === subjectRooms)
-                              : lr.items;
-                            const displayItems = matchedItems.length > 0 ? matchedItems : lr.items;
-                            const isFiltered = matchedItems.length < lr.items.length;
-                            return (
-                            <div style={{ border: '1px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden', marginTop: '8px' }}>
-                              <div style={{ padding: '8px 12px', background: '#f8fafc', borderBottom: '1px solid #f1f5f9', fontSize: '11px', fontWeight: '600', color: '#0f172a', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                <span>📋 Land Registry Comparables</span>
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                  {lr.compsEnriched && <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '8px', background: '#dbeafe', color: '#1e40af' }}>+ EPC enriched</span>}
-                                  {isFiltered && <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '8px', background: '#f0fdf4', color: '#166534' }}>{subjectRooms} rooms match</span>}
-                                  <span style={{ fontWeight: '400', color: '#94a3b8' }}>{displayItems.length} sales · {currentViewProperty.postcode || extractPostcode(currentViewProperty.address || '')}</span>
-                                </div>
-                              </div>
-                              <div style={{ maxHeight: '260px', overflowY: 'auto' }}>
-                                {displayItems.slice(0, 12).map((item, i) => {
-                                  const EPC_COL = { A:'#00a550',B:'#50b848',C:'#b3ce3e',D:'#fff200',E:'#f8b832',F:'#f07f30',G:'#ed1c24' };
-                                  const epcBg = EPC_COL[item.epcRating] || null;
-                                  const epcTxt = item.epcRating ? (['A','B','C'].includes(item.epcRating) ? '#fff' : '#000') : '#000';
-                                  return (
-                                    <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr auto', alignItems: 'center', padding: '6px 12px', borderBottom: '0.5px solid #f8fafc', fontSize: '11px', gap: '8px' }}>
-                                      <div style={{ minWidth: 0 }}>
-                                        <div style={{ color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{[item.address, item.town].filter(Boolean).join(', ')}</div>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginTop: '2px', flexWrap: 'wrap' }}>
-                                          {item.propertyType && <span style={{ color: '#64748b', fontSize: '10px' }}>{item.propertyType}{item.newBuild ? ' · New build' : ''}</span>}
-                                          {item.epcRating && (
-                                            <span style={{ fontSize: '10px', padding: '0 4px', borderRadius: '3px', background: epcBg, color: epcTxt, fontWeight: '700', lineHeight: '14px' }}>EPC {item.epcRating}</span>
-                                          )}
-                                          {item.floorArea && <span style={{ fontSize: '10px', color: '#475569' }}>{item.floorArea}m²</span>}
-                                          {item.habitableRooms && <span style={{ fontSize: '10px', color: '#475569' }}>{item.habitableRooms} rooms</span>}
-                                          {item.floorArea && item.price && <span style={{ fontSize: '10px', color: '#94a3b8' }}>£{Math.round(item.price / Number(item.floorArea)).toLocaleString()}/m²</span>}
-                                        </div>
-                                      </div>
-                                      <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                                        <div style={{ fontWeight: '600', color: '#0f172a' }}>£{item.price.toLocaleString()}</div>
-                                        <div style={{ color: '#94a3b8', fontSize: '10px' }}>{item.date?.slice(0, 7)}</div>
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                              {lr.compsEnriched && (
-                                <div style={{ padding: '5px 12px', fontSize: '10px', color: '#94a3b8', borderTop: '0.5px solid #f1f5f9', background: '#fafafa' }}>
-                                  EPC data matched by address · floor area enables £/m² comparison · habitable rooms (bed + reception)
-                                </div>
-                              )}
-                            </div>
-                            );
-                          })()}
+                          {/* Land Registry comparables now live in the dedicated Comparables tab */}
+                          {lr?.items?.length > 0 && (
+                            <button onClick={() => setPropCanvasTab('comparables')} style={{ marginTop: '8px', width: '100%', textAlign: 'left', border: '1px solid #e2e8f0', borderRadius: '8px', background: '#f8fafc', padding: '10px 12px', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span style={{ fontSize: '11px', fontWeight: '600', color: '#0f172a' }}>📋 {lr.items.length} Land Registry comparables{lr.compsEnriched ? ' · EPC enriched' : ''}</span>
+                              <span style={{ fontSize: '11px', color: '#7C3AED', display: 'flex', alignItems: 'center', gap: '4px' }}>View in Comparables <ChevronRight size={12} /></span>
+                            </button>
+                          )}
                         </div>
                       );
                     })()}
@@ -5396,19 +5607,60 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                   { id: 'mj', name: 'Mark Jenkinson & Son', shortName: 'Mark Jenkinson', diaryUrl: 'https://www.markjenkinson.co.uk/auction-diary' },
                   { id: 'pugh', name: 'Pugh Auctions', shortName: 'Pugh', diaryUrl: 'https://www.pugh-auctions.com/auction-diary' },
                   { id: 'allsop', name: 'Allsop Residential', shortName: 'Allsop', diaryUrl: 'https://www.allsop.co.uk/auctions/property-for-auction-in-sheffield/' },
+                  { id: 'mchugh', name: 'McHugh & Co', shortName: 'McHugh', diaryUrl: 'https://www.mchughandco.com/' },
                 ];
+                const scanLots = async () => {
+                  setAuctionScanLoading(true); setAuctionScanResults(null);
+                  try {
+                    const token = localStorage.getItem('crm_session');
+                    const h = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+                    const settings = {
+                      keywords: auctionScanSettings.keywords.split(',').map(s => s.trim().toLowerCase()).filter(Boolean),
+                      postcodeAreas: auctionScanSettings.postcodeAreas.split(',').map(s => s.trim().toUpperCase()).filter(Boolean),
+                      maxGuidePrice: Number(auctionScanSettings.maxGuidePrice) || 100000,
+                      propertyTypes: auctionScanSettings.propertyTypes || 'all',
+                    };
+                    fetch('/api/scan-settings', { method: 'POST', headers: h, body: JSON.stringify(settings) }).catch(() => {});
+                    const res = await fetch('/api/scrape-lots', { method: 'POST', headers: h, body: JSON.stringify(settings) });
+                    const data = await res.json();
+                    setAuctionScanResults(data.results || []);
+                  } catch { setAuctionScanResults([]); }
+                  setAuctionScanLoading(false);
+                  await loadAuctionData();
+                };
                 const manualSelected = auctionSelectedDateId === 'manual';
-                const selectedDate = manualSelected ? null : auctionDates.find(d => d.id === auctionSelectedDateId);
+                const allLotsSelected = auctionSelectedDateId === 'all';
+                const selectedDate = (manualSelected || allLotsSelected) ? null : auctionDates.find(d => d.id === auctionSelectedDateId);
                 const manualLots = auctionLots.filter(l => l.origin === 'manual');
+                const matchesTypeFilter = (pt) => {
+                  const t = auctionLotFilter.type;
+                  if (t === 'all') return true;
+                  const p = (pt || '').toLowerCase();
+                  if (t === 'houses') return !/flat|apartment|maisonette|land|garage|commercial/.test(p);
+                  if (t === 'Semi-detached') return p.includes('semi');
+                  if (t === 'Detached') return p.includes('detached') && !p.includes('semi');
+                  if (t === 'Terraced') return p.includes('terrace');
+                  if (t === 'Flat') return /flat|apartment|maisonette/.test(p);
+                  return p === t.toLowerCase();
+                };
                 const visibleLots = auctionLots.filter(l => {
                   if (manualSelected) { if (l.origin !== 'manual') return false; }
+                  else if (allLotsSelected) { /* every lot, every house */ }
                   else if (auctionSelectedDateId && l.dateId !== auctionSelectedDateId) return false;
+                  if (auctionLotFilter.house !== 'all' && (l.houseName || 'Manual') !== auctionLotFilter.house) return false;
+                  if (auctionLotFilter.date !== 'all') {
+                    if (auctionLotFilter.date === 'tbc') { if (l.auctionDate) return false; }
+                    else if (l.auctionDate !== auctionLotFilter.date) return false;
+                  }
                   if (auctionLotFilter.status !== 'all' && l.status !== auctionLotFilter.status) return false;
-                  if (auctionLotFilter.type !== 'all' && l.propertyType !== auctionLotFilter.type) return false;
+                  if (!matchesTypeFilter(l.propertyType)) return false;
                   if (auctionLotFilter.search && !l.address?.toLowerCase().includes(auctionLotFilter.search.toLowerCase())) return false;
                   return true;
                 });
-                const datesForHouse = (houseId) => auctionDates.filter(d => d.houseId === houseId).sort((a, b) => a.auctionDate.localeCompare(b.auctionDate));
+                const lotHouseOptions = [...new Set(auctionLots.map(l => l.houseName || 'Manual'))].sort();
+                const lotDateOptions = [...new Set(auctionLots.map(l => l.auctionDate).filter(Boolean))].sort();
+                const lotsHaveTbcDates = auctionLots.some(l => !l.auctionDate);
+                const datesForHouse = (houseId) => auctionDates.filter(d => d.houseId === houseId).sort((a, b) => (a.auctionDate || '').localeCompare(b.auctionDate || ''));
                 const kpiInbox = auctionLots.filter(l => l.status === 'unreviewed' || l.isNew).length;
                 const kpiShortlisted = auctionLots.filter(l => l.status === 'shortlisted').length;
                 const kpiWatching = auctionLots.filter(l => l.status === 'watching').length;
@@ -5440,6 +5692,12 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                         </div>
                         <div style={{ flex: 1, overflowY: 'auto', padding: '6px 0' }}>
                           {auctionTabLoading && <div style={{ padding: '20px', textAlign: 'center', color: '#475569', fontSize: '11px' }}>Loading…</div>}
+                          {!auctionTabLoading && (
+                            <div onClick={() => { setAuctionSelectedDateId('all'); setAuctionLotFilter(f => ({ ...f, house: 'all', date: 'all' })); }} style={{ padding: '7px 12px', background: allLotsSelected ? '#1e293b' : 'transparent', borderLeft: `3px solid ${allLotsSelected ? '#059669' : 'transparent'}`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                              <div style={{ fontSize: '12px', fontWeight: '500', color: allLotsSelected ? '#f1f5f9' : '#94a3b8' }}>📋 All lots</div>
+                              <span style={{ fontSize: '10px', padding: '1px 5px', background: '#1e293b', color: auctionLots.length ? '#38bdf8' : '#475569', borderRadius: '4px', fontWeight: '500' }}>{auctionLots.length}</span>
+                            </div>
+                          )}
                           {!auctionTabLoading && HOUSES.map(house => {
                             const dates = datesForHouse(house.id);
                             if (dates.length === 0) return null;
@@ -5452,9 +5710,9 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                   const isDone = date.totalLots > 0 && pct === 100;
                                   const days = daysUntil(date.auctionDate);
                                   return (
-                                    <div key={date.id} onClick={() => setAuctionSelectedDateId(date.id)} style={{ padding: '7px 12px', background: isActive ? '#1e293b' : 'transparent', borderLeft: `3px solid ${isActive ? '#059669' : 'transparent'}`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                    <div key={date.id} onClick={() => { setAuctionSelectedDateId(date.id); setAuctionLotFilter(f => ({ ...f, house: 'all', date: 'all' })); }} style={{ padding: '7px 12px', background: isActive ? '#1e293b' : 'transparent', borderLeft: `3px solid ${isActive ? '#059669' : 'transparent'}`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                                       <div>
-                                        <div style={{ fontSize: '12px', fontWeight: '500', color: isActive ? '#f1f5f9' : '#94a3b8' }}>{new Date(date.auctionDate + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</div>
+                                        <div style={{ fontSize: '12px', fontWeight: '500', color: isActive ? '#f1f5f9' : '#94a3b8' }}>{date.auctionDate ? new Date(date.auctionDate + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Date TBC'}</div>
                                         <div style={{ fontSize: '10px', color: '#475569', marginTop: '1px' }}>{date.totalLots > 0 ? `${date.totalLots} lots · ${date.reviewedCount} done` : 'not started'}</div>
                                       </div>
                                       {date.totalLots > 0 ? (
@@ -5479,7 +5737,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                           {!auctionTabLoading && (
                             <div>
                               <div style={{ padding: '8px 12px 3px', fontSize: '10px', fontWeight: '500', color: '#475569', textTransform: 'uppercase', letterSpacing: '.07em', borderTop: '1px solid #1e293b', marginTop: '4px' }}>Manual</div>
-                              <div onClick={() => setAuctionSelectedDateId('manual')} style={{ padding: '7px 12px', background: manualSelected ? '#1e293b' : 'transparent', borderLeft: `3px solid ${manualSelected ? '#0ea5e9' : 'transparent'}`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                              <div onClick={() => { setAuctionSelectedDateId('manual'); setAuctionLotFilter(f => ({ ...f, house: 'all', date: 'all' })); }} style={{ padding: '7px 12px', background: manualSelected ? '#1e293b' : 'transparent', borderLeft: `3px solid ${manualSelected ? '#0ea5e9' : 'transparent'}`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                                 <div style={{ fontSize: '12px', fontWeight: '500', color: manualSelected ? '#f1f5f9' : '#94a3b8' }}>📌 Watchlist / leads</div>
                                 <span style={{ fontSize: '10px', padding: '1px 5px', background: '#1e293b', color: manualLots.length ? '#38bdf8' : '#475569', borderRadius: '4px', fontWeight: '500' }}>{manualLots.length}</span>
                               </div>
@@ -5498,20 +5756,19 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                             </div>
                           )}
                         </div>
-                        <div style={{ padding: '10px 12px', borderTop: '1px solid #1e293b' }}>
-                          <button onClick={async () => {
-                            setAuctionScanLoading(true); setAuctionScanResults(null);
-                            try {
-                              const token = localStorage.getItem('crm_session');
-                              const res = await fetch('/api/scrape-auctions', { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } });
-                              const data = await res.json();
-                              setAuctionScanResults(data.results || []);
-                            } catch { setAuctionScanResults([]); }
-                            setAuctionScanLoading(false);
-                            await loadAuctionData();
-                          }} disabled={auctionScanLoading} style={{ width: '100%', padding: '7px', background: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: '500', cursor: auctionScanLoading ? 'not-allowed' : 'pointer', opacity: auctionScanLoading ? 0.7 : 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '5px' }}>
+                        <div style={{ padding: '10px 12px', borderTop: '1px solid #1e293b', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                          <input value={auctionScanSettings.keywords} onChange={e => setAuctionScanSettings(s => ({ ...s, keywords: e.target.value }))} placeholder="Region keywords" title="Region keywords, comma-separated (e.g. sheffield, rotherham)" style={{ width: '100%', boxSizing: 'border-box', padding: '6px 8px', background: '#1e293b', color: '#e2e8f0', border: '1px solid #334155', borderRadius: '6px', fontSize: '11px' }} />
+                          <div style={{ display: 'flex', gap: '6px' }}>
+                            <input value={auctionScanSettings.postcodeAreas} onChange={e => setAuctionScanSettings(s => ({ ...s, postcodeAreas: e.target.value }))} placeholder="Postcodes" title="Postcode areas, comma-separated (e.g. S, DN)" style={{ width: '50%', boxSizing: 'border-box', padding: '6px 8px', background: '#1e293b', color: '#e2e8f0', border: '1px solid #334155', borderRadius: '6px', fontSize: '11px' }} />
+                            <input type="number" value={auctionScanSettings.maxGuidePrice} onChange={e => setAuctionScanSettings(s => ({ ...s, maxGuidePrice: e.target.value }))} placeholder="Max £" title="Max guide price (£)" style={{ width: '50%', boxSizing: 'border-box', padding: '6px 8px', background: '#1e293b', color: '#e2e8f0', border: '1px solid #334155', borderRadius: '6px', fontSize: '11px' }} />
+                          </div>
+                          <select value={auctionScanSettings.propertyTypes} onChange={e => setAuctionScanSettings(s => ({ ...s, propertyTypes: e.target.value }))} title="Which property types to keep when scanning" style={{ width: '100%', boxSizing: 'border-box', padding: '6px 8px', background: '#1e293b', color: '#e2e8f0', border: '1px solid #334155', borderRadius: '6px', fontSize: '11px' }}>
+                            <option value="all">Scan: all property types</option>
+                            <option value="houses">Scan: houses only</option>
+                          </select>
+                          <button onClick={scanLots} disabled={auctionScanLoading} style={{ width: '100%', padding: '7px', background: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: '500', cursor: auctionScanLoading ? 'not-allowed' : 'pointer', opacity: auctionScanLoading ? 0.7 : 1, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '5px' }}>
                             <RefreshCw size={11} />
-                            {auctionScanLoading ? 'Scanning…' : 'Scan all houses'}
+                            {auctionScanLoading ? 'Scanning…' : 'Scan lots'}
                           </button>
                         </div>
                       </div>
@@ -5535,6 +5792,15 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                           </div>
                         ))}
                         <div style={{ marginLeft: 'auto', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                          <select value={auctionLotFilter.house} onChange={e => { setAuctionLotFilter(f => ({ ...f, house: e.target.value })); setAuctionSelectedDateId('all'); }} style={{ padding: '4px 7px', border: '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', background: '#fff', color: '#475569', maxWidth: '150px' }}>
+                            <option value="all">All auction houses</option>
+                            {lotHouseOptions.map(h => <option key={h} value={h}>{h}</option>)}
+                          </select>
+                          <select value={auctionLotFilter.date} onChange={e => { setAuctionLotFilter(f => ({ ...f, date: e.target.value })); setAuctionSelectedDateId('all'); }} style={{ padding: '4px 7px', border: '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', background: '#fff', color: '#475569' }}>
+                            <option value="all">All dates</option>
+                            {lotDateOptions.map(d => <option key={d} value={d}>{new Date(d + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}</option>)}
+                            {lotsHaveTbcDates && <option value="tbc">Date TBC</option>}
+                          </select>
                           <select value={auctionLotFilter.status} onChange={e => setAuctionLotFilter(f => ({ ...f, status: e.target.value }))} style={{ padding: '4px 7px', border: '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', background: '#fff', color: '#475569' }}>
                             <option value="all">All statuses</option>
                             <option value="unreviewed">Unreviewed</option>
@@ -5546,32 +5812,33 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                           </select>
                           {isMobile && (
                             <select value={auctionSelectedDateId || ''} onChange={e => setAuctionSelectedDateId(e.target.value || null)} style={{ padding: '4px 7px', border: '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', background: '#fff', color: '#475569', maxWidth: '150px' }}>
+                              <option value="all">📋 All lots</option>
                               <option value="manual">📌 Watchlist / manual</option>
-                              {auctionDates.map(d => <option key={d.id} value={d.id}>{d.houseName ? d.houseName.split(' ').slice(0, 2).join(' ') + ' — ' : ''}{d.auctionDate}</option>)}
+                              {auctionDates.map(d => <option key={d.id} value={d.id}>{d.houseName ? d.houseName.split(' ').slice(0, 2).join(' ') + ' — ' : ''}{d.auctionDate || 'Date TBC'}</option>)}
                             </select>
                           )}
                           <select value={auctionLotFilter.type} onChange={e => setAuctionLotFilter(f => ({ ...f, type: e.target.value }))} style={{ padding: '4px 7px', border: '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', background: '#fff', color: '#475569' }}>
                             <option value="all">All types</option>
+                            <option value="houses">Houses only</option>
                             <option value="Terraced">Terraced</option>
                             <option value="Semi-detached">Semi-detached</option>
                             <option value="Detached">Detached</option>
-                            <option value="Flat">Flat</option>
+                            <option value="Flat">Flat / Apartment</option>
                           </select>
                           <input value={auctionLotFilter.search} onChange={e => setAuctionLotFilter(f => ({ ...f, search: e.target.value }))} placeholder="Search address…" style={{ padding: '4px 9px', border: '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', width: isMobile ? '100%' : '150px' }} />
                           {isMobile && (
-                            <button onClick={async () => {
-                              setAuctionScanLoading(true);
-                              try {
-                                const token = localStorage.getItem('crm_session');
-                                const res = await fetch('/api/scrape-auctions', { method: 'POST', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } });
-                                const data = await res.json();
-                                setAuctionScanResults(data.results || []);
-                              } catch { setAuctionScanResults([]); }
-                              setAuctionScanLoading(false);
-                              await loadAuctionData();
-                            }} disabled={auctionScanLoading} style={{ padding: '4px 10px', background: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', cursor: 'pointer', opacity: auctionScanLoading ? 0.7 : 1 }}>
-                              {auctionScanLoading ? 'Scanning…' : 'Scan'}
-                            </button>
+                            <>
+                              <input value={auctionScanSettings.keywords} onChange={e => setAuctionScanSettings(s => ({ ...s, keywords: e.target.value }))} placeholder="Region keywords" style={{ padding: '10px', border: '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '14px', width: '100%', boxSizing: 'border-box' }} />
+                              <input value={auctionScanSettings.postcodeAreas} onChange={e => setAuctionScanSettings(s => ({ ...s, postcodeAreas: e.target.value }))} placeholder="Postcodes (S, DN)" style={{ padding: '10px', border: '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '14px', width: '44%', boxSizing: 'border-box' }} />
+                              <input type="number" value={auctionScanSettings.maxGuidePrice} onChange={e => setAuctionScanSettings(s => ({ ...s, maxGuidePrice: e.target.value }))} placeholder="Max guide £" style={{ padding: '10px', border: '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '14px', width: '44%', boxSizing: 'border-box' }} />
+                              <select value={auctionScanSettings.propertyTypes} onChange={e => setAuctionScanSettings(s => ({ ...s, propertyTypes: e.target.value }))} style={{ padding: '10px', border: '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '14px', width: '100%', boxSizing: 'border-box', background: '#fff', color: '#475569' }}>
+                                <option value="all">Scan: all property types</option>
+                                <option value="houses">Scan: houses only</option>
+                              </select>
+                              <button onClick={scanLots} disabled={auctionScanLoading} style={{ padding: '10px 14px', background: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '14px', cursor: 'pointer', opacity: auctionScanLoading ? 0.7 : 1 }}>
+                                {auctionScanLoading ? 'Scanning…' : 'Scan lots'}
+                              </button>
+                            </>
                           )}
                         </div>
                       </div>
@@ -5580,7 +5847,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       {selectedDate && (
                         <div style={{ padding: '9px 14px', background: '#ffffff', borderBottom: '0.5px solid #e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0, flexWrap: 'wrap', gap: '8px' }}>
                           <div>
-                            <div style={{ fontSize: '13px', fontWeight: '500', color: '#0f172a' }}>{selectedDate.houseName} — {new Date(selectedDate.auctionDate + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}</div>
+                            <div style={{ fontSize: '13px', fontWeight: '500', color: '#0f172a' }}>{selectedDate.houseName} — {selectedDate.auctionDate ? new Date(selectedDate.auctionDate + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : 'Date TBC'}</div>
                             <div style={{ fontSize: '10px', color: '#64748b', marginTop: '2px' }}>
                               {selectedDate.totalLots} lots · {selectedDate.reviewedCount} reviewed · {selectedDate.shortlistedCount} shortlisted
                               {(() => { const d = daysUntil(selectedDate.auctionDate); return d != null ? <span> · <strong style={{ color: d <= 7 ? '#dc2626' : '#475569' }}>{d} days away</strong></span> : null; })()}
@@ -5630,8 +5897,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                         {!auctionTabLoading && visibleLots.length === 0 && (
                           <div style={{ padding: '60px 40px', textAlign: 'center', color: '#94a3b8' }}>
                             <Gavel size={28} style={{ marginBottom: '10px', opacity: 0.3 }} />
-                            <div style={{ fontSize: '13px', fontWeight: '500', color: '#64748b' }}>{manualSelected ? 'No manual leads yet' : auctionSelectedDateId ? 'No lots for this date' : 'Select an auction date'}</div>
-                            <div style={{ fontSize: '11px', marginTop: '4px' }}>{manualSelected ? 'Add a lead above to start watching it' : auctionSelectedDateId ? 'Scan or manually add lots to get started' : 'Pick a date in the left panel to see lots'}</div>
+                            <div style={{ fontSize: '13px', fontWeight: '500', color: '#64748b' }}>{manualSelected ? 'No manual leads yet' : allLotsSelected ? 'No lots yet' : auctionSelectedDateId ? 'No lots for this date' : 'Select an auction date'}</div>
+                            <div style={{ fontSize: '11px', marginTop: '4px' }}>{manualSelected ? 'Add a lead above to start watching it' : allLotsSelected ? 'Press Scan lots to search every auction house' : auctionSelectedDateId ? 'Scan or manually add lots to get started' : 'Pick a date in the left panel to see lots'}</div>
                           </div>
                         )}
                         {!auctionTabLoading && visibleLots.map(lot => {
@@ -5643,14 +5910,23 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                             <div key={lot.id} style={{ display: 'grid', gridTemplateColumns: '18px 46px 1fr 84px 34px 78px 50px 108px', padding: '8px 14px', borderBottom: '0.5px solid #f1f5f9', background: rowBg, alignItems: 'center', opacity: isInactive ? 0.5 : 1, minWidth: '560px' }}>
                               <input type="checkbox" checked={isSelected} onChange={() => setAuctionSelectedLotIds(prev => { const n = new Set(prev); n.has(lot.id) ? n.delete(lot.id) : n.add(lot.id); return n; })} style={{ width: '13px', height: '13px' }} />
                               <div style={{ fontSize: '11px', fontWeight: '500', color: '#475569' }}>{lot.lotNumber || '—'}</div>
-                              <div style={{ minWidth: 0 }}>
-                                <div style={{ fontSize: '12px', fontWeight: '500', color: isInactive ? '#94a3b8' : '#0f172a', textDecoration: isInactive ? 'line-through' : 'none', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                  {lot.address}
-                                  {lot.isNew && lot.status === 'unreviewed' && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#fef3c7', color: '#92400e', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>New</span>}
-                                  {lot.guidePriceChanged && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#fee2e2', color: '#991b1b', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>Price</span>}
-                                  {lot.isWithdrawn && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#f1f5f9', color: '#64748b', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>Withdrawn</span>}
+                              <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                {!isMobile && lot.imageUrl && (lot.lotUrl
+                                  ? <a href={lot.lotUrl} target="_blank" rel="noreferrer" style={{ flexShrink: 0, display: 'flex' }}><img src={lot.imageUrl} alt="" width="24" height="24" loading="lazy" style={{ width: '24px', height: '24px', borderRadius: '4px', objectFit: 'cover' }} /></a>
+                                  : <img src={lot.imageUrl} alt="" width="24" height="24" loading="lazy" style={{ width: '24px', height: '24px', borderRadius: '4px', objectFit: 'cover', flexShrink: 0 }} />)}
+                                <div style={{ minWidth: 0 }}>
+                                  <div style={{ fontSize: '12px', fontWeight: '500', color: isInactive ? '#94a3b8' : '#0f172a', textDecoration: isInactive ? 'line-through' : 'none', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                    {lot.lotUrl ? <a href={lot.lotUrl} target="_blank" rel="noreferrer" title="Open listing on the auction site" style={{ color: isInactive ? '#94a3b8' : '#0369a1', textDecoration: 'underline', textDecorationColor: '#7dd3fc', textUnderlineOffset: '2px' }}>{lot.address} ↗</a> : lot.address}
+                                    {lot.isNew && lot.status === 'unreviewed' && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#fef3c7', color: '#92400e', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>New</span>}
+                                    {lot.guidePriceChanged && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#fee2e2', color: '#991b1b', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>Price</span>}
+                                    {lot.isWithdrawn && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#f1f5f9', color: '#64748b', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>Withdrawn</span>}
+                                  </div>
+                                  <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '1px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                    {lot.houseName || 'Manual'}
+                                    {lot.auctionDate ? ` · ${new Date(lot.auctionDate + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}` : ' · date TBC'}
+                                    {lot.previousGuidePrice ? ` · was £${Number(lot.previousGuidePrice).toLocaleString()}` : ''}
+                                  </div>
                                 </div>
-                                {lot.previousGuidePrice && <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '1px' }}>was £{Number(lot.previousGuidePrice).toLocaleString()}</div>}
                               </div>
                               <div style={{ fontSize: '11px', color: '#475569', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lot.propertyType || '—'}</div>
                               <div style={{ fontSize: '12px', color: '#475569', textAlign: 'center' }}>{lot.bedrooms || '—'}</div>
@@ -5706,7 +5982,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                           <span style={{ fontSize: '10px', color: '#64748b' }}>Last scan:</span>
                           {auctionScanResults.map((r, i) => (
                             <span key={i} style={{ fontSize: '10px', padding: '2px 7px', background: r.error ? '#f59e0b20' : '#05966920', color: r.error ? '#f59e0b' : '#4ade80', borderRadius: '5px' }}>
-                              {r.name?.split(' ').slice(0, 2).join(' ')}: {r.error ? 'blocked' : `~${r.estimatedLots || 0} lots`}
+                              {r.name?.split(' ').slice(0, 2).join(' ')}: {r.error ? 'blocked' : r.matched != null ? `${r.matched} matched · ${r.newLots || 0} new` : `~${r.estimatedLots || 0} lots`}
                             </span>
                           ))}
                           <button onClick={() => setAuctionScanResults(null)} style={{ marginLeft: 'auto', fontSize: '11px', color: '#475569', background: 'transparent', border: 'none', cursor: 'pointer' }}>✕</button>
@@ -7331,17 +7607,32 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
 
                 const addTaskSubtask = (taskId, title) => {
                   if (!title.trim()) return;
-                  setTasks(prev => prev.map(t => t.id === taskId ? { ...t, subtasks: [...(t.subtasks || []), { id: Date.now(), title: title.trim(), done: false, assignee: '', dueDate: '', createdAt: new Date().toISOString() }] } : t));
+                  setTasks(prev => prev.map(t => t.id === taskId ? { ...t, subtasks: [...(t.subtasks || []), { id: Date.now(), title: title.trim(), done: false, assignee: '', dueDate: '', completedAt: null, completedBy: '', createdAt: new Date().toISOString() }] } : t));
                   setDrawerNewSubtask('');
                 };
 
                 const toggleSubtask = (taskId, subtaskId) => {
                   setTasks(prev => prev.map(t => {
                     if (t.id !== taskId) return t;
-                    const updated = (t.subtasks || []).map(s => s.id === subtaskId ? { ...s, done: !s.done } : s);
+                    const updated = (t.subtasks || []).map(s => s.id === subtaskId ? { ...s, done: !s.done, completedAt: !s.done ? new Date().toISOString() : null, completedBy: !s.done ? (user.name || 'You') : '' } : s);
                     const allDone = updated.length > 0 && updated.every(s => s.done);
                     return { ...t, subtasks: updated, ...(allDone && normStatus(t) !== 'done' ? { status: 'done', completedAt: new Date().toISOString(), completedBy: user.name || 'You' } : {}) };
                   }));
+                };
+
+                const blankDraftTask = () => ({
+                  id: null, title: '', dueDate: '', priority: 'Medium',
+                  status: 'not_started', linkedType: '', linkedId: null, linkedName: '',
+                  notes: '', assignee: user.name || 'Ashley',
+                  createdDate: todayStr, createdBy: user.name || 'Ashley',
+                  waitingOn: '', expectedResponseDate: '', subtasks: [], comments: [], reminders: [],
+                  activityLog: [{ id: Date.now(), type: 'created', detail: 'Task created', user: user.name || 'You', at: new Date().toISOString() }],
+                });
+
+                const openNewTaskDrawer = () => {
+                  setDraftTask(blankDraftTask());
+                  setDrawerMode('create');
+                  setShowTaskDrawer(true);
                 };
 
                 const handleAddTask = (e) => {
@@ -7523,7 +7814,10 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                         <div style={{ flex: 1, minWidth: 0 }}>
                           {/* Add task form */}
                           <div style={{ background: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '14px 16px', marginBottom: '12px' }}>
-                            <div style={{ fontSize: '11px', fontWeight: '600', color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '10px' }}>Add task</div>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                              <div style={{ fontSize: '11px', fontWeight: '600', color: '#64748b', textTransform: 'uppercase', letterSpacing: '.06em' }}>Add task</div>
+                              <button type="button" onClick={openNewTaskDrawer} style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '6px 12px', background: '#fff7ed', color: '#9a3412', border: '1px solid #fed7aa', borderRadius: '6px', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}><Plus size={13} />New task</button>
+                            </div>
                             <form onSubmit={handleAddTask} style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                               <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '2fr 1fr 1fr', gap: '8px' }}>
                                 <input required placeholder="Task title (required)" value={newTaskTitle} onChange={e => setNewTaskTitle(e.target.value)} style={{ padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px' }} />
@@ -7596,7 +7890,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                 {/* Task row */}
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '9px 10px' }}>
                                   <input type="checkbox" checked={isDone} onChange={() => toggleTaskDone(task)} style={{ width: '16px', height: '16px', cursor: 'pointer', flexShrink: 0, accentColor: '#d97706' }} />
-                                  <div style={{ flex: 1, minWidth: 0, cursor: 'pointer' }} onClick={() => { setDrawerTaskId(task.id); setShowTaskDrawer(true); }}>
+                                  <div style={{ flex: 1, minWidth: 0, cursor: 'pointer' }} onClick={() => { setDrawerTaskId(task.id); setDrawerMode('edit'); setShowTaskDrawer(true); }}>
                                     <div style={{ fontWeight: isDone ? '400' : '600', color: isDone ? '#94a3b8' : '#0f172a', textDecoration: isDone ? 'line-through' : 'none', fontSize: '13px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.title}</div>
                                     {(task.linkedType && task.linkedName) && <div style={{ fontSize: '11px', color: '#64748b', marginTop: '1px' }}>{task.linkedType}: {task.linkedName}</div>}
                                     {task.waitingOn && <div style={{ fontSize: '10px', color: '#92400e', marginTop: '1px' }}>Waiting on: {task.waitingOn}</div>}
@@ -7611,7 +7905,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                     <button onClick={() => { setExpandedTaskId(isExpanded ? null : task.id); if (!isExpanded) setExpandedTaskSubTab('subtasks'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', padding: '2px', display: 'flex' }} title="Expand">
                                       {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
                                     </button>
-                                    <button onClick={() => { setDrawerTaskId(task.id); setShowTaskDrawer(true); }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', padding: '2px', display: 'flex' }} title="Open full details">
+                                    <button onClick={() => { setDrawerTaskId(task.id); setDrawerMode('edit'); setShowTaskDrawer(true); }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', padding: '2px', display: 'flex' }} title="Open full details">
                                       <Pencil size={13} />
                                     </button>
                                     <button onClick={() => { if (!window.confirm('Delete this task?')) return; setTasks(prev => prev.filter(t => t.id !== task.id)); }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#fca5a5', padding: '2px', display: 'flex' }} title="Delete">
@@ -10495,8 +10789,9 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
       })()}
 
       {/* ==================== TASK DRAWER ==================== */}
-      {showTaskDrawer && drawerTaskId && (() => {
-        const task = tasks.find(t => t.id === drawerTaskId);
+      {showTaskDrawer && (drawerMode === 'create' ? draftTask : drawerTaskId) && (() => {
+        const isCreate = drawerMode === 'create';
+        const task = isCreate ? draftTask : tasks.find(t => t.id === drawerTaskId);
         if (!task) { setShowTaskDrawer(false); return null; }
         const ns = task.status === 'open' ? 'not_started' : (task.status || 'not_started');
         const subtasks = task.subtasks || [];
@@ -10505,20 +10800,79 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
         const doneSubtasks = subtasks.filter(s => s.done).length;
         const assigneeOptions = crmUsers.length > 0 ? crmUsers.map(u => u.name).filter(Boolean) : [user.name || 'Ashley'];
         const drawerUpdate = (changes) => {
+          if (isCreate) { setDraftTask(prev => ({ ...prev, ...changes })); return; }
           const logEntry = { id: Date.now() + Math.random(), type: 'updated', detail: Object.keys(changes).join(', ') + ' updated', user: user.name || 'You', at: new Date().toISOString() };
           setTasks(prev => prev.map(t => t.id === task.id ? { ...t, ...changes, activityLog: [...(t.activityLog || []), logEntry], updatedAt: new Date().toISOString() } : t));
+        };
+        const mutateList = (key, updater) => {
+          if (isCreate) { setDraftTask(prev => ({ ...prev, [key]: updater(prev[key] || []) })); return; }
+          setTasks(prev => prev.map(t => t.id === task.id ? { ...t, [key]: updater(t[key] || []) } : t));
+        };
+        const toggleDrawerSubtask = (st) => {
+          const updatedSubs = subtasks.map(s => s.id === st.id ? { ...s, done: !s.done, completedAt: !s.done ? new Date().toISOString() : null, completedBy: !s.done ? (user.name || 'You') : '' } : s);
+          const allDone = updatedSubs.length > 0 && updatedSubs.every(s => s.done);
+          const statusChanges = (allDone && ns !== 'done') ? { status: 'done', completedAt: new Date().toISOString(), completedBy: user.name || 'You' } : {};
+          if (isCreate) { setDraftTask(prev => ({ ...prev, subtasks: updatedSubs, ...statusChanges })); return; }
+          setTasks(prev => prev.map(t => t.id === task.id ? { ...t, subtasks: updatedSubs, ...statusChanges } : t));
+        };
+        const updateSubtaskDate = (st, dateStr) => {
+          mutateList('subtasks', subs => subs.map(s => s.id === st.id ? { ...s, completedAt: dateStr ? new Date(dateStr).toISOString() : null } : s));
+        };
+        const addDrawerSubtask = (title) => {
+          if (!title.trim()) return;
+          mutateList('subtasks', subs => [...subs, { id: Date.now(), title: title.trim(), done: false, assignee: '', dueDate: '', completedAt: null, completedBy: '', createdAt: new Date().toISOString() }]);
+        };
+        const deleteDrawerSubtask = (id) => mutateList('subtasks', subs => subs.filter(s => s.id !== id));
+        const addDrawerComment = (body) => {
+          if (!body.trim()) return;
+          const comment = { id: Date.now(), author: user.name || 'You', body: body.trim(), createdAt: new Date().toISOString(), edited: false };
+          mutateList('comments', cs => [...cs, comment]);
+        };
+        const closeDrawer = () => {
+          if (isCreate) {
+            if (draftTask.title && draftTask.title.trim()) setTasks(prev => [...prev, draftTask]);
+            setDraftTask(null);
+            setDrawerMode('edit');
+          }
+          setShowTaskDrawer(false);
+        };
+        const startDrawerResize = (e) => {
+          if (isMobile) return;
+          e.preventDefault();
+          const startX = e.clientX, startY = e.clientY;
+          const startW = drawerSize.width;
+          const startH = drawerSize.height || window.innerHeight;
+          const onMove = (ev) => {
+            const newW = Math.min(window.innerWidth * 0.95, Math.max(480, startW + (startX - ev.clientX)));
+            const newH = Math.min(window.innerHeight * 0.95, Math.max(400, startH + (startY - ev.clientY)));
+            setDrawerSize({ width: newW, height: newH });
+          };
+          const onUp = () => {
+            window.removeEventListener('mousemove', onMove);
+            window.removeEventListener('mouseup', onUp);
+            setDrawerSize(curr => { try { localStorage.setItem('taskDrawerSize', JSON.stringify(curr)); } catch (err) {} return curr; });
+          };
+          window.addEventListener('mousemove', onMove);
+          window.addEventListener('mouseup', onUp);
         };
         const lo = task.linkedType === 'Property' ? properties : task.linkedType === 'Company' ? companies : task.linkedType === 'Contact' ? contacts : [];
         const inp = { padding: '7px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', width: '100%', background: '#fff', boxSizing: 'border-box' };
         const lbl = { fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '5px' };
         const fld = { marginBottom: '14px' };
+        const renderedWidth = Math.min(drawerSize.width, window.innerWidth * 0.95);
+        const renderedHeight = drawerSize.height ? Math.min(drawerSize.height, window.innerHeight * 0.95) : null;
         return (
-          <div style={{ position: 'fixed', inset: 0, zIndex: 1100, display: 'flex', alignItems: 'stretch', justifyContent: 'flex-end' }} onClick={e => { if (e.target === e.currentTarget) setShowTaskDrawer(false); }}>
-            <div style={{ width: isMobile ? '100%' : '520px', background: '#fff', borderLeft: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', boxShadow: '-4px 0 24px rgba(0,0,0,.08)', height: '100%', overflowY: 'auto' }}>
+          <div style={{ position: 'fixed', inset: 0, zIndex: 1100 }} onClick={e => { if (e.target === e.currentTarget) closeDrawer(); }}>
+            <div style={{ position: 'absolute', right: 0, bottom: 0, top: isMobile ? 0 : 'auto', width: isMobile ? '100%' : `${renderedWidth}px`, height: isMobile ? '100%' : (renderedHeight ? `${renderedHeight}px` : '100%'), background: '#fff', borderLeft: '1px solid #e2e8f0', borderTop: isMobile ? 'none' : '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', boxShadow: '-4px 0 24px rgba(0,0,0,.08)', overflowY: 'auto' }}>
+              {!isMobile && (
+                <div onMouseDown={startDrawerResize} title="Drag to resize" style={{ position: 'absolute', top: 0, left: 0, width: '18px', height: '18px', cursor: 'nwse-resize', zIndex: 2, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <div style={{ width: '8px', height: '8px', borderTop: '2px solid #cbd5e1', borderLeft: '2px solid #cbd5e1' }} />
+                </div>
+              )}
               {/* Drawer header */}
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: isMobile ? '14px 16px' : '16px 20px', borderBottom: '1px solid #e2e8f0', position: 'sticky', top: 0, background: '#fff', zIndex: 1 }}>
-                <input value={task.title} onChange={e => drawerUpdate({ title: e.target.value })} style={{ flex: 1, fontWeight: '600', fontSize: '15px', border: 'none', outline: 'none', color: '#0f172a', padding: 0 }} />
-                <button onClick={() => setShowTaskDrawer(false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', display: 'flex' }}><X size={18} /></button>
+                <input value={task.title} onChange={e => drawerUpdate({ title: e.target.value })} placeholder="Task title…" style={{ flex: 1, fontWeight: '600', fontSize: '15px', border: 'none', outline: 'none', color: '#0f172a', padding: 0 }} />
+                <button onClick={closeDrawer} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', display: 'flex' }}><X size={18} /></button>
               </div>
               <div style={{ padding: isMobile ? '14px 16px' : '18px 20px', flex: 1 }}>
                 {/* Status + Priority row */}
@@ -10588,7 +10942,9 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 {/* Notes / Description */}
                 <div style={fld}>
                   <div style={lbl}>Notes</div>
-                  <textarea value={task.notes || ''} onChange={e => drawerUpdate({ notes: e.target.value })} rows={3} placeholder="Add notes…" style={{ ...inp, resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5' }} />
+                  <MarkdownToolbar textareaId="task-drawer-notes" value={task.notes || ''} onChange={v => drawerUpdate({ notes: v })} />
+                  <textarea id="task-drawer-notes" value={task.notes || ''} onChange={e => drawerUpdate({ notes: e.target.value })} rows={4} placeholder="Add notes… (use the toolbar for bold/italic/underline/lists)" style={{ ...inp, resize: 'vertical', fontFamily: 'inherit', lineHeight: '1.5' }} />
+                  {task.notes && <div style={{ marginTop: '6px', padding: '8px 10px', background: '#f8fafc', borderRadius: '6px', fontSize: '13px', color: '#334155', lineHeight: '1.5' }}>{renderTaskMarkdown(task.notes)}</div>}
                 </div>
                 {/* Subtasks */}
                 <div style={fld}>
@@ -10598,18 +10954,17 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                   {subtasks.length === 0 && <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '8px' }}>No subtasks yet</div>}
                   {subtasks.map(st => (
                     <div key={st.id} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '5px 0', borderBottom: '1px solid #f8fafc' }}>
-                      <input type="checkbox" checked={st.done} onChange={() => {
-                        const updatedSubs = subtasks.map(s => s.id === st.id ? { ...s, done: !s.done } : s);
-                        const allDone = updatedSubs.length > 0 && updatedSubs.every(s => s.done);
-                        setTasks(prev => prev.map(t => t.id === task.id ? { ...t, subtasks: updatedSubs, ...(allDone && ns !== 'done' ? { status: 'done', completedAt: new Date().toISOString(), completedBy: user.name } : {}) } : t));
-                      }} style={{ width: '14px', height: '14px', cursor: 'pointer', accentColor: '#d97706' }} />
+                      <input type="checkbox" checked={st.done} onChange={() => toggleDrawerSubtask(st)} style={{ width: '14px', height: '14px', cursor: 'pointer', accentColor: '#d97706' }} />
                       <span style={{ flex: 1, fontSize: '13px', color: st.done ? '#94a3b8' : '#0f172a', textDecoration: st.done ? 'line-through' : 'none' }}>{st.title}</span>
-                      <button onClick={() => setTasks(prev => prev.map(t => t.id === task.id ? { ...t, subtasks: (t.subtasks || []).filter(s => s.id !== st.id) } : t))} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#fca5a5', display: 'flex', padding: '2px' }}><X size={12} /></button>
+                      {st.done && (
+                        <input type="date" value={st.completedAt ? st.completedAt.split('T')[0] : ''} onChange={e => updateSubtaskDate(st, e.target.value)} style={{ padding: '3px 6px', border: '1px solid #e2e8f0', borderRadius: '5px', fontSize: '11px', color: '#64748b' }} />
+                      )}
+                      <button onClick={() => deleteDrawerSubtask(st.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#fca5a5', display: 'flex', padding: '2px' }}><X size={12} /></button>
                     </div>
                   ))}
                   <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
-                    <input id="drawer-subtask-input" placeholder="Add subtask…" onKeyDown={e => { if (e.key === 'Enter') { const v = e.target.value.trim(); if (v) { setTasks(prev => prev.map(t => t.id === task.id ? { ...t, subtasks: [...(t.subtasks || []), { id: Date.now(), title: v, done: false, createdAt: new Date().toISOString() }] } : t)); e.target.value = ''; } } }} style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: '6px', padding: '6px 10px', fontSize: '12px' }} />
-                    <button onClick={() => { const inp = document.getElementById('drawer-subtask-input'); const v = inp?.value?.trim(); if (v) { setTasks(prev => prev.map(t => t.id === task.id ? { ...t, subtasks: [...(t.subtasks || []), { id: Date.now(), title: v, done: false, createdAt: new Date().toISOString() }] } : t)); if (inp) inp.value = ''; } }} style={{ padding: '6px 12px', background: '#d97706', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', fontWeight: '600' }}>Add</button>
+                    <input id="drawer-subtask-input" placeholder="Add subtask…" onKeyDown={e => { if (e.key === 'Enter') { const v = e.target.value.trim(); if (v) { addDrawerSubtask(v); e.target.value = ''; } } }} style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: '6px', padding: '6px 10px', fontSize: '12px' }} />
+                    <button onClick={() => { const el = document.getElementById('drawer-subtask-input'); const v = el?.value?.trim(); if (v) { addDrawerSubtask(v); if (el) el.value = ''; } }} style={{ padding: '6px 12px', background: '#d97706', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', fontWeight: '600' }}>Add</button>
                   </div>
                 </div>
                 {/* Comments */}
@@ -10623,13 +10978,14 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: cm.author === user.name ? '#fef3c7' : '#e1f5ee', color: cm.author === user.name ? '#92400e' : '#0f6e56', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', fontWeight: '700', flexShrink: 0 }}>{(cm.author || '?').split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase()}</div>
                       <div style={{ flex: 1, background: '#f8fafc', borderRadius: '8px', padding: '8px 10px' }}>
                         <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '3px' }}><strong>{cm.author}</strong> · {cm.createdAt ? new Date(cm.createdAt).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : ''}</div>
-                        <div style={{ fontSize: '13px', color: '#0f172a', lineHeight: '1.5' }}>{cm.body}</div>
+                        <div style={{ fontSize: '13px', color: '#0f172a', lineHeight: '1.5' }}>{renderTaskMarkdown(cm.body)}</div>
                       </div>
                     </div>
                   ))}
-                  <div style={{ display: 'flex', gap: '8px', marginTop: '6px' }}>
-                    <input id="drawer-comment-input" placeholder={`${user.name || 'You'}: write a comment…`} onKeyDown={e => { if (e.key === 'Enter') { const v = e.target.value.trim(); if (v) { const comment = { id: Date.now(), author: user.name || 'You', body: v, createdAt: new Date().toISOString(), edited: false }; setTasks(prev => prev.map(t => t.id === task.id ? { ...t, comments: [...(t.comments || []), comment] } : t)); e.target.value = ''; } } }} style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: '6px', padding: '7px 10px', fontSize: '13px' }} />
-                    <button onClick={() => { const el = document.getElementById('drawer-comment-input'); const v = el?.value?.trim(); if (v) { const comment = { id: Date.now(), author: user.name || 'You', body: v, createdAt: new Date().toISOString(), edited: false }; setTasks(prev => prev.map(t => t.id === task.id ? { ...t, comments: [...(t.comments || []), comment] } : t)); if (el) el.value = ''; } }} style={{ padding: '7px 14px', background: '#d97706', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '13px', cursor: 'pointer', fontWeight: '600' }}>Post</button>
+                  <MarkdownToolbar textareaId="drawer-comment-input" value={drawerNewComment} onChange={v => setDrawerNewComment(v)} />
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <textarea id="drawer-comment-input" rows={2} placeholder={`${user.name || 'You'}: write a comment…`} value={drawerNewComment} onChange={e => setDrawerNewComment(e.target.value)} style={{ flex: 1, border: '1px solid #e2e8f0', borderRadius: '6px', padding: '7px 10px', fontSize: '13px', fontFamily: 'inherit', resize: 'vertical' }} />
+                    <button onClick={() => { addDrawerComment(drawerNewComment); setDrawerNewComment(''); }} style={{ padding: '7px 14px', background: '#d97706', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '13px', cursor: 'pointer', fontWeight: '600', alignSelf: 'flex-start' }}>Post</button>
                   </div>
                 </div>
                 {/* Activity log */}
@@ -10652,8 +11008,12 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                   {task.completedAt && <span>Completed {new Date(task.completedAt).toLocaleDateString('en-GB')}{task.completedBy ? ` by ${task.completedBy}` : ''}</span>}
                 </div>
                 <div style={{ marginTop: '16px', display: 'flex', gap: '8px' }}>
-                  <button onClick={() => { if (!window.confirm('Delete this task?')) return; setTasks(prev => prev.filter(t => t.id !== task.id)); setShowTaskDrawer(false); }} style={{ padding: '8px 14px', background: '#fee2e2', color: '#991b1b', border: '1px solid #fecaca', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', fontWeight: '600' }}>Delete task</button>
-                  <button onClick={() => setShowTaskDrawer(false)} style={{ padding: '8px 14px', background: '#f1f5f9', color: '#475569', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', cursor: 'pointer' }}>Close</button>
+                  {isCreate ? (
+                    <button onClick={() => { setDraftTask(null); setDrawerMode('edit'); setShowTaskDrawer(false); }} style={{ padding: '8px 14px', background: '#fee2e2', color: '#991b1b', border: '1px solid #fecaca', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', fontWeight: '600' }}>Discard</button>
+                  ) : (
+                    <button onClick={() => { if (!window.confirm('Delete this task?')) return; setTasks(prev => prev.filter(t => t.id !== task.id)); setShowTaskDrawer(false); }} style={{ padding: '8px 14px', background: '#fee2e2', color: '#991b1b', border: '1px solid #fecaca', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', fontWeight: '600' }}>Delete task</button>
+                  )}
+                  <button onClick={closeDrawer} style={{ padding: '8px 14px', background: '#f1f5f9', color: '#475569', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', cursor: 'pointer' }}>{isCreate ? 'Save & close' : 'Close'}</button>
                 </div>
               </div>
             </div>

@@ -31,7 +31,32 @@ const AUCTION_HOUSES_CONFIG = [
   { id: 'mj', name: 'Mark Jenkinson & Son', shortName: 'Mark Jenkinson', diaryUrl: 'https://www.markjenkinson.co.uk/auction-diary' },
   { id: 'pugh', name: 'Pugh Auctions', shortName: 'Pugh', diaryUrl: 'https://www.pugh-auctions.com/auction-diary' },
   { id: 'allsop', name: 'Allsop Residential', shortName: 'Allsop', diaryUrl: 'https://www.allsop.co.uk/auctions/property-for-auction-in-sheffield/' },
+  { id: 'mchugh', name: 'McHugh & Co', shortName: 'McHugh', diaryUrl: 'https://www.mchughandco.com/' },
 ];
+
+const SY_KEYWORDS = ['sheffield', 'doncaster', 'rotherham', 'barnsley', 'south yorkshire', ', s1 ', ', s2 ', ', s3 ', ', s4 ', ', s5 ', ', s6 ', ', s7 ', ', s8 ', ', s9 ', ', s10', ', s11', ', s12', ', s13', ', s14', ', s20', ', s21', ', s60', ', s61', ', s62', ', s63', ', s64', ', s65', ', s66', ', dn1', ', dn2', ', dn3', ', dn4', ', dn5'];
+
+const SCRAPER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+// Defaults for the lot-level auction scan; user overrides stored in KV so the
+// cron can read them without a session.
+const DEFAULT_SCAN_SETTINGS = {
+  keywords: ['sheffield', 'doncaster', 'rotherham', 'barnsley', 'south yorkshire'],
+  postcodeAreas: ['S', 'DN'],
+  maxGuidePrice: 100000,
+  propertyTypes: 'all',
+};
+
+// 'houses' scan setting: drop flats/land/commercial; unknown types stay in
+// so a parse miss never hides a house.
+function isExcludedFromHouses(propertyType) {
+  return /flat|apartment|maisonette|land|garage|commercial/i.test(String(propertyType || ''));
+}
+
+async function getScanSettings(env) {
+  const stored = await env.SCRAPER_KV.get('auction:scan-settings', 'json');
+  return stored ? { ...DEFAULT_SCAN_SETTINGS, ...stored } : { ...DEFAULT_SCAN_SETTINGS };
+}
 
 // ============================================================
 // AUTH HELPERS
@@ -726,6 +751,509 @@ async function runScrape(env) {
 }
 
 // ============================================================
+// LOT-LEVEL AUCTION SCRAPERS
+// ============================================================
+
+function stripHtml(html) {
+  return String(html || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, '\n')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&#163;|&pound;/gi, '£')
+    .replace(/&#0?39;/g, "'")
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*\n+/g, '\n')
+    .trim();
+}
+
+function parseGuidePrice(text) {
+  try {
+    const t = String(text || '');
+    let m = t.match(/(?:\*?\s*guide(?:\s*price)?)[^£\d]{0,40}£\s*([\d,]+)/i);
+    if (!m) m = t.match(/£\s*([\d,]{4,})/);
+    if (!m) return null;
+    const n = Number(m[1].replace(/,/g, ''));
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch { return null; }
+}
+
+function extractOutcode(text) {
+  const m = String(text || '').toUpperCase().match(/\b([A-Z]{1,2})(\d{1,2}[A-Z]?)\s*\d[A-Z]{2}\b/);
+  if (!m) return null;
+  return { area: m[1], outcode: m[1] + m[2] };
+}
+
+function extractLotNumber(text) {
+  const m = String(text || '').match(/\bLot\s*[:#]?\s*(\d+[A-Z]?)\b/i);
+  return m ? m[1] : null;
+}
+
+function extractPropertyType(text) {
+  const m = String(text || '').match(/\b(?:end[- ]|mid[- ])?(?:semi[- ]detached|detached|terraced?|flat|apartment|bungalow|maisonette|land|garage|commercial|hmo)\b(?:[ \t]+(?:house|bungalow|flat|apartment))?/i);
+  return m ? m[0].replace(/\s+/g, ' ').trim() : null;
+}
+
+function extractBedrooms(text) {
+  const m = String(text || '').match(/\b(\d+)\s*bed(?:room)?s?\b/i);
+  return m ? Number(m[1]) : 0;
+}
+
+const MONTHS_MAP = { january: '01', february: '02', march: '03', april: '04', may: '05', june: '06', july: '07', august: '08', september: '09', october: '10', november: '11', december: '12' };
+
+function extractAuctionDate(text) {
+  const t = String(text || '');
+  let m = t.match(/(\d{1,2})(?:st|nd|rd|th)?(?:\s*[-–]\s*\d{1,2}(?:st|nd|rd|th)?)?\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/i);
+  if (m) return `${m[3]}-${MONTHS_MAP[m[2].toLowerCase()]}-${String(m[1]).padStart(2, '0')}`;
+  m = t.match(/(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})/i);
+  if (m) return `${m[3]}-${MONTHS_MAP[m[1].toLowerCase()]}-${String(m[2]).padStart(2, '0')}`;
+  m = t.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+  return null;
+}
+
+function matchesRegion(address, settings) {
+  if (!address) return false;
+  const low = String(address).toLowerCase();
+  if ((settings.keywords || []).some(kw => kw && low.includes(String(kw).toLowerCase()))) return true;
+  const oc = extractOutcode(address);
+  if (oc && (settings.postcodeAreas || []).some(a => String(a).toUpperCase() === oc.area)) return true;
+  return false;
+}
+
+async function getPageHtml(browser, url) {
+  const page = await browser.newPage();
+  try {
+    await page.setUserAgent(SCRAPER_UA);
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    // JS-rendered catalogues (e.g. online.auctionhouse.co.uk) need a beat to paint lot cards
+    await page.waitForSelector('a[href*="lot"]', { timeout: 4000 }).catch(() => {});
+    return await page.content();
+  } finally {
+    await page.close();
+  }
+}
+
+function collectLinks(html, baseUrl, re) {
+  const out = [];
+  const seen = new Set();
+  const aRe = /<a[^>]+href=["']([^"'#]+)["']/gi;
+  let m;
+  while ((m = aRe.exec(html)) !== null) {
+    const rawHref = m[1];
+    if (!re.test(rawHref)) continue;
+    let href;
+    try { href = new URL(rawHref, baseUrl).href; } catch { continue; }
+    if (seen.has(href)) continue;
+    seen.add(href);
+    out.push(href);
+  }
+  return out;
+}
+
+// Slice raw HTML into per-lot windows anchored on lot-detail links. A card
+// usually carries several anchors with the same href (image + button), so
+// anchors are grouped by href and each slice spans its group, bounded by the
+// neighbouring groups so one card's fields never bleed into the next.
+function extractLotSlices(html, anchorRe) {
+  const groups = [];
+  const byHref = new Map();
+  const aRe = /<a[^>]+href=["']([^"']+)["']/gi;
+  let m;
+  while ((m = aRe.exec(html)) !== null) {
+    const href = m[1];
+    if (!anchorRe.test(href)) continue;
+    if (byHref.has(href)) {
+      byHref.get(href).last = m.index;
+    } else {
+      const g = { href, first: m.index, last: m.index };
+      byHref.set(href, g);
+      groups.push(g);
+    }
+  }
+  const slices = [];
+  for (let i = 0; i < groups.length; i++) {
+    // A card's fields live inside/after its own anchor (AH wraps the whole
+    // card in one <a>), so the main window starts AT the anchor — reaching
+    // back would swallow the previous card's address. preHtml is a short
+    // look-behind used only for "Lot N" headers rendered above the link.
+    const nextStart = i + 1 < groups.length ? groups[i + 1].first : html.length;
+    const end = Math.min(nextStart, groups[i].last + 3500);
+    const preStart = Math.max(i > 0 ? groups[i - 1].last : 0, groups[i].first - 300);
+    slices.push({ href: groups[i].href, html: html.slice(groups[i].first, end), preHtml: html.slice(preStart, groups[i].first) });
+  }
+  return slices;
+}
+
+// Field extraction from the stripped text of one lot block; null when the
+// block has neither an address nor a price (nav/footer noise).
+function parseLotText(text) {
+  const guidePrice = parseGuidePrice(text);
+  let address = null;
+  const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  for (const line of lines) {
+    if (line.length > 10 && line.length < 160 && extractOutcode(line)) { address = line; break; }
+  }
+  if (!address) {
+    const cand = lines.find(l => l.includes(',') && l.length > 15 && l.length < 160 && !/guide|fee|auction|view|bid|register/i.test(l));
+    if (cand) address = cand;
+  }
+  if (!address && guidePrice == null) return null;
+  return { address, guidePrice, lotNumber: extractLotNumber(text), propertyType: extractPropertyType(text), bedrooms: extractBedrooms(text) };
+}
+
+function parseLotSlice(slice, baseUrl) {
+  const text = stripHtml(slice.html);
+  const fields = parseLotText(text);
+  if (!fields) return null;
+  if (!fields.lotNumber && slice.preHtml) fields.lotNumber = extractLotNumber(stripHtml(slice.preHtml));
+  // Dead listings show a status sticker where the guide price normally sits
+  const statusM = text.match(/\b(sold prior|withdrawn|postponed|exchanged|sold)\b/i);
+  const listingStatus = statusM ? statusM[1].toLowerCase() : null;
+  let lotUrl = slice.href || null;
+  if (lotUrl && !/^https?:/i.test(lotUrl)) {
+    try { lotUrl = new URL(lotUrl, baseUrl).href; } catch { lotUrl = null; }
+  }
+  const imgM = slice.html.match(/<img[^>]+src=["']([^"']+)["']/i);
+  let imageUrl = imgM && !/\.svg|logo|icon|sprite|^data:/i.test(imgM[1]) ? imgM[1] : null;
+  if (imageUrl && !/^https?:/i.test(imageUrl)) {
+    try { imageUrl = new URL(imageUrl, baseUrl).href; } catch { imageUrl = null; }
+  }
+  return { ...fields, listingStatus, auctionDate: null, lotUrl, imageUrl };
+}
+
+function parseCataloguePage(html, baseUrl, anchorRe) {
+  const slices = extractLotSlices(html, anchorRe);
+  let lots = slices.map(s => parseLotSlice(s, baseUrl)).filter(Boolean);
+  if (!lots.length) {
+    // Text fallback: split on "Lot N" boundaries for markup without lot links
+    const blocks = stripHtml(html).split(/(?=\bLot\s*[:#]?\s*\d+[A-Z]?\b)/i).slice(1);
+    lots = blocks.map(b => {
+      const fields = parseLotText(b);
+      return fields ? { ...fields, auctionDate: null, lotUrl: null, imageUrl: null } : null;
+    }).filter(Boolean);
+  }
+  const auctionDate = extractAuctionDate(stripHtml(html).slice(0, 4000));
+  return { lots, auctionDate };
+}
+
+// AH lot cards carry no auction date, but each lot's detail page is plain
+// server-rendered HTML with "closing on dd/mm/yyyy" in the meta description
+// and a guide-price range — fetchable without Browser Rendering.
+async function enrichLotFromDetailPage(lot) {
+  if (!lot.lotUrl) return lot;
+  const res = await fetch(lot.lotUrl, { headers: { 'User-Agent': SCRAPER_UA, 'Accept': 'text/html' }, signal: AbortSignal.timeout(8000) });
+  if (!res.ok) return lot;
+  const html = await res.text();
+  let m = html.match(/closing on\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+  if (!m) m = html.match(/Bidding Opens\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+  if (m) lot.auctionDate = `${m[3]}-${m[2]}-${m[1]}`;
+  if (lot.guidePrice == null) {
+    const g = stripHtml(html).match(/Guide Price\*?\s*:?\s*£\s*([\d,]+)/i);
+    if (g) {
+      const n = Number(g[1].replace(/,/g, ''));
+      if (Number.isFinite(n) && n > 0) lot.guidePrice = n;
+    }
+  }
+  return lot;
+}
+
+function lotScraperConfigs() {
+  return [
+    {
+      houseId: 'ah_sy',
+      houseName: 'Auction House South Yorkshire',
+      diaryUrl: 'https://www.auctionhouse.co.uk/southyorkshire/auction/future-auction-dates',
+      startUrls: ['https://www.auctionhouse.co.uk/southyorkshire/current-lots', 'https://www.auctionhouse.co.uk/southyorkshire'],
+      followRe: /(view-lots|current-lots|catalogue|online\.auctionhouse)/i,
+      anchorRe: /online\.auctionhouse\.co\.uk\/lot\/|\/lot\/(?:redirect\/)?\d+/i,
+      maxFollow: 3,
+      maxPages: 5,
+      enrichFromLotPage: true,
+    },
+    {
+      houseId: 'pugh',
+      houseName: 'Pugh Auctions',
+      diaryUrl: 'https://www.pugh-auctions.com/auction-diary',
+      startUrls: ['https://www.pugh-auctions.com/auction-diary'],
+      followRe: /(\/auctions?\/|catalogue|\/lots|\/search|\/propert)/i,
+      anchorRe: /\/propert(?:y|ies)\/[\w-]+|\/lot[\/-]?\d+/i,
+      maxFollow: 3,
+      maxPages: 4,
+    },
+    {
+      houseId: 'mchugh',
+      houseName: 'McHugh & Co',
+      diaryUrl: 'https://www.mchughandco.com/',
+      startUrls: ['https://www.mchughandco.com/pages/auctions', 'https://www.mchughandco.com/'],
+      followRe: /(current|catalogue|\/lots|auction)/i,
+      anchorRe: /\/(?:propert(?:y|ies)|lots?)\/[\w-]+/i,
+      maxFollow: 2,
+      maxPages: 3,
+    },
+  ];
+}
+
+// Crawl one house: start pages, follow catalogue links when a page has no
+// lots, paginate when it does. Never throws — failures land in result.error.
+async function scrapeHouseLots(browser, cfg, opts = {}) {
+  const result = { houseId: cfg.houseId, houseName: cfg.houseName, diaryUrl: cfg.diaryUrl, lots: [], pagesFetched: 0, error: null, debug: { urlsTried: [] } };
+  try {
+    const visited = new Set();
+    const queue = [...cfg.startUrls];
+    let followBudget = cfg.maxFollow;
+    while (queue.length && result.pagesFetched < cfg.maxPages) {
+      const pageUrl = queue.shift();
+      if (visited.has(pageUrl)) continue;
+      visited.add(pageUrl);
+      let html;
+      try {
+        html = await getPageHtml(browser, pageUrl);
+        result.pagesFetched++;
+        result.debug.urlsTried.push(pageUrl);
+      } catch (err) {
+        result.debug.urlsTried.push(`${pageUrl} — ${err.message}`);
+        continue;
+      }
+      if (/just a moment|attention required|access denied/i.test(html.slice(0, 3000))) {
+        result.debug.urlsTried[result.debug.urlsTried.length - 1] += ' — blocked';
+        continue;
+      }
+      if (opts.debug && !result.debug.strippedSample) {
+        result.debug.htmlLength = html.length;
+        result.debug.strippedSample = stripHtml(html).slice(0, 2500);
+      }
+      const { lots, auctionDate } = parseCataloguePage(html, pageUrl, cfg.anchorRe);
+      if (lots.length) {
+        for (const lot of lots) result.lots.push({ ...lot, auctionDate: lot.auctionDate || auctionDate });
+        for (const l of collectLinks(html, pageUrl, /[?&]page=\d+/i)) {
+          if (!visited.has(l)) queue.push(l);
+        }
+      } else if (followBudget > 0) {
+        for (const l of collectLinks(html, pageUrl, cfg.followRe).slice(0, followBudget)) {
+          if (!visited.has(l)) { queue.push(l); followBudget--; }
+        }
+      }
+    }
+    // Same card can carry two differently-hrefed anchors — collapse by content
+    const seenKeys = new Set();
+    result.lots = result.lots.filter(l => {
+      const key = `${(l.address || '').toLowerCase()}|${l.guidePrice ?? ''}`;
+      if (seenKeys.has(key)) return false;
+      seenKeys.add(key);
+      return true;
+    });
+    if (!result.pagesFetched) result.error = 'No pages fetched';
+  } catch (err) {
+    result.error = err.message;
+  }
+  return result;
+}
+
+function stableLotId(houseId, raw) {
+  const urlId = raw.lotUrl && raw.lotUrl.match(/\/lot\/(?:redirect\/)?(\d+)/i);
+  if (urlId) return `scr-${houseId}-${urlId[1]}`;
+  if (raw.lotUrl) {
+    const tail = raw.lotUrl.replace(/\/+$/, '').split('/').pop();
+    if (tail && /\d/.test(tail)) return `scr-${houseId}-${tail.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 60)}`;
+  }
+  if (raw.auctionDate && raw.lotNumber) return `scr-${houseId}-${raw.auctionDate}-lot${raw.lotNumber}`;
+  const slug = String(raw.address || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+  return `scr-${houseId}-${raw.auctionDate || 'tbc'}-${slug}`;
+}
+
+async function recomputeAuctionDateCounts(env, dateId) {
+  const dateLots = (await d1GetAuctionLots(env, dateId)).filter(l => !l.isWithdrawn);
+  const row = await env.CRM_DB.prepare('SELECT data FROM auction_dates WHERE id = ?').bind(String(dateId)).first();
+  if (!row) return;
+  const date = JSON.parse(row.data);
+  await d1PutAuctionDate(env, {
+    ...date,
+    totalLots: dateLots.length,
+    reviewedCount: dateLots.filter(l => l.status !== 'unreviewed').length,
+    shortlistedCount: dateLots.filter(l => l.status === 'shortlisted').length,
+    rejectedCount: dateLots.filter(l => l.status === 'rejected').length,
+    watchingCount: dateLots.filter(l => l.status === 'watching').length,
+  });
+}
+
+// Shared by POST /api/scrape-lots and the cron. Scrapes every configured
+// house, filters by region + max guide price, upserts into auction_dates /
+// auction_lots preserving triage state, detects price changes + withdrawals.
+async function runLotScan(env, settings, opts = {}) {
+  const now = new Date().toISOString();
+  const today = now.split('T')[0];
+  const results = [];
+  const matchedLotRecords = [];
+  const browser = await puppeteer.launch(env.BROWSER);
+  try {
+    for (const cfg of lotScraperConfigs()) {
+      const res = await scrapeHouseLots(browser, cfg);
+      const summary = { houseId: cfg.houseId, name: cfg.houseName, lotsFound: res.lots.length, matched: 0, newLots: 0, updated: 0, withdrawn: 0, error: res.error };
+      let matched = res.lots.filter(l => matchesRegion(l.address, settings) && (l.guidePrice == null || l.guidePrice <= settings.maxGuidePrice) && !(l.listingStatus && l.guidePrice == null));
+      if (settings.propertyTypes === 'houses') matched = matched.filter(l => !isExcludedFromHouses(l.propertyType));
+      summary.matched = matched.length;
+
+      // Fill missing auction dates (and guides) from lot detail pages —
+      // plain fetch, capped so a large catalogue can't stall the scan.
+      if (cfg.enrichFromLotPage && !opts.dryRun) {
+        let enriched = 0;
+        for (const lot of matched) {
+          if (lot.auctionDate || !lot.lotUrl || enriched >= 15) continue;
+          enriched++;
+          try { await enrichLotFromDetailPage(lot); } catch {}
+        }
+      }
+
+      if (!opts.dryRun && !res.error) {
+        const matchedIds = new Set(matched.map(l => stableLotId(cfg.houseId, l)));
+        const allScrapedIds = new Set(res.lots.map(l => stableLotId(cfg.houseId, l)));
+        const ensuredDates = new Set();
+        const touchedDateIds = new Set();
+        const processed = new Set();
+
+        for (const raw of res.lots) {
+          const lotId = stableLotId(cfg.houseId, raw);
+          if (processed.has(lotId)) continue;
+          processed.add(lotId);
+          const row = await env.CRM_DB.prepare('SELECT data FROM auction_lots WHERE id = ?').bind(lotId).first();
+          const isMatch = matchedIds.has(lotId);
+          if (!row && !isMatch) continue;
+
+          const auctionDate = raw.auctionDate || (row ? JSON.parse(row.data).auctionDate : null) || null;
+          const dateId = row ? (JSON.parse(row.data).dateId || `${cfg.houseId}-${auctionDate || 'tbc'}`) : `${cfg.houseId}-${auctionDate || 'tbc'}`;
+          if (!ensuredDates.has(dateId)) {
+            ensuredDates.add(dateId);
+            const dRow = await env.CRM_DB.prepare('SELECT data FROM auction_dates WHERE id = ?').bind(String(dateId)).first();
+            if (dRow) {
+              await d1PutAuctionDate(env, { ...JSON.parse(dRow.data), lastScannedAt: now });
+            } else {
+              await d1PutAuctionDate(env, { id: dateId, houseId: cfg.houseId, houseName: cfg.houseName, auctionDate, diaryUrl: cfg.diaryUrl, totalLots: 0, reviewedCount: 0, shortlistedCount: 0, rejectedCount: 0, watchingCount: 0, isNew: true, firstSeenAt: now, lastScannedAt: now });
+            }
+          }
+          touchedDateIds.add(dateId);
+
+          if (!row) {
+            const newLot = {
+              id: lotId, dateId, origin: 'scraped', status: 'unreviewed', isNew: true,
+              guidePriceChanged: false, isWithdrawn: false, firstSeenAt: now, lastUpdatedAt: now,
+              address: raw.address, guidePrice: raw.guidePrice, bedrooms: raw.bedrooms || 0,
+              propertyType: raw.propertyType || 'Unknown', lotNumber: raw.lotNumber,
+              auctionDate, auctionTime: '', houseName: cfg.houseName,
+              lotUrl: raw.lotUrl || '', imageUrl: raw.imageUrl || null, notes: '',
+            };
+            await d1PutAuctionLot(env, newLot);
+            summary.newLots++;
+            matchedLotRecords.push(newLot);
+            if (opts.onNewLot) { try { await opts.onNewLot(newLot); } catch {} }
+          } else {
+            const existing = JSON.parse(row.data);
+            const updatedLot = {
+              ...existing,
+              address: raw.address || existing.address,
+              propertyType: raw.propertyType || existing.propertyType,
+              bedrooms: raw.bedrooms || existing.bedrooms,
+              lotNumber: raw.lotNumber || existing.lotNumber,
+              lotUrl: raw.lotUrl || existing.lotUrl,
+              imageUrl: raw.imageUrl || existing.imageUrl,
+              auctionDate: auctionDate || existing.auctionDate,
+              lastUpdatedAt: now,
+            };
+            if (raw.listingStatus) {
+              updatedLot.isWithdrawn = true;
+              if (!existing.isWithdrawn) {
+                try {
+                  await d1InsertAlert(env, {
+                    id: `lotchange-${lotId}-${today}`,
+                    type: 'listing_change',
+                    title: `Listing changed: ${updatedLot.address || lotId}`,
+                    body: `${cfg.houseName} — ${raw.listingStatus}`,
+                    targetType: 'lot',
+                    targetId: lotId,
+                  });
+                } catch {}
+              }
+            } else if (existing.isWithdrawn) updatedLot.isWithdrawn = false;
+            const priceChanged = raw.guidePrice != null && existing.guidePrice != null && Number(raw.guidePrice) !== Number(existing.guidePrice);
+            if (priceChanged) {
+              updatedLot.previousGuidePrice = existing.guidePrice;
+              updatedLot.guidePrice = raw.guidePrice;
+              updatedLot.guidePriceChanged = true;
+              try {
+                await d1InsertAlert(env, {
+                  id: `lotchange-${lotId}-${today}`,
+                  type: 'listing_change',
+                  title: `Listing changed: ${updatedLot.address || lotId}`,
+                  body: `${cfg.houseName} — guide ${Number(existing.guidePrice || 0).toLocaleString()} → ${Number(raw.guidePrice || 0).toLocaleString()}`,
+                  targetType: 'lot',
+                  targetId: lotId,
+                });
+              } catch {}
+            } else if (raw.guidePrice != null && existing.guidePrice == null) {
+              updatedLot.guidePrice = raw.guidePrice;
+            }
+            await d1PutAuctionLot(env, updatedLot);
+            summary.updated++;
+            if (isMatch) matchedLotRecords.push(updatedLot);
+          }
+        }
+
+        // Withdrawals — only when this house's scrape actually found lots, so
+        // a site outage or parse failure never mass-withdraws a catalogue.
+        if (res.lots.length > 0) {
+          for (const dateId of touchedDateIds) {
+            const dateLots = await d1GetAuctionLots(env, dateId);
+            for (const lot of dateLots) {
+              if (lot.origin !== 'scraped' || lot.isWithdrawn) continue;
+              if (allScrapedIds.has(String(lot.id))) continue;
+              await d1PutAuctionLot(env, { ...lot, isWithdrawn: true, lastUpdatedAt: now });
+              summary.withdrawn++;
+              try {
+                await d1InsertAlert(env, {
+                  id: `lotchange-${lot.id}-${today}`,
+                  type: 'listing_change',
+                  title: `Listing changed: ${lot.address || lot.id}`,
+                  body: `${cfg.houseName} — withdrawn`,
+                  targetType: 'lot',
+                  targetId: lot.id,
+                });
+              } catch {}
+            }
+          }
+        }
+
+        for (const dateId of touchedDateIds) {
+          try { await recomputeAuctionDateCounts(env, dateId); } catch {}
+        }
+      }
+
+      results.push(summary);
+    }
+  } finally {
+    await browser.close();
+  }
+  return { success: true, results, lots: matchedLotRecords, scrapedAt: now };
+}
+
+async function runScheduledLotScan(env) {
+  await ensureAuctionMigratedToD1(env);
+  const settings = await getScanSettings(env);
+  return await runLotScan(env, settings, {
+    onNewLot: async (lot) => {
+      await d1InsertAlert(env, {
+        id: `newlot-${lot.id}`,
+        type: 'listing_change',
+        title: `New auction lot: ${lot.address || lot.id}`,
+        body: `${lot.houseName} — ${lot.guidePrice ? `guide £${Number(lot.guidePrice).toLocaleString()}` : 'guide TBC'}${lot.auctionDate ? ` · ${lot.auctionDate}` : ''}`,
+        targetType: 'lot',
+        targetId: lot.id,
+      });
+    },
+  });
+}
+
+// ============================================================
 // PROPERTY INTELLIGENCE — API connector helpers
 // ============================================================
 
@@ -1129,6 +1657,7 @@ export default {
       runScrape(env),
       sendCountdownAlerts(env),
       generateAutoChaseAlerts(env).catch(err => console.error('Auto-chase alerts failed:', err)),
+      runScheduledLotScan(env).catch(err => console.error('Lot scan failed:', err)),
     ]));
   },
 
@@ -1199,6 +1728,8 @@ async function handleApiRoutes(request, env, url) {
     }
 
     if (url.pathname === '/api/auction/lots' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       const body = await request.json();
       await ensureAuctionMigratedToD1(env);
       const incoming = Array.isArray(body) ? body : [body];
@@ -1380,6 +1911,20 @@ async function handleApiRoutes(request, env, url) {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       return corsResponse({ success: true, user: session });
+    }
+
+    // POST /api/auth/extension-token — mint a long-lived token for the Chrome
+    // extension. Requires an existing valid session (call this once from
+    // Settings while logged into the CRM itself, then paste the returned
+    // token into the extension). Uses the same session:{token} KV mechanism
+    // as login, just with a much longer TTL and a source flag for auditing.
+    if (url.pathname === '/api/auth/extension-token' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const token = generateToken();
+      const sessionData = { userId: session.userId, email: session.email, role: session.role, allowedTabs: session.allowedTabs, source: 'extension' };
+      await env.SCRAPER_KV.put(`session:${token}`, JSON.stringify(sessionData), { expirationTtl: 7776000 }); // 90 days
+      return corsResponse({ success: true, token });
     }
 
     // POST /api/auth/reset (password reset request)
@@ -2276,9 +2821,8 @@ async function handleApiRoutes(request, env, url) {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
 
-      const SY_KEYWORDS = ['sheffield', 'doncaster', 'rotherham', 'barnsley', 'south yorkshire', ', s1 ', ', s2 ', ', s3 ', ', s4 ', ', s5 ', ', s6 ', ', s7 ', ', s8 ', ', s9 ', ', s10', ', s11', ', s12', ', s13', ', s14', ', s20', ', s21', ', s60', ', s61', ', s62', ', s63', ', s64', ', s65', ', s66', ', dn1', ', dn2', ', dn3', ', dn4', ', dn5'];
       const MONTH_KEYWORDS = ['july', 'jul 2', 'jul 3'];
-      const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+      const UA = SCRAPER_UA;
 
       const extractDate = (html) => {
         const m = html.match(/(?:july|jul)[^0-9]*(\d{1,2})[^0-9]{0,5}(2026)?/i);
@@ -2328,6 +2872,72 @@ async function handleApiRoutes(request, env, url) {
         return corsResponse({ success: true, results: data, scrapedAt: new Date().toISOString() });
       } finally {
         await browser.close();
+      }
+    }
+
+    // --------------------------------------------------------
+    // LOT-LEVEL AUCTION SCAN + SCAN SETTINGS
+    // --------------------------------------------------------
+
+    if (url.pathname === '/api/scan-settings' && request.method === 'GET') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const settings = await getScanSettings(env);
+      return corsResponse({ success: true, settings });
+    }
+
+    if (url.pathname === '/api/scan-settings' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const body = await request.json();
+      const settings = {
+        keywords: Array.isArray(body.keywords) && body.keywords.length ? body.keywords.map(k => String(k).trim().toLowerCase()).filter(Boolean) : DEFAULT_SCAN_SETTINGS.keywords,
+        postcodeAreas: Array.isArray(body.postcodeAreas) ? body.postcodeAreas.map(a => String(a).trim().toUpperCase()).filter(Boolean) : DEFAULT_SCAN_SETTINGS.postcodeAreas,
+        maxGuidePrice: Number(body.maxGuidePrice) > 0 ? Number(body.maxGuidePrice) : DEFAULT_SCAN_SETTINGS.maxGuidePrice,
+        propertyTypes: body.propertyTypes === 'houses' ? 'houses' : 'all',
+      };
+      await env.SCRAPER_KV.put('auction:scan-settings', JSON.stringify(settings));
+      return corsResponse({ success: true, settings });
+    }
+
+    if (url.pathname === '/api/scrape-lots' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      if (!(await checkRateLimit(env, 'scrape-lots', 3))) return corsResponse({ success: false, message: 'Rate limit exceeded — try again in a minute' }, 429);
+      const body = await request.json().catch(() => ({}));
+      const base = await getScanSettings(env);
+      const settings = {
+        keywords: Array.isArray(body.keywords) && body.keywords.length ? body.keywords.map(k => String(k).trim().toLowerCase()).filter(Boolean) : base.keywords,
+        postcodeAreas: Array.isArray(body.postcodeAreas) ? body.postcodeAreas.map(a => String(a).trim().toUpperCase()).filter(Boolean) : base.postcodeAreas,
+        maxGuidePrice: Number(body.maxGuidePrice) > 0 ? Number(body.maxGuidePrice) : base.maxGuidePrice,
+        propertyTypes: body.propertyTypes != null ? (body.propertyTypes === 'houses' ? 'houses' : 'all') : base.propertyTypes,
+      };
+
+      // Debug escape hatch: run one house's scraper with no writes and return
+      // parse diagnostics — the tuning loop for markup the dev box can't reach.
+      if (body.debug) {
+        const cfg = lotScraperConfigs().find(c => c.houseId === body.debug);
+        if (!cfg) return corsResponse({ success: false, message: `Unknown house: ${body.debug}` }, 400);
+        let debugBrowser;
+        try {
+          debugBrowser = await puppeteer.launch(env.BROWSER);
+        } catch (launchErr) {
+          return corsResponse({ success: false, message: `Browser launch failed: ${launchErr.message}` });
+        }
+        try {
+          const res = await scrapeHouseLots(debugBrowser, cfg, { debug: true });
+          return corsResponse({ success: true, house: cfg.houseId, lotsFound: res.lots.length, pagesFetched: res.pagesFetched, error: res.error, debug: res.debug, parsedLots: res.lots.slice(0, 20) });
+        } finally {
+          await debugBrowser.close();
+        }
+      }
+
+      await ensureAuctionMigratedToD1(env);
+      try {
+        const result = await runLotScan(env, settings, { dryRun: !!body.dryRun });
+        return corsResponse(result);
+      } catch (err) {
+        return corsResponse({ success: false, message: `Lot scan failed: ${err.message}` });
       }
     }
 
@@ -2675,6 +3285,53 @@ async function handleApiRoutes(request, env, url) {
         console.error('D1 dual-write failed (KV save succeeded):', err);
       }
       return corsResponse({ success: true, d1Synced });
+    }
+
+    // POST /api/properties/ingest — upsert a single property without touching
+    // any other entity. Unlike POST /api/crm-data (which replaces the user's
+    // entire blob and is only safe for the SPA, which always resends its full
+    // in-memory state), this is for external callers — like the Chrome
+    // extension — that only ever hold one property at a time.
+    if (url.pathname === '/api/properties/ingest' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+
+      const allowed = await checkRateLimit(env, `ingest:${session.userId}`, 20);
+      if (!allowed) return corsResponse({ success: false, message: 'Too many requests — please slow down' }, 429);
+
+      const property = await request.json();
+      if (property?.id == null) return corsResponse({ success: false, message: 'property.id is required' }, 400);
+
+      const userId = session.userId;
+      const savedAt = new Date().toISOString();
+
+      // Single-row D1 upsert, reusing the same per-row shape as syncUserBlobToD1.
+      const def = D1_ENTITY_TABLES.properties;
+      const extra = def.cols(property);
+      const extraNames = Object.keys(extra);
+      await env.CRM_DB.prepare(
+        `INSERT OR REPLACE INTO ${def.table} (id, user_id, updated_at, deleted, data${extraNames.map(c => ', ' + c).join('')}) ` +
+        `VALUES (?, ?, ?, ?, ?${', ?'.repeat(extraNames.length)})`
+      ).bind(String(property.id), userId, savedAt, property.deleted ? 1 : 0, JSON.stringify(property), ...extraNames.map(c => extra[c])).run();
+
+      // Read-modify-write the KV rollback blob so the D1-read-failure fallback
+      // path (mergeUserData) stays consistent, without touching any other
+      // entity key in the user's blob.
+      const existingBlob = (await env.SCRAPER_KV.get(`crm:user:${userId}`, 'json')) || {};
+      const existingProperties = Array.isArray(existingBlob.properties) ? existingBlob.properties : [];
+      const idx = existingProperties.findIndex(p => p?.id === property.id);
+      const updatedProperties = idx >= 0
+        ? existingProperties.map((p, i) => i === idx ? property : p)
+        : [...existingProperties, property];
+      await env.SCRAPER_KV.put(`crm:user:${userId}`, JSON.stringify({ ...existingBlob, properties: updatedProperties, savedAt }));
+
+      const userIds = (await env.SCRAPER_KV.get('crm:user-ids', 'json')) || [];
+      if (!userIds.includes(userId)) {
+        userIds.push(userId);
+        await env.SCRAPER_KV.put('crm:user-ids', JSON.stringify(userIds));
+      }
+
+      return corsResponse({ success: true, property });
     }
 
     // GET /api/admin/d1-parity — compare KV-merged data vs D1 reads per entity
