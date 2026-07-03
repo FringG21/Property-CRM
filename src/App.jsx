@@ -3460,16 +3460,18 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     // carries every source's tag. First writer wins on conflicting
                     // fields; later sources only fill blanks.
                     const normKey = (addr) => String(addr || '').split(',')[0].toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-                    const merged = new Map();
+                    const merged = {};
+                    const order = [];
                     let anon = 0;
                     const upsert = (addr, source, kind, fields) => {
                       const key = normKey(addr) || `anon-${anon++}`;
-                      const ex = merged.get(key);
+                      const ex = merged[key];
                       if (ex) {
                         if (!ex.tags.some(t => t.label === source)) ex.tags.push({ label: source, kind });
                         for (const [k, v] of Object.entries(fields)) { if ((ex[k] == null || ex[k] === '') && v != null && v !== '') ex[k] = v; }
                       } else {
-                        merged.set(key, { ...fields, tags: [{ label: source, kind }] });
+                        merged[key] = { ...fields, tags: [{ label: source, kind }] };
+                        order.push(key);
                       }
                     };
                     reportComps.forEach(c => upsert(c.address, 'Report', 'report', {
@@ -3488,7 +3490,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                         date: (c.soldDate || c.date) ? String(c.soldDate || c.date).slice(0, 7) : '', bedrooms: c.bedrooms, notes: c.notes,
                       });
                     });
-                    let rows = [...merged.values()];
+                    let rows = order.map(k => merged[k]);
                     if (compSort === 'asc') rows = rows.sort((a, b) => (a.price || 0) - (b.price || 0));
                     else if (compSort === 'desc') rows = rows.sort((a, b) => (b.price || 0) - (a.price || 0));
                     const sortBtn = (label, val) => (
