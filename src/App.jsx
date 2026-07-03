@@ -3440,7 +3440,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', minWidth: 0 }}>
 
                   {/* Comparables tab — merged & de-duplicated report + Land Registry */}
-                  {propCanvasTab === 'comparables' && (() => {
+                  {propCanvasTab === 'comparables' && (() => { try {
                     const lrData = intel.connectors?.landRegistry?.data || {};
                     const lrItems = lrData.items || [];
                     const reportComps = an.compsList || [];
@@ -3548,7 +3548,9 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                         )}
                       </div>
                     );
-                  })()}
+                  } catch (e) {
+                    return <div style={{ padding: '14px 20px', fontSize: '12px', color: '#b91c1c' }}>Couldn't render comparables — {String(e?.message || e)}</div>;
+                  } })()}
 
                   {/* AI deal summary — Overview tab */}
                   {propCanvasTab === 'overview' && an.aiSummary && (
