@@ -3459,7 +3459,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     // same property from different sources collapses to one row that
                     // carries every source's tag. First writer wins on conflicting
                     // fields; later sources only fill blanks.
-                    const normKey = (addr) => (addr || '').split(',')[0].toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+                    const normKey = (addr) => String(addr || '').split(',')[0].toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
                     const merged = new Map();
                     let anon = 0;
                     const upsert = (addr, source, kind, fields) => {
@@ -3478,7 +3478,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     }));
                     lrItems.forEach(item => upsert([item.address, item.town].filter(Boolean).join(', '), 'Land Reg', 'lr', {
                       address: [item.address, item.town].filter(Boolean).join(', '), price: item.price,
-                      date: item.date ? item.date.slice(0, 7) : '', propertyType: item.propertyType, newBuild: item.newBuild,
+                      date: item.date ? String(item.date).slice(0, 7) : '', propertyType: item.propertyType, newBuild: item.newBuild,
                       epcRating: item.epcRating, floorArea: item.floorArea, habitableRooms: item.habitableRooms,
                     }));
                     otherComps.forEach(c => {
