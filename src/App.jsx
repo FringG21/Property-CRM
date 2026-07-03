@@ -534,6 +534,7 @@ export default function App({ user = {}, onLogout }) {
   const [selectedGDVScenario, setSelectedGDVScenario] = useState('Base');
   const [editingKpi, setEditingKpi] = useState(false);
   const [propCanvasTab, setPropCanvasTab] = useState('overview');
+  const [compSort, setCompSort] = useState('default'); // 'default' | 'asc' | 'desc'
   const [propSidebarCollapsed, setPropSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem('propSidebarCollapsed') === '1'; } catch (e) { return false; }
   });
@@ -3438,34 +3439,76 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 ════════════════════════════════════ */}
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', minWidth: 0 }}>
 
-                  {/* Comparables tab — merged report + Land Registry */}
+                  {/* Comparables tab — merged & de-duplicated report + Land Registry */}
                   {propCanvasTab === 'comparables' && (() => {
                     const lrData = intel.connectors?.landRegistry?.data || {};
                     const lrItems = lrData.items || [];
                     const reportComps = an.compsList || [];
                     const reportCount = an.comps || 0;
                     const otherComps = (currentViewProperty.comparables || []).filter(c => !c.fromIntelligence);
-                    const total = reportComps.length + lrItems.length + otherComps.length;
+                    const rawTotal = reportComps.length + lrItems.length + otherComps.length;
                     const EPC_COL = { A:'#00a550',B:'#50b848',C:'#b3ce3e',D:'#fff200',E:'#f8b832',F:'#f07f30',G:'#ed1c24' };
                     const tag = (label, kind) => {
                       const c = kind === 'report' ? { bg:'#ede9fe', fg:'#5b21b6' } : kind === 'manual' ? { bg:'#f1f5f9', fg:'#475569' } : { bg:'#dbeafe', fg:'#1e40af' };
-                      return <span style={{ fontSize:'10px', padding:'1px 6px', borderRadius:'8px', background:c.bg, color:c.fg, whiteSpace:'nowrap', alignSelf:'center' }}>{label}</span>;
+                      return <span key={label} style={{ fontSize:'10px', padding:'1px 6px', borderRadius:'8px', background:c.bg, color:c.fg, whiteSpace:'nowrap' }}>{label}</span>;
                     };
                     const metaLine = (parts) => parts.filter(Boolean).length > 0 && (
                       <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginTop: '2px', flexWrap: 'wrap', color: '#94a3b8', fontSize: '10px' }}>{parts.filter(Boolean).map((p, j) => <span key={j}>{p}</span>)}</div>
+                    );
+                    // Merge by normalised address (pre-comma house-no + street) so the
+                    // same property from different sources collapses to one row that
+                    // carries every source's tag. First writer wins on conflicting
+                    // fields; later sources only fill blanks.
+                    const normKey = (addr) => (addr || '').split(',')[0].toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+                    const merged = new Map();
+                    let anon = 0;
+                    const upsert = (addr, source, kind, fields) => {
+                      const key = normKey(addr) || `anon-${anon++}`;
+                      const ex = merged.get(key);
+                      if (ex) {
+                        if (!ex.tags.some(t => t.label === source)) ex.tags.push({ label: source, kind });
+                        for (const [k, v] of Object.entries(fields)) { if ((ex[k] == null || ex[k] === '') && v != null && v !== '') ex[k] = v; }
+                      } else {
+                        merged.set(key, { ...fields, tags: [{ label: source, kind }] });
+                      }
+                    };
+                    reportComps.forEach(c => upsert(c.address, 'Report', 'report', {
+                      address: c.address, price: c.soldPrice, date: c.soldDate, propertyType: c.propertyType,
+                      bedrooms: c.bedrooms, floorArea: c.floorArea, tier: c.tier,
+                    }));
+                    lrItems.forEach(item => upsert([item.address, item.town].filter(Boolean).join(', '), 'Land Reg', 'lr', {
+                      address: [item.address, item.town].filter(Boolean).join(', '), price: item.price,
+                      date: item.date ? item.date.slice(0, 7) : '', propertyType: item.propertyType, newBuild: item.newBuild,
+                      epcRating: item.epcRating, floorArea: item.floorArea, habitableRooms: item.habitableRooms,
+                    }));
+                    otherComps.forEach(c => {
+                      const isReport = /report/i.test(c.source || ''); const isLr = /land\s*reg/i.test(c.source || '');
+                      upsert(c.address, isReport ? 'Report' : isLr ? 'Land Reg' : 'Manual', isReport ? 'report' : isLr ? 'lr' : 'manual', {
+                        address: c.address, price: c.soldPrice ?? c.price,
+                        date: (c.soldDate || c.date) ? String(c.soldDate || c.date).slice(0, 7) : '', bedrooms: c.bedrooms, notes: c.notes,
+                      });
+                    });
+                    let rows = [...merged.values()];
+                    if (compSort === 'asc') rows = rows.sort((a, b) => (a.price || 0) - (b.price || 0));
+                    else if (compSort === 'desc') rows = rows.sort((a, b) => (b.price || 0) - (a.price || 0));
+                    const sortBtn = (label, val) => (
+                      <button onClick={() => setCompSort(s => s === val ? 'default' : val)} style={{ padding: '3px 9px', borderRadius: '6px', border: '0.5px solid', fontSize: '11px', cursor: 'pointer', fontFamily: 'inherit', background: compSort === val ? '#ede9fe' : '#fff', borderColor: compSort === val ? '#c4b5fd' : '#e2e8f0', color: compSort === val ? '#5b21b6' : '#64748b' }}>{label}</button>
                     );
                     return (
                       <div style={{ padding: '14px 20px 20px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap', gap: '8px' }}>
                           <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8' }}>Comparable sales</div>
-                          <div style={{ fontSize: '11px', color: '#94a3b8' }}>{total} on record{reportComps.length ? ` · ${reportComps.length} from report` : (reportCount ? ` · report cited ${reportCount}` : '')}{lrData.compsEnriched ? ' · EPC enriched' : ''}</div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                            {rows.length > 1 && <div style={{ display: 'flex', gap: '4px' }}>{sortBtn('Price ↑', 'asc')}{sortBtn('Price ↓', 'desc')}</div>}
+                            <div style={{ fontSize: '11px', color: '#94a3b8' }}>{rows.length} propert{rows.length === 1 ? 'y' : 'ies'}{rawTotal > rows.length ? ` · ${rawTotal - rows.length} merged` : ''}</div>
+                          </div>
                         </div>
                         {reportCount > 0 && reportComps.length === 0 && (
                           <div style={{ background: '#f5f3ff', border: '1px solid #ddd6fe', borderRadius: '8px', padding: '9px 12px', fontSize: '11px', color: '#5b21b6', marginBottom: '10px', lineHeight: '1.5' }}>
                             The report references {reportCount} comparables but this deal's report predates comp parsing — re-upload the report to pull in its own picks. Sales below come from Land Registry{otherComps.length ? ' plus your manual adds' : ''}.
                           </div>
                         )}
-                        {total === 0 ? (
+                        {rows.length === 0 ? (
                           <div style={{ textAlign: 'center', padding: '30px', border: '1px dashed #e2e8f0', borderRadius: '10px', color: '#94a3b8', fontSize: '12px' }}>
                             No comparables yet — run intelligence to fetch Land Registry sales for {propPostcode || 'this postcode'}.
                           </div>
@@ -3474,65 +3517,29 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                             <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '8px', padding: '6px 12px', background: '#f8fafc', borderBottom: '0.5px solid #e2e8f0', fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em' }}>
                               <span>Address</span><span>Source</span><span style={{ textAlign: 'right' }}>Sold</span>
                             </div>
-                            {reportComps.map((c, i) => (
-                              <div key={'rc' + i} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '8px', padding: '7px 12px', borderBottom: '0.5px solid #f1f5f9', fontSize: '11px', alignItems: 'center' }}>
-                                <div style={{ minWidth: 0 }}>
-                                  <div style={{ color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.address || '—'}</div>
-                                  {metaLine([
-                                    c.propertyType && <span style={{ color: '#64748b' }}>{c.propertyType}</span>,
-                                    c.bedrooms ? `${c.bedrooms} bed` : null,
-                                    c.floorArea ? `${c.floorArea}m²` : null,
-                                    (c.floorArea && c.soldPrice) ? `£${Math.round(c.soldPrice / Number(c.floorArea)).toLocaleString()}/m²` : null,
-                                    c.tier ? <span style={{ color: '#7c3aed' }}>{c.tier}</span> : null,
-                                  ])}
-                                </div>
-                                {tag('Report', 'report')}
-                                <div style={{ textAlign: 'right' }}>
-                                  <div style={{ color: '#0f172a', fontWeight: '600' }}>{c.soldPrice ? `£${Number(c.soldPrice).toLocaleString()}` : '—'}</div>
-                                  <div style={{ color: '#94a3b8', fontSize: '10px' }}>{c.soldDate || ''}</div>
-                                </div>
-                              </div>
-                            ))}
-                            {lrItems.map((item, i) => {
-                              const epcBg = EPC_COL[item.epcRating] || null;
-                              const epcTxt = item.epcRating ? (['A','B','C'].includes(item.epcRating) ? '#fff' : '#000') : '#000';
+                            {rows.map((r, i) => {
+                              const epcBg = EPC_COL[r.epcRating] || null;
+                              const epcTxt = r.epcRating ? (['A','B','C'].includes(r.epcRating) ? '#fff' : '#000') : '#000';
+                              const ppsm = (r.floorArea && r.price) ? `£${Math.round(r.price / Number(r.floorArea)).toLocaleString()}/m²` : null;
                               return (
-                                <div key={'lr' + i} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '8px', padding: '7px 12px', borderBottom: '0.5px solid #f1f5f9', fontSize: '11px', alignItems: 'center' }}>
+                                <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '8px', padding: '7px 12px', borderBottom: '0.5px solid #f1f5f9', fontSize: '11px', alignItems: 'center' }}>
                                   <div style={{ minWidth: 0 }}>
-                                    <div style={{ color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{[item.address, item.town].filter(Boolean).join(', ')}</div>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginTop: '2px', flexWrap: 'wrap' }}>
-                                      {item.propertyType && <span style={{ color: '#64748b', fontSize: '10px' }}>{item.propertyType}{item.newBuild ? ' · New build' : ''}</span>}
-                                      {item.epcRating && <span style={{ fontSize: '10px', padding: '0 4px', borderRadius: '3px', background: epcBg, color: epcTxt, fontWeight: '700', lineHeight: '14px' }}>EPC {item.epcRating}</span>}
-                                      {item.habitableRooms && <span style={{ fontSize: '10px', color: '#475569' }}>{item.habitableRooms} rooms</span>}
-                                      {item.floorArea && <span style={{ fontSize: '10px', color: '#475569' }}>{item.floorArea}m²</span>}
-                                      {item.floorArea && item.price && <span style={{ fontSize: '10px', color: '#94a3b8' }}>£{Math.round(item.price / Number(item.floorArea)).toLocaleString()}/m²</span>}
-                                    </div>
-                                  </div>
-                                  {tag('Land Reg', 'lr')}
-                                  <div style={{ textAlign: 'right' }}>
-                                    <div style={{ color: '#0f172a', fontWeight: '600' }}>{item.price ? `£${item.price.toLocaleString()}` : '—'}</div>
-                                    <div style={{ color: '#94a3b8', fontSize: '10px' }}>{item.date?.slice(0, 7)}</div>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                            {otherComps.map((c, i) => {
-                              const price = c.soldPrice ?? c.price;
-                              const date = c.soldDate || c.date;
-                              const isReport = /report/i.test(c.source || '');
-                              return (
-                                <div key={'o' + i} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '8px', padding: '7px 12px', borderBottom: '0.5px solid #f1f5f9', fontSize: '11px', alignItems: 'center' }}>
-                                  <div style={{ minWidth: 0 }}>
-                                    <div style={{ color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.address || '—'}</div>
+                                    <div style={{ color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.address || '—'}</div>
                                     {metaLine([
-                                      c.bedrooms ? `${c.bedrooms} bed` : null,
-                                      c.notes || null,
+                                      r.propertyType && <span style={{ color: '#64748b' }}>{r.propertyType}{r.newBuild ? ' · New build' : ''}</span>,
+                                      r.bedrooms ? `${r.bedrooms} bed` : null,
+                                      r.epcRating ? <span style={{ padding: '0 4px', borderRadius: '3px', background: epcBg, color: epcTxt, fontWeight: '700', lineHeight: '14px' }}>EPC {r.epcRating}</span> : null,
+                                      r.habitableRooms ? `${r.habitableRooms} rooms` : null,
+                                      r.floorArea ? `${r.floorArea}m²` : null,
+                                      ppsm,
+                                      r.tier ? <span style={{ color: '#7c3aed' }}>{r.tier}</span> : null,
+                                      r.notes || null,
                                     ])}
                                   </div>
-                                  {tag(isReport ? 'Report' : (c.source || 'Manual'), isReport ? 'report' : 'manual')}
+                                  <div style={{ display: 'flex', gap: '4px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: '120px' }}>{r.tags.map(t => tag(t.label, t.kind))}</div>
                                   <div style={{ textAlign: 'right' }}>
-                                    <div style={{ color: '#0f172a', fontWeight: '600' }}>{price ? `£${Number(price).toLocaleString()}` : '—'}</div>
-                                    <div style={{ color: '#94a3b8', fontSize: '10px' }}>{date ? String(date).slice(0, 7) : ''}</div>
+                                    <div style={{ color: '#0f172a', fontWeight: '600' }}>{r.price ? `£${Number(r.price).toLocaleString()}` : '—'}</div>
+                                    <div style={{ color: '#94a3b8', fontSize: '10px' }}>{r.date || ''}</div>
                                   </div>
                                 </div>
                               );
