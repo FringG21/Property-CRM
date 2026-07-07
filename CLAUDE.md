@@ -44,6 +44,17 @@ Every field it sets MUST be present in the `reportFields` array inside `applyRep
 - `an.maxGDV` = `an.gdvOptimistic` — parser sets both
 - Property canvas reads: `an.profitMargin ?? an.margin` for the margin KPI
 
+## Extension ↔ CRM record contracts — DO NOT break
+Records written via `/api/ingest/:entity` MUST match the shapes the SPA produces or they render
+wrong / break the pipeline. Changing an SPA shape means updating `extension/popup/popup.js`
+`save()` in lockstep.
+- property — mirror the URL-import object (src/App.jsx ~1780): `status`, `dealName`, `checklist`,
+  `activityLog`, `files`, `comparables`, `dataSource`.
+- task — `dueDate` (not `due`), `status: 'not_started'`, capitalised `linkedType`.
+- globalNotes — capitalised `targetType`; `targetId` keeps the record's native id type.
+- contact / company — per src/App.jsx:930 / :679 (Builder & Trade companies add
+  `tradeSpecialisms, dayRate, leadTime, labourType`).
+
 ## Intelligence connectors (worker/index.js)
 All connectors run in parallel via Promise.allSettled. Results stored as:
 `property.intelligence.connectors[key] = { status: 'success'|'error', data: {...}, source, fetchedAt }`
@@ -51,6 +62,16 @@ All connectors run in parallel via Promise.allSettled. Results stored as:
 Active connectors: address, landRegistry, epc, police, flood, planning, osm, imd, hpi, tfl, schools, census
 
 EPC enrichment: after allSettled, enrichCompsWithEPC() cross-references LR comps with EPC records by address similarity.
+
+## Chrome extension (extension/)
+`extension/` is a Manifest V3 browser extension (vanilla static files). It is NOT part of
+`npm run build` or `npx wrangler deploy` — it is loaded unpacked in Chrome. See
+`extension/README.md` for architecture and features.
+- All extension API calls go through its background service worker using `host_permissions`,
+  which bypasses CORS — do NOT add CORS handling to the worker for the extension.
+- Extension-added worker routes (do not rename/remove): `POST /api/auth/extension-token`
+  (mints the 90-day pairing token) and `POST /api/ingest/:entity` (generic single-record upsert
+  reusing `D1_ENTITY_TABLES`; entity ∈ properties|contacts|companies|surveyors|globalNotes|tasks).
 
 ## Responsive Design & Device Optimisation
 
@@ -96,6 +117,14 @@ Reason through the layout at all three widths — fix issues before committing:
 npm run build
 npx wrangler deploy
 Always build and deploy after changes. The chunk size warning is expected and harmless.
+
+**Deploy is all-or-nothing.** `npx wrangler deploy` publishes the worker AND the built frontend
+(`dist/client`, the ASSETS binding) together — there is no worker-only or frontend-only deploy.
+Before deploying, run `git status`/`git diff` and confirm nothing unrelated is in the working
+tree, or it ships to production too.
+**Validate a worker change without publishing:** `npx wrangler deploy --dry-run --outdir=.wrangler-dryrun`.
+**HTTP probes:** `curl` to the workers.dev URL fails TLS (exit 35) in the Git Bash shell here —
+use PowerShell `Invoke-WebRequest` instead.
 
 ## Rules
 1. Read a function fully before editing it

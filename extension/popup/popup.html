@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="stylesheet" href="popup.css" />
+  <title>Property CRM Capture</title>
+</head>
+<body>
+  <header class="hdr">
+    <div class="brand"><span class="logo">🧩</span> Property CRM</div>
+    <button id="connState" class="conn" title="Connection">•</button>
+  </header>
+
+  <!-- Connect / pairing screen -->
+  <section id="connect" class="view hidden">
+    <p class="lead">Paste your pairing token to connect this browser to the CRM.</p>
+    <textarea id="tokenInput" rows="3" placeholder="Paste extension token…"></textarea>
+    <button id="connectBtn" class="primary">Connect</button>
+    <p id="connectErr" class="err"></p>
+    <p class="hint">Get a token in the CRM under <strong>Settings → Integrations → Browser Extension</strong>.</p>
+  </section>
+
+  <!-- Main capture screen -->
+  <section id="main" class="view hidden">
+    <div class="tabs" id="typeTabs"></div>
+    <div id="badge" class="badge hidden"></div>
+    <form id="form" class="form"></form>
+    <div id="status" class="status"></div>
+    <div class="actions">
+      <button id="saveBtn" class="primary" type="button">Save to CRM</button>
+    </div>
+    <button id="disconnect" class="link">Disconnect</button>
+  </section>
+</body>
+<script src="popup.js"></script>
+</html>
