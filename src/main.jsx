@@ -1,4 +1,4 @@
-import { StrictMode, useState } from 'react'
+import { StrictMode, useState, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
@@ -78,6 +78,28 @@ function Root() {
   const [user, setUser] = useState(() => {
     try { return JSON.parse(localStorage.getItem('crm_user') || '{}'); } catch { return {}; }
   });
+
+  // Re-validate the stored session against the server on load. This refreshes
+  // role/allowedTabs from the authoritative source (so permission changes take
+  // effect without a re-login) and recovers from a missing/corrupt crm_user —
+  // the empty-nav trap where a live session renders no navigation. session from
+  // /api/auth/me carries no display name, so merge over the stored user to keep it.
+  useEffect(() => {
+    const token = localStorage.getItem('crm_session');
+    if (!token) return;
+    fetch('/api/auth/me', { headers: { Authorization: `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(data => {
+        if (data && data.success && data.user) {
+          setUser(prev => {
+            const merged = { ...prev, ...data.user };
+            localStorage.setItem('crm_user', JSON.stringify(merged));
+            return merged;
+          });
+        }
+      })
+      .catch(() => {});
+  }, []);
 
   // Always show verify screen if token is in URL, regardless of login state
   const params = new URLSearchParams(window.location.search);

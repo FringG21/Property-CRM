@@ -3,13 +3,13 @@ import React, { useState, useEffect, useRef } from 'react';
 import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import L from 'leaflet';
 import {
-  LayoutDashboard, Building2, MapPin, Upload, ArrowLeft, FileText, Code,
+  LayoutDashboard, Building2, MapPin, ArrowLeft, FileText, Code,
   CheckSquare, Square, Calendar, DollarSign, Clock, Star, ExternalLink,
   SlidersHorizontal, Home, CheckCircle2, AlertCircle, X, Check, ChevronDown,
   ChevronUp, ChevronLeft, ChevronRight, Undo2, Bookmark, User, Gavel, Settings, Users, Link2, Plus, Trash2,
   Briefcase, Contact, Search, Globe, Mail, Phone, ClipboardList, TrendingUp, LogOut, Filter, Map, BarChart2, Pencil,
   Bell, Download, MessageSquare, ListChecks, Activity, AlertTriangle, MoreHorizontal, Layers, RefreshCw,
-  Bold, Italic, Underline, List, ListOrdered
+  Bold, Italic, Underline, List, ListOrdered, Receipt
 } from 'lucide-react';
 
 // Fix Leaflet default marker icons
@@ -461,6 +461,7 @@ export default function App({ user = {}, onLogout }) {
     { key: 'auctionintel', label: 'Auction Intel' },
     { key: 'dealanalysis', label: 'Deal Analysis' },
     { key: 'portfolio', label: 'Portfolio' },
+    { key: 'reportcosts', label: 'Report Costs' },
     { key: 'companies', label: 'Companies Directory' },
     { key: 'contacts', label: 'Contacts Roster' },
     { key: 'tasks', label: 'Tasks & Follow-ups' },
@@ -886,7 +887,7 @@ export default function App({ user = {}, onLogout }) {
       // GDV scenario matrices (required for the bid matrix display)
       'matrixConservative', 'matrixBase', 'matrixOptimistic', 'matrixHeaders',
       // Cost stack breakdown
-      'buyersPremium', 'sdlt', 'acquisitionFeesTotal', 'holdingTotal', 'exitTotal',
+      'buyersPremium', 'sdlt', 'acquisitionFeesTotal', 'holdingTotal', 'exitTotal', 'totalAuctionFees',
       // Refurb scenarios
       'refurbLight', 'refurbMedium', 'refurbHeavy',
       // Metadata
@@ -1002,12 +1003,6 @@ export default function App({ user = {}, onLogout }) {
       }
       return p;
     }));
-  };
-
-  const handleIncomingFileIngest = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    setProperties([...properties, { id: Date.now(), address: file.name.replace(/\.[^/.]+$/, "").replace(/[-_]/g, ' '), guidePrice: 160000, auctionDate: '2026-08-20', auctionTime: '10:30', maxBid: 210000, refurb: 18000, bedrooms: 3, propertyType: 'Detached', sourcePlatform: 'Auction House', listingUrl: 'https://www.auctionhouse.co.uk/southyorkshire', isConsideration: false, isStrongBid: true, planningToBid: false, surveyorStatus: 'called', surveyorDate: '', checklist: { legalReviewed: false, financeApproved: false, costsPriced: false }, notesList: [], files: { mainReport: { name: file.name, type: 'pdf' }, spriftReport: null, surveyFile: null, legalPack: null }, status: 'Sourced', hammerPrice: null, outcome: '' }]);
   };
 
   // Returns a copy of `prop` with a new activity entry prepended to activityLog
@@ -1250,7 +1245,9 @@ export default function App({ user = {}, onLogout }) {
     //   <table class="scenario"><thead>...</thead><tbody>...</tbody></table>  ← matrix
     // We scan for every label-sm that names a GDV scenario, then find the next
     // table.scenario immediately after it.
-    const scenarioLabelRe = /class="label-sm"[^>]*>([^<]*(Conservative|Base|Optimistic)\s+GDV[^<]*)<\/div>\s*<div[^>]*>(£[\d,]+)/gi;
+    // Label must START with the scenario keyword — do not allow leading text like
+    // "Max Bid (Base GDV, 15% margin)" to false-match as the Base GDV figure itself.
+    const scenarioLabelRe = /class="label-sm"[^>]*>((Conservative|Base|Optimistic)\s+GDV[^<]*)<\/div>\s*<div[^>]*>(£[\d,]+)/gi;
     let slm;
     while ((slm = scenarioLabelRe.exec(htmlText)) !== null) {
       const type  = slm[2];                                    // "Conservative" | "Base" | "Optimistic"
@@ -1369,8 +1366,10 @@ export default function App({ user = {}, onLogout }) {
 
   const parseReportAnalytics = parseFullReportAnalytics;
 
-  const handleVaultUpload = async (e, fileKey) => {
-    const file = e.target.files[0];
+  // Core upload+parse+merge logic, shared by manual file-picker uploads
+  // (handleVaultUpload below) and the analyser-generated report (uploadReportFile
+  // is called directly with a synthesized File once the analyser finishes).
+  const uploadReportFile = async (file, fileKey) => {
     if (!file || !currentViewProperty) return;
     const isHtml = file.name.endsWith('.html') || file.name.endsWith('.htm');
 
@@ -1419,13 +1418,20 @@ export default function App({ user = {}, onLogout }) {
       fetch('/api/crm-data', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes }),
-      }).then(() => { setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); })
+        body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes, baseSavedAt: lastSyncedAtRef.current }),
+      }).then(r => r.json()).then(json => { applyCrmSaveResponse(json); setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); })
         .catch(() => setSaveStatus('idle'));
 
+      return analytics;
     } catch {
       alert('Document upload failed — please check your connection and try again.');
     }
+  };
+
+  const handleVaultUpload = async (e, fileKey) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    await uploadReportFile(file, fileKey);
   };
 
   const handleCustomDocUpload = async (e) => {
@@ -1455,8 +1461,8 @@ export default function App({ user = {}, onLogout }) {
       fetch('/api/crm-data', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes }),
-      }).then(() => { setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); })
+        body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes, baseSavedAt: lastSyncedAtRef.current }),
+      }).then(r => r.json()).then(json => { applyCrmSaveResponse(json); setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); })
         .catch(() => setSaveStatus('idle'));
     } catch {
       alert('Document upload failed — please check your connection and try again.');
@@ -1480,7 +1486,7 @@ export default function App({ user = {}, onLogout }) {
     const updatedProperties = properties.map(p => p.id === currentViewProperty.id ? updatedProp : p);
     setProperties(updatedProperties);
     const token = localStorage.getItem('crm_session');
-    fetch('/api/crm-data', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks }) }).catch(() => {});
+    fetch('/api/crm-data', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, baseSavedAt: lastSyncedAtRef.current }) }).then(r => r.json()).then(applyCrmSaveResponse).catch(() => {});
   };
 
   const handleReparseReport = async () => {
@@ -1500,8 +1506,8 @@ export default function App({ user = {}, onLogout }) {
       const updatedProperties = properties.map(p => p.id === currentViewProperty.id ? updatedProp : p);
       setProperties(updatedProperties);
       setSaveStatus('saving');
-      fetch('/api/crm-data', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks }) })
-        .then(() => { setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); }).catch(() => setSaveStatus('idle'));
+      fetch('/api/crm-data', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, baseSavedAt: lastSyncedAtRef.current }) })
+        .then(r => r.json()).then(json => { applyCrmSaveResponse(json); setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); }).catch(() => setSaveStatus('idle'));
       const got = [];
       if (analytics.aiSummary) got.push('AI summary');
       if (analytics.redFlags?.length) got.push(`${analytics.redFlags.length} red flags`);
@@ -1516,6 +1522,91 @@ export default function App({ user = {}, onLogout }) {
       alert(`Re-parsed "${rec.name}".\n\nFound: ${got.join(', ') || 'basic figures only'}.${missing.length ? `\n\nNOT detected: ${missing.join(', ')} — these sections weren't found in the report HTML. If the report does contain them, send it to me and I'll adjust the parser.` : ''}`);
     } catch {
       alert('Could not re-parse — the file may have been uploaded in a previous session and is no longer retrievable from storage. Re-upload the HTML report.');
+    }
+  };
+
+  // Calls the property analyser running locally, waits for it to finish via
+  // SSE progress, then feeds the finished HTML through the exact same
+  // upload+parse+merge path a manual file upload uses (uploadReportFile above).
+  const ANALYSER_URL = import.meta.env.VITE_ANALYSER_URL || 'http://localhost:3000';
+  const ANALYSER_SECRET = import.meta.env.VITE_ANALYSER_SECRET || '';
+
+  const handleRunGenerateReport = async () => {
+    if (!currentViewProperty) return;
+    setGenerateReportRunning(true);
+    setGenerateReportError(null);
+    setGenerateReportLog([]);
+    try {
+      const fd = new FormData();
+      fd.append('address', currentViewProperty.address || '');
+      if (currentViewProperty.postcode) fd.append('fullPostcode', currentViewProperty.postcode);
+      if (currentViewProperty.guidePrice) fd.append('guidePrice', String(currentViewProperty.guidePrice));
+      if (currentViewProperty.auctionHouse) fd.append('auctionHouseName', currentViewProperty.auctionHouse);
+      if (currentViewProperty.auctionDate) fd.append('auctionCloses', currentViewProperty.auctionDate);
+      (generateReportModal?.spriftFiles || []).forEach(f => fd.append('spriftFiles', f));
+      (generateReportModal?.rmPlusFiles || []).forEach(f => fd.append('rmPlusFiles', f));
+
+      const genRes = await fetch(`${ANALYSER_URL}/api/reports/generate`, {
+        method: 'POST',
+        headers: { 'X-CRM-Secret': ANALYSER_SECRET },
+        body: fd,
+      });
+      if (!genRes.ok) throw new Error(`Analyser returned an error (${genRes.status})`);
+      const { uuid } = await genRes.json();
+      if (!uuid) throw new Error('Analyser did not return a report id');
+
+      await new Promise((resolve, reject) => {
+        const es = new EventSource(`${ANALYSER_URL}/api/reports/${uuid}/progress?crmToken=${encodeURIComponent(ANALYSER_SECRET)}`);
+        // Live web-search research + analysis can legitimately take several
+        // minutes — 3 minutes was cutting off runs that were still working.
+        const timeout = setTimeout(() => { es.close(); reject(new Error('Timed out waiting for the report — check the analyser is still running')); }, 600000);
+        es.onmessage = (e) => {
+          const d = JSON.parse(e.data);
+          setGenerateReportLog(log => [...log, d]);
+          if (d.step === 'done') { clearTimeout(timeout); es.close(); resolve(); }
+          if (d.step === 'error') { clearTimeout(timeout); es.close(); reject(new Error(d.message || 'Report generation failed')); }
+        };
+        es.onerror = () => { clearTimeout(timeout); es.close(); reject(new Error('Lost connection to the analyser — is it still running on this machine?')); };
+      });
+
+      const htmlRes = await fetch(`${ANALYSER_URL}/reports/${uuid}`, { headers: { 'X-CRM-Secret': ANALYSER_SECRET } });
+      if (!htmlRes.ok) throw new Error('Could not fetch the finished report from the analyser');
+      const htmlText = await htmlRes.text();
+      const fileName = `Deal Report — ${currentViewProperty.address || 'property'}.html`;
+      const file = new File([htmlText], fileName, { type: 'text/html' });
+
+      const analytics = await uploadReportFile(file, 'mainReport');
+
+      // Best-effort — a missing/failed cost fetch should never block the report landing on the property.
+      // Note: this route lives on the analyser's /reports router (routes/view.js), not /api/reports.
+      try {
+        const dataRes = await fetch(`${ANALYSER_URL}/reports/${uuid}/data`, { headers: { 'X-CRM-Secret': ANALYSER_SECRET } });
+        if (dataRes.ok) {
+          const reportData = await dataRes.json();
+          const est = reportData?.costEstimate;
+          if (est) {
+            const modelsUsed = Object.keys(est.perModel || {});
+            setReportCostLog(log => [...log, {
+              id: uuid,
+              propertyId: currentViewProperty.id,
+              address: currentViewProperty.address || '',
+              date: new Date().toISOString().slice(0, 10),
+              verdict: analytics?.verdict || null,
+              models: modelsUsed,
+              inputTokens: est.totalInputTokens || 0,
+              outputTokens: est.totalOutputTokens || 0,
+              cacheReadTokens: est.totalCacheReadTokens || 0,
+              costUSD: est.totalUSD || 0,
+            }]);
+          }
+        }
+      } catch { /* cost logging is non-critical — report itself already landed */ }
+
+      setGenerateReportModal(null);
+    } catch (err) {
+      setGenerateReportError(err.message || 'Report generation failed — is the analyser running on this machine?');
+    } finally {
+      setGenerateReportRunning(false);
     }
   };
 
@@ -2204,10 +2295,25 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
   const [intelligenceRunning, setIntelligenceRunning] = useState(false);
   const [duplicateModal, setDuplicateModal] = useState(null); // { matches, pendingAnalytics, pendingFileRecord }
 
+  // Generate Report (local analyser) state
+  const [generateReportModal, setGenerateReportModal] = useState(null); // { spriftFiles: [], rmPlusFiles: [] }
+  const [generateReportRunning, setGenerateReportRunning] = useState(false);
+  const [generateReportLog, setGenerateReportLog] = useState([]);
+  const [generateReportError, setGenerateReportError] = useState(null);
+
   // ==========================================
   // REFURB COST & QUOTE BUILDER STATE
   // ==========================================
   const [refurbQuotes, setRefurbQuotes] = useState([]);
+
+  // Report generation cost log — one entry per analyser run, used by the
+  // Report Costs tab. { id, propertyId, address, date, verdict, models,
+  // inputTokens, outputTokens, cacheReadTokens, costUSD }
+  const [reportCostLog, setReportCostLog] = useState([]);
+  const [reportCostSearch, setReportCostSearch] = useState('');
+  const [reportCostModelFilter, setReportCostModelFilter] = useState('all');
+  const [reportCostVerdictFilter, setReportCostVerdictFilter] = useState('all');
+  const [reportCostSort, setReportCostSort] = useState('date-desc');
   const [rfSubTab, setRfSubTab] = useState('dashboard');
   // Quote modal
   const [showQuoteModal, setShowQuoteModal] = useState(false);
@@ -2275,6 +2381,31 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
   // KV persistence — declared here so all state vars above are in scope
   const [saveStatus, setSaveStatus] = useState('idle');
   const [dataLoaded, setDataLoaded] = useState(false);
+  // serverTime the CRM data was last loaded/saved at — echoed back on every save
+  // as baseSavedAt so the worker can preserve extension writes made since the load
+  // (timestamp-guarded merge) instead of deleting them.
+  const lastSyncedAtRef = useRef(null);
+
+  // Fold rows the server preserved (extension writes the SPA hadn't seen) back
+  // into in-memory state, and advance the baseline. Only mutates state when there
+  // is something to fold, so it never triggers a save loop in the common case.
+  const ingestableSetters = {
+    properties: setProperties, contacts: setContacts, companies: setCompanies,
+    surveyors: setSurveyors, globalNotes: setGlobalNotes, tasks: setTasks,
+  };
+  const applyCrmSaveResponse = (json) => {
+    if (!json) return;
+    if (json.savedAt) lastSyncedAtRef.current = json.savedAt;
+    const preserved = json.preserved || {};
+    for (const [key, rows] of Object.entries(preserved)) {
+      if (!rows?.length || !ingestableSetters[key]) continue;
+      ingestableSetters[key](prev => {
+        const byId = new Map(prev.map(r => [String(r.id), r]));
+        for (const r of rows) byId.set(String(r.id), r);
+        return Array.from(byId.values());
+      });
+    }
+  };
 
   useEffect(() => {
     const token = localStorage.getItem('crm_session');
@@ -2293,6 +2424,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
         if (!data) return;
         if (data.success && data.data) {
           const d = data.data;
+          lastSyncedAtRef.current = data.serverTime || new Date().toISOString();
           if (d.properties?.length) setProperties(d.properties);
           if (d.companies?.length) setCompanies(d.companies);
           if (d.contacts?.length) setContacts(d.contacts);
@@ -2308,6 +2440,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
           if (d.taskTemplates?.length) setTaskTemplates(d.taskTemplates);
           if (d.catalogTrades?.length) setCatalogTrades(d.catalogTrades);
           if (d.catalogProducts?.length) setCatalogProducts(d.catalogProducts);
+          if (d.reportCostLog?.length) setReportCostLog(d.reportCostLog);
         }
       })
       .catch(() => {})
@@ -2323,13 +2456,13 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
       fetch('/api/crm-data', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ properties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes, specItems, specTemplates, specAllowances, taskTemplates, catalogTrades, catalogProducts }),
+        body: JSON.stringify({ properties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes, specItems, specTemplates, specAllowances, taskTemplates, catalogTrades, catalogProducts, reportCostLog, baseSavedAt: lastSyncedAtRef.current }),
       })
-        .then(() => { setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); })
+        .then(r => r.json()).then(json => { applyCrmSaveResponse(json); setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); })
         .catch(() => setSaveStatus('idle'));
     }, 2000);
     return () => clearTimeout(timer);
-  }, [properties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes, specItems, specTemplates, specAllowances, taskTemplates, catalogTrades, catalogProducts, dataLoaded]);
+  }, [properties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes, specItems, specTemplates, specAllowances, taskTemplates, catalogTrades, catalogProducts, reportCostLog, dataLoaded]);
 
   // Load notification preferences from server on mount
   useEffect(() => {
@@ -2900,6 +3033,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 {can('auctionintel') && <button onClick={() => go('auctionintel')} style={navBtnStyle('auctionintel')}><TrendingUp size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Auction Intel</span>}</button>}
                 {can('dealanalysis') && <button onClick={() => go('dealanalysis')} style={navBtnStyle('dealanalysis', '#7C3AED')}><BarChart2 size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Deal Analysis</span>}</button>}
                 {can('portfolio') && <button onClick={() => go('portfolio')} style={navBtnStyle('portfolio', '#059669')}><DollarSign size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Portfolio</span>}</button>}
+                {can('reportcosts') && <button onClick={() => go('reportcosts')} style={navBtnStyle('reportcosts', '#7C3AED')}><Receipt size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Report Costs</span>}</button>}
                 <div style={{ margin: '8px 0 0', borderTop: '1px solid #1e293b', paddingTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
                   {can('companies') && <button onClick={() => go('companies')} style={{ ...navBtnStyle('companies', '#0284c7'), color: '#ffffff' }}><Briefcase size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Companies</span>}</button>}
                   {can('contacts') && <button onClick={() => go('contacts')} style={{ ...navBtnStyle('contacts', '#0284c7'), color: '#ffffff' }}><Contact size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Contacts</span>}</button>}
@@ -4320,10 +4454,14 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                   <>
                                     <button onClick={() => handleViewDocument(rec)} style={{ padding: '5px 11px', fontSize: '11px', fontWeight: '600', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#fff', color: '#475569', cursor: 'pointer', fontFamily: 'inherit' }}>View</button>
                                     {isReport && <button onClick={handleReparseReport} title="Re-run the parser on this report to re-pull AI summary, red flags, GDV scenarios and figures" style={{ padding: '5px 11px', fontSize: '11px', fontWeight: '600', borderRadius: '6px', border: '1px solid #ddd6fe', background: '#f5f3ff', color: '#7C3AED', cursor: 'pointer', fontFamily: 'inherit' }}>Re-parse</button>}
+                                    {isReport && <button onClick={() => setGenerateReportModal({ spriftFiles: [], rmPlusFiles: [] })} title="Run the property analyser and replace this report with a freshly generated one" style={{ padding: '5px 11px', fontSize: '11px', fontWeight: '600', borderRadius: '6px', border: '1px solid #bbf7d0', background: '#f0fdf4', color: '#059669', cursor: 'pointer', fontFamily: 'inherit' }}>Generate</button>}
                                     <button onClick={() => handleDeleteReportFile(key, label)} title="Remove this document" style={{ padding: '5px 9px', fontSize: '11px', fontWeight: '600', borderRadius: '6px', border: '1px solid #fecaca', background: '#fff5f5', color: '#dc2626', cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center' }}><Trash2 size={12} /></button>
                                   </>
                                 ) : (
-                                  <label style={{ padding: '5px 12px', fontSize: '11px', fontWeight: '600', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#fff', color: '#475569', cursor: 'pointer' }}>Upload<input type="file" accept={accept} style={{ display: 'none' }} onChange={e => handleVaultUpload(e, key)} /></label>
+                                  <>
+                                    <label style={{ padding: '5px 12px', fontSize: '11px', fontWeight: '600', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#fff', color: '#475569', cursor: 'pointer' }}>Upload<input type="file" accept={accept} style={{ display: 'none' }} onChange={e => handleVaultUpload(e, key)} /></label>
+                                    {isReport && <button onClick={() => setGenerateReportModal({ spriftFiles: [], rmPlusFiles: [] })} title="Run the property analyser to generate this report" style={{ padding: '5px 12px', fontSize: '11px', fontWeight: '600', borderRadius: '6px', border: '1px solid #bbf7d0', background: '#f0fdf4', color: '#059669', cursor: 'pointer', fontFamily: 'inherit' }}>Generate Report</button>}
+                                  </>
                                 )}
                               </div>
                             </div>
@@ -4637,6 +4775,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                     { l: 'SSSI', v: plan.sssi, warn: true },
                                     { l: 'AONB', v: plan.aonb, warn: true },
                                     { l: 'National Park', v: plan.nationalPark, warn: true },
+                                    { l: 'Green Belt', v: plan.greenBelt, warn: true },
+                                    { l: 'Flood Risk Zone', v: plan.floodRiskZone, warn: true },
                                   ].map(item => item.v ? (
                                     <span key={item.l} style={{ padding: '1px 6px', borderRadius: '10px', background: '#fef3c7', color: '#92400e', fontSize: '10px' }}>⚠️ {item.l}</span>
                                   ) : null)}
@@ -4973,6 +5113,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 {activeTab === 'contacts' && '👥 Sourcing Contacts Profile Roster'}
                 {activeTab === 'dealanalysis' && '📊 Deal Analysis & Scenario Matrix'}
                 {activeTab === 'portfolio' && '💷 Portfolio P&L'}
+                {activeTab === 'reportcosts' && '🧾 Report Generation Costs'}
                 {activeTab === 'tasks' && '✅ Tasks & Follow-ups'}
                 {activeTab === 'refurb' && '🔨 Refurb Cost & Trade Quote Builder'}
                 {activeTab === 'settings' && '⚙️ System Settings & Preferences'}
@@ -5320,6 +5461,175 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 );
               })()}
 
+              {activeTab === 'reportcosts' && (() => {
+                const entries = reportCostLog || [];
+                const allModels = Array.from(new Set(entries.flatMap(e => e.models || [])));
+                const allVerdicts = Array.from(new Set(entries.map(e => e.verdict).filter(Boolean)));
+
+                let filtered = entries.filter(e => {
+                  if (reportCostSearch && !(e.address || '').toLowerCase().includes(reportCostSearch.toLowerCase())) return false;
+                  if (reportCostModelFilter !== 'all' && !(e.models || []).includes(reportCostModelFilter)) return false;
+                  if (reportCostVerdictFilter !== 'all' && e.verdict !== reportCostVerdictFilter) return false;
+                  return true;
+                });
+                filtered = [...filtered].sort((a, b) => {
+                  switch (reportCostSort) {
+                    case 'date-asc': return new Date(a.date) - new Date(b.date);
+                    case 'cost-desc': return (b.costUSD || 0) - (a.costUSD || 0);
+                    case 'cost-asc': return (a.costUSD || 0) - (b.costUSD || 0);
+                    case 'date-desc':
+                    default: return new Date(b.date) - new Date(a.date);
+                  }
+                });
+
+                const totalCost = entries.reduce((s, e) => s + (e.costUSD || 0), 0);
+                const totalReports = entries.length;
+                const avgCost = totalReports ? totalCost / totalReports : 0;
+                const totalCacheRead = entries.reduce((s, e) => s + (e.cacheReadTokens || 0), 0);
+
+                const fmtUSD = v => `$${(v || 0).toFixed(2)}`;
+                const fmtTokens = v => {
+                  if (!v) return '0';
+                  if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+                  if (v >= 1e3) return `${(v / 1e3).toFixed(1)}K`;
+                  return String(v);
+                };
+
+                const chronological = [...entries].sort((a, b) => new Date(a.date) - new Date(b.date));
+                const maxCost = Math.max(1, ...chronological.map(e => e.costUSD || 0));
+
+                const card = { background: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', padding: isMobile ? '12px' : '16px' };
+                const th = { textAlign: 'left', padding: '10px 12px', fontSize: '11px', fontWeight: '600', color: '#64748b', textTransform: 'uppercase', letterSpacing: '.04em', borderBottom: '1px solid #e2e8f0', whiteSpace: 'nowrap' };
+                const td = { padding: '10px 12px', fontSize: isMobile ? '13px' : '12px', color: '#0f172a', borderBottom: '1px solid #f1f5f9' };
+                const controlStyle = { padding: '9px 10px', fontSize: isMobile ? '14px' : '13px', border: '1px solid #e2e8f0', borderRadius: '8px', minHeight: isMobile ? '44px' : '38px', background: '#fff', width: isMobile ? '100%' : 'auto' };
+
+                const verdictStyle = (v) => {
+                  const s = (v || '').toLowerCase();
+                  if (s.includes('strong') || s.includes('bid')) return { bg: '#dcfce7', color: '#166534' };
+                  if (s.includes('walk') || s.includes('avoid') || s.includes('pass')) return { bg: '#fee2e2', color: '#dc2626' };
+                  if (s.includes('caution') || s.includes('marginal')) return { bg: '#fef3c7', color: '#92400e' };
+                  return { bg: '#f1f5f9', color: '#475569' };
+                };
+
+                return (
+                  <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '14px' : '24px', background: '#f8fafc' }}>
+                    {entries.length === 0 ? (
+                      <div style={{ textAlign: 'center', padding: '80px 20px', color: '#94a3b8' }}>
+                        <Receipt size={40} style={{ marginBottom: '12px', opacity: 0.5 }} />
+                        <div style={{ fontSize: '15px', fontWeight: '600', color: '#475569', marginBottom: '6px' }}>No reports generated yet</div>
+                        <div style={{ fontSize: '13px' }}>Generate a report from a property's Documents tab to see cost tracking here.</div>
+                      </div>
+                    ) : (
+                      <>
+                        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : isTablet ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: isMobile ? '10px' : '14px', marginBottom: '18px' }}>
+                          <div style={card}>
+                            <div style={{ fontSize: '11px', color: '#64748b', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: '6px' }}>Total Spend</div>
+                            <div style={{ fontSize: isMobile ? '20px' : '24px', fontWeight: '700', color: '#0f172a' }}>{fmtUSD(totalCost)}</div>
+                          </div>
+                          <div style={card}>
+                            <div style={{ fontSize: '11px', color: '#64748b', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: '6px' }}>Reports Generated</div>
+                            <div style={{ fontSize: isMobile ? '20px' : '24px', fontWeight: '700', color: '#0f172a' }}>{totalReports}</div>
+                          </div>
+                          <div style={card}>
+                            <div style={{ fontSize: '11px', color: '#64748b', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: '6px' }}>Avg Cost / Report</div>
+                            <div style={{ fontSize: isMobile ? '20px' : '24px', fontWeight: '700', color: '#0f172a' }}>{fmtUSD(avgCost)}</div>
+                          </div>
+                          <div style={card}>
+                            <div style={{ fontSize: '11px', color: '#64748b', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: '6px' }}>Cache Reads</div>
+                            <div style={{ fontSize: isMobile ? '20px' : '24px', fontWeight: '700', color: '#059669' }}>{fmtTokens(totalCacheRead)}<span style={{ fontSize: '12px', color: '#94a3b8', fontWeight: '500' }}> tokens</span></div>
+                          </div>
+                        </div>
+
+                        {chronological.length > 1 && (
+                          <div style={{ ...card, marginBottom: '18px' }}>
+                            <div style={{ fontSize: '12px', fontWeight: '600', color: '#475569', marginBottom: '10px' }}>Cost per report over time</div>
+                            <svg viewBox={`0 0 ${Math.max(300, chronological.length * 36)} 100`} style={{ width: '100%', height: '100px', display: 'block' }} preserveAspectRatio="none">
+                              {chronological.map((e, i) => {
+                                const barW = 20;
+                                const gap = 16;
+                                const x = i * (barW + gap) + 8;
+                                const h = Math.max(2, ((e.costUSD || 0) / maxCost) * 80);
+                                return (
+                                  <rect key={e.id || i} x={x} y={92 - h} width={barW} height={h} rx="2" fill="#7C3AED" opacity="0.85">
+                                    <title>{`${e.date} — ${fmtUSD(e.costUSD)}`}</title>
+                                  </rect>
+                                );
+                              })}
+                              <line x1="0" y1="92" x2={Math.max(300, chronological.length * 36)} y2="92" stroke="#e2e8f0" strokeWidth="1" />
+                            </svg>
+                          </div>
+                        )}
+
+                        <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', flexWrap: 'wrap', gap: '10px', marginBottom: '14px', alignItems: isMobile ? 'stretch' : 'center' }}>
+                          <div style={{ position: 'relative', flex: isMobile ? '1 1 100%' : '0 1 240px' }}>
+                            <Search size={14} style={{ position: 'absolute', left: '10px', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
+                            <input value={reportCostSearch} onChange={e => setReportCostSearch(e.target.value)} placeholder="Search address…" style={{ ...controlStyle, paddingLeft: '30px', width: '100%' }} />
+                          </div>
+                          <select value={reportCostModelFilter} onChange={e => setReportCostModelFilter(e.target.value)} style={controlStyle}>
+                            <option value="all">All models</option>
+                            {allModels.map(m => <option key={m} value={m}>{m}</option>)}
+                          </select>
+                          <select value={reportCostVerdictFilter} onChange={e => setReportCostVerdictFilter(e.target.value)} style={controlStyle}>
+                            <option value="all">All verdicts</option>
+                            {allVerdicts.map(v => <option key={v} value={v}>{v}</option>)}
+                          </select>
+                          <select value={reportCostSort} onChange={e => setReportCostSort(e.target.value)} style={controlStyle}>
+                            <option value="date-desc">Newest first</option>
+                            <option value="date-asc">Oldest first</option>
+                            <option value="cost-desc">Highest cost</option>
+                            <option value="cost-asc">Lowest cost</option>
+                          </select>
+                          <div style={{ fontSize: '12px', color: '#94a3b8', marginLeft: isMobile ? 0 : 'auto' }}>{filtered.length} of {totalReports}</div>
+                        </div>
+
+                        <div className="crm-table-wrap" style={{ ...card, padding: 0, overflowX: 'auto' }}>
+                          <table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '760px' }}>
+                            <thead>
+                              <tr>
+                                <th style={th}>Date</th>
+                                <th style={th}>Property</th>
+                                <th style={th}>Verdict</th>
+                                <th style={th}>Model(s)</th>
+                                <th style={th}>Input</th>
+                                <th style={th}>Output</th>
+                                <th style={th}>Cache Read</th>
+                                <th style={th}>Cost</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {filtered.map(e => {
+                                const vs = verdictStyle(e.verdict);
+                                const prop = properties.find(p => p.id === e.propertyId);
+                                return (
+                                  <tr key={e.id}>
+                                    <td style={td}>{e.date}</td>
+                                    <td
+                                      style={{ ...td, fontWeight: '600', cursor: prop ? 'pointer' : 'default', color: prop ? '#7C3AED' : '#0f172a' }}
+                                      onClick={() => { if (prop) { setActiveTab('pipeline'); setCurrentViewProperty(prop); } }}
+                                    >
+                                      {e.address || '—'}
+                                    </td>
+                                    <td style={td}>{e.verdict ? <span style={{ fontSize: '10px', padding: '2px 8px', borderRadius: '8px', fontWeight: '600', background: vs.bg, color: vs.color }}>{e.verdict}</span> : '—'}</td>
+                                    <td style={{ ...td, fontSize: '11px', color: '#64748b' }}>{(e.models || []).join(', ') || '—'}</td>
+                                    <td style={td}>{fmtTokens(e.inputTokens)}</td>
+                                    <td style={td}>{fmtTokens(e.outputTokens)}</td>
+                                    <td style={{ ...td, color: '#059669' }}>{fmtTokens(e.cacheReadTokens)}</td>
+                                    <td style={{ ...td, fontWeight: '700' }}>{fmtUSD(e.costUSD)}</td>
+                                  </tr>
+                                );
+                              })}
+                              {filtered.length === 0 && (
+                                <tr><td colSpan={8} style={{ ...td, textAlign: 'center', color: '#94a3b8', padding: '30px' }}>No reports match these filters</td></tr>
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
+
               {activeTab === 'pipeline' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
 
@@ -5343,10 +5653,6 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       <button onClick={() => { setBulkMode(b => !b); setBulkSelectedIds([]); }} style={{ padding: '7px 10px', borderRadius: '6px', fontSize: '12px', fontWeight: '600', cursor: 'pointer', border: `1px solid ${bulkMode ? '#7C3AED' : '#e2e8f0'}`, backgroundColor: bulkMode ? '#F5F3FF' : '#ffffff', color: bulkMode ? '#7C3AED' : '#475569', display: 'flex', alignItems: 'center', gap: '5px' }}>{bulkMode ? '✕ Cancel' : '☐ Select'}</button>
                     </div>
                     <div style={{ display: 'flex', gap: '8px' }}>
-                      {!isMobile && <label style={{ backgroundColor: '#059669', color: 'white', padding: '7px 14px', borderRadius: '6px', fontWeight: '600', cursor: 'pointer', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <Upload size={14} /> Upload Report
-                        <input type="file" accept=".pdf,.html,.htm" onChange={handleIncomingFileIngest} style={{ display: 'none' }} />
-                      </label>}
                       <button onClick={() => { const ah = companies.filter(c => c.type === 'Auction House'); setNewPropPlatform(ah[0]?.name || ''); setNewPropAddress(''); setNewPropGuide(''); setNewPropDate(''); setNewPropType('Residential'); setShowAddPropertyModal(true); }} style={{ padding: '7px 14px', borderRadius: '6px', fontSize: '12px', fontWeight: '600', cursor: 'pointer', border: '1px solid #e2e8f0', backgroundColor: '#ffffff', color: '#475569', display: 'flex', alignItems: 'center', gap: '6px' }}>
                         <Plus size={14} /> {isMobile ? 'Add' : 'Add manually'}
                       </button>
@@ -7446,7 +7752,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                 { label: 'Max safe bid', val: fmt(an.maxBid), sub: an.targetBid ? `target: ${fmt(an.targetBid)}` : `walk away: ${fmt(an.walkAway)}` },
                                 { label: 'Net profit', val: fmt(an.netProfit), sub: `${an.margin || '—'}% margin · ${an.roi || '—'}% ROI`, green: true },
                                 { label: 'Total investment', val: fmt(an.totalInvestment), sub: `fees: ${fmt(an.totalAuctionFees)}` },
-                                { label: 'Guide price', val: fmt(an.guidePrice), sub: an.completionDate ? `Completion ${an.completionDate}` : `${an.comps || '—'} comparables` },
+                                { label: 'Guide price', val: fmt(activeDeal.guidePrice), sub: an.completionDate ? `Completion ${an.completionDate}` : `${an.comps || '—'} comparables` },
                               ].map(({ label, val, sub, green }) => (
                                 <div key={label} style={{ backgroundColor: '#f8fafc', borderRadius: '8px', padding: '10px 12px' }}>
                                   <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '4px' }}>{label}</div>
@@ -9909,8 +10215,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       fetch('/api/crm-data', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                        body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes }),
-                      }).then(() => { setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); }).catch(() => setSaveStatus('idle'));
+                        body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes, baseSavedAt: lastSyncedAtRef.current }),
+                      }).then(r => r.json()).then(json => { applyCrmSaveResponse(json); setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); }).catch(() => setSaveStatus('idle'));
                     }}
                     style={{ marginTop: '8px', width: '100%', padding: '7px', background: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '12px', fontWeight: '600', cursor: 'pointer', fontFamily: 'inherit' }}
                   >
@@ -9934,8 +10240,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                   fetch('/api/crm-data', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                    body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes }),
-                  }).then(() => { setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); }).catch(() => setSaveStatus('idle'));
+                    body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes, baseSavedAt: lastSyncedAtRef.current }),
+                  }).then(r => r.json()).then(json => { applyCrmSaveResponse(json); setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); }).catch(() => setSaveStatus('idle'));
                 }}
                 style={{ flex: 1, padding: '8px', background: '#f1f5f9', color: '#475569', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', fontFamily: 'inherit' }}
               >
@@ -9945,6 +10251,62 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 Cancel
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== MODAL: GENERATE REPORT (local analyser) ==================== */}
+      {generateReportModal && currentViewProperty && (
+        <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.5)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+          <div style={{ backgroundColor: '#fff', borderRadius: '12px', padding: isMobile ? '20px' : '28px', width: '480px', maxWidth: '95vw', boxShadow: '0 20px 60px rgba(0,0,0,0.25)', boxSizing: 'border-box' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+              <div style={{ fontSize: '15px', fontWeight: '700', color: '#0f172a' }}>Generate assessment report</div>
+              {!generateReportRunning && (
+                <button onClick={() => { setGenerateReportModal(null); setGenerateReportError(null); }} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8' }}><X size={18} /></button>
+              )}
+            </div>
+            <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '16px' }}>{currentViewProperty.address}{currentViewProperty.guidePrice ? ` · Guide £${Number(currentViewProperty.guidePrice).toLocaleString('en-GB')}` : ''}</div>
+
+            {!generateReportRunning && !generateReportError && (
+              <>
+                <div style={{ marginBottom: '14px' }}>
+                  <label style={{ display: 'block', fontSize: '11px', fontWeight: '600', color: '#475569', marginBottom: '6px' }}>Sprift PDF / screenshots</label>
+                  <input type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp" onChange={e => setGenerateReportModal(m => ({ ...m, spriftFiles: Array.from(e.target.files || []) }))} style={{ fontSize: '12px', width: '100%' }} />
+                  {generateReportModal.spriftFiles?.length > 0 && <div style={{ fontSize: '11px', color: '#059669', marginTop: '4px' }}>{generateReportModal.spriftFiles.length} file(s) selected</div>}
+                </div>
+                <div style={{ marginBottom: '18px' }}>
+                  <label style={{ display: 'block', fontSize: '11px', fontWeight: '600', color: '#475569', marginBottom: '6px' }}>Rightmove Plus screenshots</label>
+                  <input type="file" multiple onChange={e => setGenerateReportModal(m => ({ ...m, rmPlusFiles: Array.from(e.target.files || []) }))} style={{ fontSize: '12px', width: '100%' }} />
+                  {generateReportModal.rmPlusFiles?.length > 0 && <div style={{ fontSize: '11px', color: '#059669', marginTop: '4px' }}>{generateReportModal.rmPlusFiles.length} file(s) selected</div>}
+                </div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button onClick={handleRunGenerateReport} style={{ flex: 1, padding: '9px', background: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '13px', fontWeight: '600', cursor: 'pointer', fontFamily: 'inherit' }}>Generate</button>
+                  <button onClick={() => setGenerateReportModal(null)} style={{ padding: '9px 16px', background: 'transparent', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', color: '#94a3b8', cursor: 'pointer', fontFamily: 'inherit' }}>Cancel</button>
+                </div>
+              </>
+            )}
+
+            {generateReportRunning && (
+              <div>
+                <div style={{ fontSize: '12px', color: '#64748b', marginBottom: '10px' }}>⏳ Running on the local analyser — this can take up to a minute…</div>
+                <div style={{ maxHeight: '180px', overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '10px 12px', background: '#f8fafc' }}>
+                  {generateReportLog.length === 0 && <div style={{ fontSize: '11px', color: '#94a3b8' }}>Waiting for the analyser to respond…</div>}
+                  {generateReportLog.map((d, i) => (
+                    <div key={i} style={{ fontSize: '11px', color: '#334155', padding: '2px 0' }}>{d.message || d.step}</div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {generateReportError && (
+              <div>
+                <div style={{ fontSize: '12px', color: '#dc2626', background: '#fff5f5', border: '1px solid #fecaca', borderRadius: '8px', padding: '10px 12px', marginBottom: '14px' }}>{generateReportError}</div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button onClick={() => { setGenerateReportError(null); }} style={{ flex: 1, padding: '9px', background: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '13px', fontWeight: '600', cursor: 'pointer', fontFamily: 'inherit' }}>Try again</button>
+                  <button onClick={() => { setGenerateReportModal(null); setGenerateReportError(null); }} style={{ padding: '9px 16px', background: 'transparent', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', color: '#94a3b8', cursor: 'pointer', fontFamily: 'inherit' }}>Close</button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

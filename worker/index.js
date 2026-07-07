@@ -469,22 +469,67 @@ const D1_ENTITY_TABLES = {
 
 // Replace a user's rows for every entity key present in the blob. Keys absent
 // from the blob are left untouched (some save paths post partial payloads).
-async function syncUserBlobToD1(env, userId, blob, savedAt) {
+//
+// Timestamp-guarded merge: the SPA deletes a record by dropping it from its
+// array (no tombstones), so a row the blob omits is ambiguous — it was either
+// deliberately deleted by the SPA, or written by another actor (the Chrome
+// extension via /api/ingest) *after* the SPA loaded and is simply unknown to it.
+// We disambiguate with baseSavedAt (the serverTime the SPA loaded at): an omitted
+// row whose updated_at is newer than baseSavedAt could not have been seen by the
+// SPA, so it is preserved rather than deleted. Preserved rows are returned so the
+// caller can fold them back into the SPA's in-memory state and the KV blob.
+// baseSavedAt == null means "unknown baseline" → preserve everything (fail safe,
+// never lose data; e.g. the one-time migration and any pre-baseline client).
+async function syncUserBlobToD1(env, userId, blob, savedAt, baseSavedAt) {
+  const preservedOut = {};
+  const presentKeys = Object.keys(D1_ENTITY_TABLES).filter(k => Array.isArray(blob[k]));
+  if (!presentKeys.length) return preservedOut;
+
+  // Batch-read existing rows for every entity present in the blob.
+  const existingResults = await env.CRM_DB.batch(presentKeys.map(k =>
+    env.CRM_DB.prepare(`SELECT id, updated_at, deleted, data FROM ${D1_ENTITY_TABLES[k].table} WHERE user_id = ?`).bind(userId)
+  ));
+
   const stmts = [];
-  for (const [key, def] of Object.entries(D1_ENTITY_TABLES)) {
-    if (!Array.isArray(blob[key])) continue;
+  presentKeys.forEach((key, i) => {
+    const def = D1_ENTITY_TABLES[key];
+    const existing = existingResults[i]?.results || [];
+    const blobIds = new Set(blob[key].filter(r => r && r.id != null).map(r => String(r.id)));
+    const preserved = existing.filter(row =>
+      !blobIds.has(String(row.id)) && (baseSavedAt == null || row.updated_at > baseSavedAt)
+    );
+
     stmts.push(env.CRM_DB.prepare(`DELETE FROM ${def.table} WHERE user_id = ?`).bind(userId));
-    for (const r of blob[key]) {
-      if (r == null || r.id == null) continue;
+
+    const insert = (r, rowSavedAt, deleted) => {
       const extra = def.cols(r);
       const extraNames = Object.keys(extra);
       stmts.push(env.CRM_DB.prepare(
         `INSERT OR REPLACE INTO ${def.table} (id, user_id, updated_at, deleted, data${extraNames.map(c => ', ' + c).join('')}) ` +
         `VALUES (?, ?, ?, ?, ?${', ?'.repeat(extraNames.length)})`
-      ).bind(String(r.id), userId, savedAt, r.deleted ? 1 : 0, JSON.stringify(r), ...extraNames.map(c => extra[c])));
+      ).bind(String(r.id), userId, rowSavedAt, deleted ? 1 : 0, JSON.stringify(r), ...extraNames.map(c => extra[c])));
+    };
+
+    for (const r of blob[key]) {
+      if (r == null || r.id == null) continue;
+      insert(r, savedAt, r.deleted);
     }
-  }
+
+    const preservedRecords = [];
+    for (const row of preserved) {
+      let rec;
+      try { rec = JSON.parse(row.data); } catch { continue; }
+      if (rec == null || rec.id == null) continue;
+      // Reinsert with its ORIGINAL updated_at/deleted so a later save (with an
+      // advanced base) can still tell it apart until the SPA folds it in.
+      insert(rec, row.updated_at, row.deleted);
+      preservedRecords.push(rec);
+    }
+    if (preservedRecords.length) preservedOut[key] = preservedRecords;
+  });
+
   if (stmts.length) await env.CRM_DB.batch(stmts);
+  return preservedOut;
 }
 
 // Rebuild the merged dataset the frontend expects, from D1.
@@ -1322,12 +1367,47 @@ async function connectorFlood(lat, lng) {
     severity: a.currentWarning?.severity || null,
     county: a.county || '',
   }));
+
+  // Live flood warnings/alerts in force. This is a separate endpoint from
+  // /floodAreas (which is static geography) — it is where actual real-time
+  // severity lives. severityLevel: 1=Severe Flood Warning, 2=Flood Warning,
+  // 3=Flood Alert, 4=Warning no longer in force (excluded below). Best-effort:
+  // a failure here must not sink the whole connector, so it stays non-fatal.
+  const SEVERITY_LABEL = { 1: 'Severe Flood Warning', 2: 'Flood Warning', 3: 'Flood Alert' };
+  let warnings = [];
+  try {
+    const wRes = await fetch(
+      `https://environment.data.gov.uk/flood-monitoring/id/floods?lat=${lat}&long=${lng}&dist=5`,
+      { headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(8000) },
+    );
+    if (wRes.ok) {
+      const wData = await wRes.json();
+      warnings = (wData.items || [])
+        .filter(w => (w.severityLevel ?? 4) <= 3)
+        .map(w => ({
+          severity: w.severity || (SEVERITY_LABEL[w.severityLevel] || null),
+          severityLevel: w.severityLevel ?? null,
+          area: w.description || w.eaAreaName || w.floodArea?.description || '',
+          message: w.message || '',
+          raised: w.timeRaised || null,
+        }))
+        .sort((a, b) => (a.severityLevel ?? 9) - (b.severityLevel ?? 9));
+    }
+  } catch {}
+
+  const topLevel = warnings.length ? warnings[0].severityLevel : null;
   return {
     floodAreasNearby: areas.length, areas: areas.slice(0, 5),
-    hasCurrentWarning: areas.some(a => a.severity),
-    riskNote: areas.length === 0
-      ? 'No EA flood management areas within 0.5km'
-      : `${areas.length} flood management area(s) within 0.5km`,
+    hasCurrentWarning: warnings.length > 0,
+    liveWarningCount: warnings.length,
+    maxSeverityLevel: topLevel,
+    maxSeverity: topLevel ? SEVERITY_LABEL[topLevel] : null,
+    warnings: warnings.slice(0, 5),
+    riskNote: warnings.length
+      ? `${warnings.length} live flood ${warnings.length === 1 ? 'warning/alert' : 'warnings/alerts'} in force — highest: ${topLevel ? SEVERITY_LABEL[topLevel] : 'unknown'}`
+      : (areas.length === 0
+          ? 'No EA flood management areas within 0.5km'
+          : `${areas.length} flood management area(s) within 0.5km, none active`),
   };
 }
 
@@ -1336,6 +1416,7 @@ async function connectorPlanning(lat, lng) {
     'conservation-area', 'listed-building', 'article-4-direction',
     'tree-preservation-order', 'site-of-special-scientific-interest',
     'area-of-outstanding-natural-beauty', 'national-park',
+    'green-belt', 'flood-risk-zone',
   ];
   const opportunityDatasets = [
     'brownfield-land', 'enterprise-zone', 'opportunity-area',
@@ -1365,6 +1446,8 @@ async function connectorPlanning(lat, lng) {
     sssi: has('site-of-special-scientific-interest'),
     aonb: has('area-of-outstanding-natural-beauty'),
     nationalPark: has('national-park'),
+    greenBelt: has('green-belt'),
+    floodRiskZone: has('flood-risk-zone'),
     brownfield: has('brownfield-land'),
     enterpriseZone: has('enterprise-zone'),
     opportunityArea: has('opportunity-area'),
@@ -1700,6 +1783,8 @@ async function handleApiRoutes(request, env, url) {
     }
 
     if (url.pathname === '/api/auction/dates' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       const body = await request.json();
       await ensureAuctionMigratedToD1(env);
       const exists = await env.CRM_DB.prepare('SELECT 1 FROM auction_dates WHERE id = ?').bind(String(body.id)).first();
@@ -1710,6 +1795,8 @@ async function handleApiRoutes(request, env, url) {
     }
 
     if (/^\/api\/auction\/dates\/[^/]+$/.test(url.pathname) && request.method === 'PATCH') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       const id = url.pathname.split('/').pop();
       const updates = await request.json();
       await ensureAuctionMigratedToD1(env);
@@ -1747,6 +1834,8 @@ async function handleApiRoutes(request, env, url) {
     }
 
     if (/^\/api\/auction\/lots\/[^/]+$/.test(url.pathname) && request.method === 'PATCH') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       const id = decodeURIComponent(url.pathname.split('/').pop());
       const updates = await request.json();
       await ensureAuctionMigratedToD1(env);
@@ -1801,11 +1890,15 @@ async function handleApiRoutes(request, env, url) {
     }
 
     if (url.pathname === '/api/scraper/trigger' && request.method === 'GET') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       const summary = await runScrape(env);
       return corsResponse({ success: true, ...summary });
     }
 
     if (url.pathname === '/api/scraper/reviewed' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       const { id, reviewed } = await request.json();
       const results = (await env.SCRAPER_KV.get('results', 'json')) || [];
       const updated = results.map(r => r.id === id ? { ...r, reviewed } : r);
@@ -1831,7 +1924,7 @@ async function handleApiRoutes(request, env, url) {
         name,
         email,
         role: 'Admin',
-        allowedTabs: ['dashboard','pipeline','scraper','surveyors','auctionintel','companies','contacts','tasks','refurb','spec','dealanalysis','portfolio','settings'],
+        allowedTabs: ['dashboard','pipeline','scraper','surveyors','auctionintel','companies','contacts','tasks','refurb','spec','dealanalysis','portfolio','reportcosts','settings'],
         passwordHash: await hashPassword(password),
         verified: true,
         verifyToken: null,
@@ -2804,7 +2897,11 @@ async function handleApiRoutes(request, env, url) {
       if (!session) return new Response('Unauthorized', { status: 401 });
       const docRateOk = await checkRateLimit(env, `docs:${session.userId}`, 120);
       if (!docRateOk) return new Response('Too many requests', { status: 429 });
-      const key = url.pathname.slice('/api/documents/'.length);
+      // pathname is percent-encoded per the URL spec (spaces, em-dashes, etc.)
+      // but the key stored at upload time is the raw literal string built from
+      // the original filename — decode before lookup or keys with spaces/
+      // non-ASCII characters (e.g. report filenames built from an address) never match.
+      const key = decodeURIComponent(url.pathname.slice('/api/documents/'.length));
       const object = await env.CRM_DOCS.get(key);
       if (!object) return new Response('Not found', { status: 404 });
       const headers = new Headers();
@@ -3256,10 +3353,14 @@ async function handleApiRoutes(request, env, url) {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
 
+      // Captured before the read so any row written concurrently (e.g. an
+      // extension ingest during this load) sorts newer than the baseline the
+      // SPA echoes back on save, and is therefore preserved rather than deleted.
+      const serverTime = new Date().toISOString();
       try {
         await ensureCrmMigratedToD1(env);
         const merged = await readCrmFromD1(env);
-        return corsResponse({ success: true, data: merged });
+        return corsResponse({ success: true, data: merged, serverTime });
       } catch (err) {
         console.error('D1 read failed, falling back to KV:', err);
         const userIds = (await env.SCRAPER_KV.get('crm:user-ids', 'json')) || [];
@@ -3267,7 +3368,7 @@ async function handleApiRoutes(request, env, url) {
           userIds.map(id => env.SCRAPER_KV.get(`crm:user:${id}`, 'json'))
         );
         const merged = mergeUserData(datasets.filter(Boolean));
-        return corsResponse({ success: true, data: merged });
+        return corsResponse({ success: true, data: merged, serverTime });
       }
     }
 
@@ -3284,7 +3385,26 @@ async function handleApiRoutes(request, env, url) {
       const body = await request.json();
       const userId = session.userId;
       const savedAt = new Date().toISOString();
-      await env.SCRAPER_KV.put(`crm:user:${userId}`, JSON.stringify({ ...body, savedAt }));
+      // baseSavedAt is the serverTime the SPA loaded at; it drives the
+      // timestamp-guarded merge and must not be persisted into the blob.
+      const { baseSavedAt = null, ...blob } = body;
+
+      let d1Synced = true;
+      let preserved = {};
+      try {
+        preserved = await syncUserBlobToD1(env, userId, blob, savedAt, baseSavedAt);
+      } catch (err) {
+        d1Synced = false;
+        console.error('D1 dual-write failed (KV save succeeded):', err);
+      }
+
+      // Fold rows the merge preserved (extension writes the SPA hadn't seen) back
+      // into the KV rollback blob so the D1-read-failure fallback stays consistent.
+      const kvBlob = { ...blob, savedAt };
+      for (const [key, rows] of Object.entries(preserved)) {
+        kvBlob[key] = [...(Array.isArray(blob[key]) ? blob[key] : []), ...rows];
+      }
+      await env.SCRAPER_KV.put(`crm:user:${userId}`, JSON.stringify(kvBlob));
 
       const userIds = (await env.SCRAPER_KV.get('crm:user-ids', 'json')) || [];
       if (!userIds.includes(userId)) {
@@ -3292,14 +3412,7 @@ async function handleApiRoutes(request, env, url) {
         await env.SCRAPER_KV.put('crm:user-ids', JSON.stringify(userIds));
       }
 
-      let d1Synced = true;
-      try {
-        await syncUserBlobToD1(env, userId, body, savedAt);
-      } catch (err) {
-        d1Synced = false;
-        console.error('D1 dual-write failed (KV save succeeded):', err);
-      }
-      return corsResponse({ success: true, d1Synced });
+      return corsResponse({ success: true, d1Synced, savedAt, preserved });
     }
 
     // POST /api/properties/ingest — upsert a single property without touching

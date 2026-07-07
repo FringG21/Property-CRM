@@ -29,9 +29,10 @@ Every field it sets MUST be present in the `reportFields` array inside `applyRep
 - `totalInvestment`, `worksTotal`, `epcRating`, `floorArea`
 - `verdict`, `bidStrength`, `walkAway`, `targetBid`, `stretchBid`, `breakEvenBid`
 - `matrixConservative`, `matrixBase`, `matrixOptimistic`, `matrixHeaders` (GDV matrix display)
-- `buyersPremium`, `sdlt`, `acquisitionFeesTotal`, `holdingTotal`, `exitTotal`
+- `buyersPremium`, `sdlt`, `acquisitionFeesTotal`, `holdingTotal`, `exitTotal`, `totalAuctionFees`
 - `refurbLight`, `refurbMedium`, `refurbHeavy`
 - `completionDate`, `auctionHouseFromReport`, `propertyTypeFromReport`, `comps`
+- `compsList`, `aiSummary`, `redFlags`
 
 ### Property-level fields (stored directly on property, NOT in analytics)
 - `guidePrice` — applied in applyReportToProperty extraUpdates, not merged into analytics
@@ -123,8 +124,29 @@ Always build and deploy after changes. The chunk size warning is expected and ha
 Before deploying, run `git status`/`git diff` and confirm nothing unrelated is in the working
 tree, or it ships to production too.
 **Validate a worker change without publishing:** `npx wrangler deploy --dry-run --outdir=.wrangler-dryrun`.
-**HTTP probes:** `curl` to the workers.dev URL fails TLS (exit 35) in the Git Bash shell here —
-use PowerShell `Invoke-WebRequest` instead.
+**HTTP probes:** `curl` to the **workers.dev (HTTPS)** URL fails TLS (exit 35) in the Git Bash shell
+here — use PowerShell `Invoke-WebRequest` for prod. But `curl` to a **local** `wrangler dev`
+(`http://127.0.0.1:<port>`) works fine in Git Bash — the TLS failure is HTTPS-only.
+
+### Local end-to-end verification (test a worker change against real behaviour without deploying)
+Auth is KV-backed: `getSession` reads `session:<token>` from `SCRAPER_KV`, and CRM data lives in D1.
+To exercise authed routes locally:
+1. Apply D1 migrations to the local DB (once): `npx wrangler d1 migrations apply property-crm-db --local`.
+2. Seed a session — `wrangler kv key put --local` writes to the same local state `wrangler dev` reads,
+   so seed it first: `npx wrangler kv key put --local --binding SCRAPER_KV "session:testtok"
+   '{"userId":"u-test","email":"t@t.com","role":"Admin","allowedTabs":[]}'`.
+3. Start the server: `npx wrangler dev --local --port <port>`. Note `Start-Process -FilePath npx`
+   fails ("not a valid Win32 application") — launch it via the Bash tool's background runner, or `npx.cmd`.
+4. Probe with `curl http://127.0.0.1:<port>/... -H "Authorization: Bearer testtok"` (mind the space
+   in the header value — quote the whole header).
+Admin-only sanity check after CRM/D1 changes: `GET /api/admin/d1-parity` should report `match:true`.
+
+**Verifying an external API from PowerShell — encoding gotcha:** `Invoke-WebRequest` re-encodes `%`
+in an already-encoded URL (`%20` → `%2520`), so probing endpoints that need pre-encoded query values
+(e.g. planning.data.gov.uk `POINT(lng%20lat)`) returns false 404s. The Worker's `fetch` sends the
+pre-encoded URL as-is, so this is a *test-harness* artefact, not a connector bug. To sanity-check an
+external dataset/slug, hit a non-encoded catalogue endpoint (e.g. `.../dataset.json`) or run the real
+connector via local `wrangler dev`.
 
 ## Rules
 1. Read a function fully before editing it
