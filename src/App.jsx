@@ -358,6 +358,12 @@ export default function App({ user = {}, onLogout }) {
   const [settingsSaveError, setSettingsSaveError] = useState('');
   const [settingsSaving, setSettingsSaving] = useState(false);
 
+  // Browser-extension pairing token
+  const [extToken, setExtToken] = useState('');
+  const [extTokenLoading, setExtTokenLoading] = useState(false);
+  const [extTokenError, setExtTokenError] = useState('');
+  const [extTokenCopied, setExtTokenCopied] = useState(false);
+
   // Change password state
   const [pwCurrent, setPwCurrent] = useState('');
   const [pwNew, setPwNew] = useState('');
@@ -388,6 +394,25 @@ export default function App({ user = {}, onLogout }) {
       setSettingsSaveError('Network error — please try again.');
     }
     setSettingsSaving(false);
+  };
+
+  const handleGenerateExtensionToken = async () => {
+    setExtTokenLoading(true);
+    setExtTokenError('');
+    setExtTokenCopied(false);
+    try {
+      const token = localStorage.getItem('crm_session');
+      const res = await fetch('/api/auth/extension-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (data.success && data.token) setExtToken(data.token);
+      else setExtTokenError(data.message || 'Failed to generate token.');
+    } catch {
+      setExtTokenError('Network error — please try again.');
+    }
+    setExtTokenLoading(false);
   };
 
   const handleChangePassword = async (e) => {
@@ -9745,6 +9770,25 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       <div>
                         <div style={{ fontSize: '15px', fontWeight: '600', color: '#0f172a', marginBottom: '20px' }}>Integrations</div>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                          {/* Browser extension */}
+                          <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '18px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                              <span style={{ fontSize: '16px' }}>🧩</span>
+                              <span style={{ fontSize: '13px', fontWeight: '700', color: '#0f172a' }}>Browser Extension</span>
+                            </div>
+                            <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '12px' }}>Capture properties, contacts, companies, notes and tasks straight from Rightmove, Zoopla, auction sites, LinkedIn, Companies House and Gmail. Generate a pairing token below, then paste it into the extension popup once (valid 90 days).</div>
+                            {extToken ? (
+                              <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: '8px', alignItems: isMobile ? 'stretch' : 'center' }}>
+                                <input type="text" readOnly value={extToken} onFocus={e => e.target.select()} style={{ flex: 1, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', fontFamily: 'monospace', boxSizing: 'border-box', backgroundColor: '#fff', minHeight: isMobile ? '44px' : 'auto' }} />
+                                <button onClick={() => { navigator.clipboard?.writeText(extToken); setExtTokenCopied(true); setTimeout(() => setExtTokenCopied(false), 2000); }} style={{ padding: '8px 16px', backgroundColor: extTokenCopied ? '#dcfce7' : '#059669', color: extTokenCopied ? '#166534' : '#fff', border: 'none', borderRadius: '6px', fontSize: '12px', fontWeight: '600', cursor: 'pointer', whiteSpace: 'nowrap', minHeight: isMobile ? '44px' : 'auto' }}>{extTokenCopied ? 'Copied ✓' : 'Copy'}</button>
+                                <button onClick={handleGenerateExtensionToken} disabled={extTokenLoading} style={{ padding: '8px 16px', backgroundColor: '#fff', color: '#475569', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', fontWeight: '600', cursor: extTokenLoading ? 'default' : 'pointer', whiteSpace: 'nowrap', minHeight: isMobile ? '44px' : 'auto' }}>{extTokenLoading ? '…' : 'Regenerate'}</button>
+                              </div>
+                            ) : (
+                              <button onClick={handleGenerateExtensionToken} disabled={extTokenLoading} style={{ padding: '9px 16px', backgroundColor: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '12px', fontWeight: '600', cursor: extTokenLoading ? 'default' : 'pointer', minHeight: isMobile ? '44px' : 'auto' }}>{extTokenLoading ? 'Generating…' : 'Generate extension token'}</button>
+                            )}
+                            {extTokenError && <div style={{ fontSize: '11px', color: '#dc2626', marginTop: '8px' }}>{extTokenError}</div>}
+                            {extToken && <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '8px' }}>Regenerating invalidates any previously issued token on next expiry. Keep this secret — it grants access to your CRM.</div>}
+                          </div>
                           <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '18px' }}>
                             <div style={{ fontSize: '13px', fontWeight: '700', color: '#0f172a', marginBottom: '4px' }}>Companies House API</div>
                             <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '12px' }}>Free key from <a href="https://developer.companieshouse.gov.uk" target="_blank" rel="noreferrer" style={{ color: '#0284c7' }}>developer.companieshouse.gov.uk</a></div>

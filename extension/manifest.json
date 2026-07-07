@@ -1,0 +1,54 @@
+{
+  "manifest_version": 3,
+  "name": "Property CRM Capture",
+  "version": "2.0.0",
+  "description": "Capture properties, contacts, companies, notes and tasks into your Property CRM, with on-page due-diligence intelligence and pipeline badges.",
+  "permissions": ["storage", "activeTab", "scripting", "tabs"],
+  "host_permissions": [
+    "https://property-crm.aa-investment-partners.workers.dev/*",
+    "https://*.rightmove.co.uk/*",
+    "https://*.zoopla.co.uk/*",
+    "https://*.auctionhouse.co.uk/*",
+    "https://*.sdlauctions.co.uk/*",
+    "https://*.markjenkinson.co.uk/*",
+    "https://*.pugh-auctions.com/*",
+    "https://*.allsop.co.uk/*",
+    "https://*.mchughandco.com/*",
+    "https://*.zoocdn.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "Add to Property CRM",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "omnibox": { "keyword": "crm" },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.rightmove.co.uk/*",
+        "https://*.zoopla.co.uk/*",
+        "https://*.auctionhouse.co.uk/*",
+        "https://*.sdlauctions.co.uk/*",
+        "https://*.markjenkinson.co.uk/*",
+        "https://*.pugh-auctions.com/*",
+        "https://*.allsop.co.uk/*",
+        "https://*.mchughandco.com/*"
+      ],
+      "js": ["content/badges.js", "content/overlay.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
