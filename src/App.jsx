@@ -533,6 +533,7 @@ export default function App({ user = {}, onLogout }) {
   const [isPropChecklistExpanded, setIsPropChecklistExpanded] = useState(true);
   const [selectedGDVScenario, setSelectedGDVScenario] = useState('Base');
   const [editingKpi, setEditingKpi] = useState(false);
+  const [fetchingLotResult, setFetchingLotResult] = useState(false);
   const [propCanvasTab, setPropCanvasTab] = useState('overview');
   const [compSort, setCompSort] = useState('default'); // 'default' | 'asc' | 'desc'
   const [propSidebarCollapsed, setPropSidebarCollapsed] = useState(() => {
@@ -1022,6 +1023,26 @@ export default function App({ user = {}, onLogout }) {
     setProperties(properties.map(p => p.id === currentViewProperty.id ? updated : p));
   };
 
+  // Open the full task drawer in create mode, pre-linked to a property — lets the
+  // property view reuse the same comprehensive task UI (notes, subtasks, comments,
+  // assignee, reminders) as the Tasks tab.
+  const openPropertyTaskDrawer = (prop) => {
+    const p = prop || currentViewProperty;
+    if (!p) return;
+    const today = new Date().toISOString().split('T')[0];
+    setDraftTask({
+      id: null, title: '', dueDate: '', priority: 'Medium',
+      status: 'not_started', linkedType: 'Property', linkedId: p.id,
+      linkedName: p.dealName || p.address?.split(',')[0] || '',
+      notes: '', assignee: user.name || 'Ashley',
+      createdDate: today, createdBy: user.name || 'Ashley',
+      waitingOn: '', expectedResponseDate: '', subtasks: [], comments: [], reminders: [],
+      activityLog: [{ id: Date.now(), type: 'created', detail: 'Task created', user: user.name || 'You', at: new Date().toISOString() }],
+    });
+    setDrawerMode('create');
+    setShowTaskDrawer(true);
+  };
+
   // Stage-change automation: posts to the alert feed and auto-creates the
   // matching task template (Won → purchase checklist, Refurb → refurb project)
   // unless that template was already applied to the property.
@@ -1443,6 +1464,82 @@ export default function App({ user = {}, onLogout }) {
     const updatedProp = { ...currentViewProperty, customDocs: (currentViewProperty.customDocs || []).filter(d => d.id !== docId) };
     setCurrentViewProperty(updatedProp);
     setProperties(properties.map(p => p.id === currentViewProperty.id ? updatedProp : p));
+  };
+
+  // Legal packs commonly arrive as several files — store them as an array
+  // (property.legalPackFiles) rather than the single files.legalPack slot.
+  const handleLegalPackUpload = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length || !currentViewProperty) return;
+    const token = localStorage.getItem('crm_session');
+    const added = [];
+    for (const file of files) {
+      const ext = (file.name.split('.').pop() || '').toLowerCase();
+      const fileKey = `legal_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('propertyId', String(currentViewProperty.id));
+      fd.append('fileKey', fileKey);
+      try {
+        const res = await fetch('/api/documents/upload', { method: 'POST', headers: { 'Authorization': `Bearer ${token}` }, body: fd });
+        const data = await res.json();
+        if (data.success) added.push({ id: Date.now() + Math.random(), name: file.name, type: ext, key: data.key, uploadedAt: new Date().toISOString() });
+      } catch { /* skip this file, keep going */ }
+    }
+    e.target.value = '';
+    if (!added.length) { alert('Legal pack upload failed — please check your connection and try again.'); return; }
+    const updatedProp = withActivity(
+      { ...currentViewProperty, legalPackFiles: [...(currentViewProperty.legalPackFiles || []), ...added] },
+      'document',
+      `Legal pack: ${added.length} file${added.length > 1 ? 's' : ''} added`,
+    );
+    setCurrentViewProperty(updatedProp);
+    const updatedProperties = properties.map(p => p.id === currentViewProperty.id ? updatedProp : p);
+    setProperties(updatedProperties);
+    setSaveStatus('saving');
+    fetch('/api/crm-data', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes }),
+    }).then(() => { setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); })
+      .catch(() => setSaveStatus('idle'));
+  };
+
+  const handleRemoveLegalPackFile = (docId) => {
+    if (!currentViewProperty) return;
+    const updatedProp = { ...currentViewProperty, legalPackFiles: (currentViewProperty.legalPackFiles || []).filter(d => d.id !== docId) };
+    setCurrentViewProperty(updatedProp);
+    setProperties(properties.map(p => p.id === currentViewProperty.id ? updatedProp : p));
+  };
+
+  // Best-effort scrape of the lot's result page (sold/unsold + price + bid count
+  // where the page exposes it). Fills only blank fields — never overwrites values
+  // the user typed in manually.
+  const handleFetchLotResult = async () => {
+    if (!currentViewProperty) return;
+    const url = currentViewProperty.lotResultUrl || currentViewProperty.listingUrl;
+    if (!url) { alert('No lot/listing URL on this property — add the auction listing URL first.'); return; }
+    setFetchingLotResult(true);
+    try {
+      const token = localStorage.getItem('crm_session');
+      const res = await fetch('/api/scrape-lot-result', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ url }) });
+      const data = await res.json();
+      if (!data || data.success === false) throw new Error(data?.error || 'no data');
+      const patch = { lotResultFetchedAt: new Date().toISOString(), lotResultUrl: url };
+      let filled = 0;
+      if (data.outcome && !currentViewProperty.lotOutcome) { patch.lotOutcome = data.outcome; filled++; }
+      if (data.salePrice && !currentViewProperty.lotSalePrice) { patch.lotSalePrice = data.salePrice; filled++; }
+      if (data.bidCount != null && currentViewProperty.lotBidCount == null) { patch.lotBidCount = data.bidCount; filled++; }
+      let updated = { ...currentViewProperty, ...patch };
+      updated = withActivity(updated, 'intelligence', `Lot result fetched${data.outcome ? `: ${data.outcome}` : ''}${data.salePrice ? ` £${Number(data.salePrice).toLocaleString()}` : ''}`);
+      setCurrentViewProperty(updated);
+      setProperties(properties.map(p => p.id === currentViewProperty.id ? updated : p));
+      if (filled === 0) alert('Fetched the page but couldn’t read a clear result — enter the outcome manually.');
+    } catch {
+      alert('Couldn’t fetch the lot result — the page may require login or block automated access. Enter the details manually.');
+    } finally {
+      setFetchingLotResult(false);
+    }
   };
 
   const handleDeleteReportFile = (fileKey, label) => {
@@ -1955,7 +2052,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
     return map[status] || map['Sourced'];
   };
 
-  const PIPELINE_STAGES = ['Sourced', 'Under Review', 'Bidding', 'Won', 'Lost', 'Refurb', 'For Sale', 'Completed'];
+  const PIPELINE_STAGES = ['Sourced', 'Under Review', 'Bidding', 'Won', 'Lost', 'Not Proceeding', 'Refurb', 'For Sale', 'Completed'];
 
   // Map legacy stage names (from old data) to current stage names so kanban always shows them.
   // Stored records keep their original status string — only display/grouping is normalised.
@@ -1992,6 +2089,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
     'Bidding':        { bg: '#f0fdf4', border: '#bbf7d0', head: '#166534' },
     'Won':            { bg: '#ecfdf5', border: '#6ee7b7', head: '#065f46' },
     'Lost':           { bg: '#fef2f2', border: '#fecaca', head: '#991b1b' },
+    'Not Proceeding': { bg: '#f8fafc', border: '#cbd5e1', head: '#475569' },
     'Refurb':         { bg: '#fefce8', border: '#fde047', head: '#854d0e' },
     'For Sale':       { bg: '#f0fdfa', border: '#5eead4', head: '#0f766e' },
     'Completed':      { bg: '#f0fdf4', border: '#86efac', head: '#15803d' },
@@ -2145,6 +2243,33 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
 
   // Feature 5: Companies House API
   const [settingsIntegrations, setSettingsIntegrations] = useState({ companiesHouse: localStorage.getItem('ch_api_key') || '' });
+  const [telegramStatus, setTelegramStatus] = useState({ linked: false, botUsername: null });
+  const [telegramCode, setTelegramCode] = useState(null);
+  const loadTelegramStatus = async () => {
+    try {
+      const token = localStorage.getItem('crm_session');
+      const res = await fetch('/api/telegram/status', { headers: { 'Authorization': `Bearer ${token}` } });
+      const data = await res.json();
+      if (data.success) setTelegramStatus({ linked: data.linked, botUsername: data.botUsername });
+    } catch { /* ignore */ }
+  };
+  const generateTelegramCode = async () => {
+    try {
+      const token = localStorage.getItem('crm_session');
+      const res = await fetch('/api/telegram/link', { method: 'POST', headers: { 'Authorization': `Bearer ${token}` } });
+      const data = await res.json();
+      if (data.success) setTelegramCode({ code: data.code, botUsername: data.botUsername });
+    } catch { /* ignore */ }
+  };
+  const unlinkTelegram = async () => {
+    try {
+      const token = localStorage.getItem('crm_session');
+      await fetch('/api/telegram/unlink', { method: 'POST', headers: { 'Authorization': `Bearer ${token}` } });
+      setTelegramStatus(s => ({ ...s, linked: false }));
+      setTelegramCode(null);
+    } catch { /* ignore */ }
+  };
+  useEffect(() => { if (settingsSection === 'integrations') loadTelegramStatus(); }, [settingsSection]);
   const [chQuery, setChQuery] = useState('');
   const [chResults, setChResults] = useState(null);
   const [chLoading, setChLoading] = useState(false);
@@ -2993,6 +3118,11 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
             const consGDV = parseFloat(an.gdvConservative || an.conservativeGDV) || 0;
             const baseGDV = parseFloat(an.gdvBase) || 0;
             const maxGDV = parseFloat(an.gdvOptimistic || an.maxGDV) || 0;
+            const ourMaxBid = parseFloat(currentViewProperty.ourMaxBid) || parseFloat(currentViewProperty.maxBid) || 0;
+            const reportMax = parseFloat(an.maxBid) || 0;
+            const floorArea = parseFloat(an.floorArea) || parseFloat(currentViewProperty.floorArea) || 0;
+            const buyInPsm = (floorArea && ourMaxBid) ? Math.round(ourMaxBid / floorArea) : 0;
+            const gdvPsm = (floorArea && baseGDV) ? Math.round(baseGDV / floorArea) : 0;
             const MAIN_STAGES = ['Sourced', 'Under Review', 'Bidding'];
             const stIdx = MAIN_STAGES.indexOf(st);
             const fmtNum = v => v ? `£${Number(Math.round(v)).toLocaleString()}` : '—';
@@ -3109,19 +3239,20 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
 
                 {/* KPI strip — compact inline bar (label value, colour-coded) */}
                 <div style={{ borderBottom: '1px solid #1e293b', background: '#0b1120', flexShrink: 0, display: 'flex', alignItems: 'center', flexWrap: 'wrap', padding: '7px 13px' }}>
-                  {[
+                  {(() => { const kpis = [
                     { l: 'Guide', v: gp ? fmtNum(gp) : '—', vc: '#f1f5f9', editKey: 'guidePrice', src: gp ? 'Listing' : '' },
-                    { l: 'Max bid', v: maxBid ? fmtNum(maxBid) : '—', vc: maxBid ? '#4ade80' : '#f1f5f9', editKey: 'maxBid', src: an.maxBid ? 'Report' : (currentViewProperty.maxBid ? 'Manual' : '') },
+                    { l: 'Our max bid', v: ourMaxBid ? fmtNum(ourMaxBid) : '—', vc: ourMaxBid ? '#4ade80' : '#f1f5f9', editKey: 'ourMaxBid', src: (currentViewProperty.ourMaxBid || currentViewProperty.maxBid) ? 'Manual' : '' },
+                    { l: 'Report max', v: reportMax ? fmtNum(reportMax) : '—', vc: reportMax ? '#93c5fd' : '#f1f5f9', src: reportMax ? 'Report' : '' },
                     { l: 'Net profit', v: netProfit ? fmtNum(netProfit) : '—', vc: netProfit ? '#4ade80' : '#f1f5f9', src: an.netProfit ? 'Report' : '' },
                     { l: 'Margin', v: margin != null ? `${margin.toFixed(1)}%` : '—', vc: margin >= 20 ? '#4ade80' : margin >= 10 ? '#fbbf24' : margin != null ? '#f87171' : '#f1f5f9', src: (an.profitMargin != null || an.margin != null) ? 'Report' : '' },
                     { l: 'ROI', v: (an.roi != null && an.roi !== '') ? `${parseFloat(an.roi).toFixed(1)}%` : '—', vc: (an.roi != null && an.roi !== '') ? '#4ade80' : '#f1f5f9', src: (an.roi != null && an.roi !== '') ? 'Report' : '' },
-                  ].map((k, i) => (
-                    <div key={k.l} style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '0 13px 0 0', marginRight: '13px', borderRight: i < 4 ? '1px solid #1e293b' : 'none' }}>
+                  ]; return kpis.map((k, i) => (
+                    <div key={k.l} style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '0 13px 0 0', marginRight: '13px', borderRight: i < kpis.length - 1 ? '1px solid #1e293b' : 'none' }}>
                       <span style={{ fontSize: '10px', color: '#475569', textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap' }}>{k.l}</span>
                       {editingKpi && k.editKey ? (
                         <input
                           type="number"
-                          value={k.editKey === 'guidePrice' ? (currentViewProperty.guidePrice || '') : (currentViewProperty.maxBid || '')}
+                          value={currentViewProperty[k.editKey] || ''}
                           onChange={e => updateFieldInView(k.editKey, parseInt(e.target.value) || 0)}
                           style={{ width: '78px', fontSize: '14px', fontWeight: '600', border: 'none', borderBottom: '1px solid #7C3AED', background: 'transparent', color: k.vc, outline: 'none', fontFamily: 'inherit', padding: '0' }}
                         />
@@ -3130,10 +3261,19 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       )}
                       {k.src && <span style={{ fontSize: '9px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.04em', padding: '1px 4px', borderRadius: '3px', background: k.src === 'Report' ? '#0c2a3d' : '#1e293b', color: k.src === 'Report' ? '#60a5fa' : '#64748b' }}>{k.src}</span>}
                     </div>
-                  ))}
+                  )); })()}
                   <span style={{ flex: 1 }} />
                   <button onClick={() => setEditingKpi(e => !e)} title="Edit guide / max bid" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0', fontSize: '13px', color: editingKpi ? '#a78bfa' : '#475569', lineHeight: 1 }}>⚙</button>
                 </div>
+
+                {/* £/m² sub-strip — buy-in vs GDV per m² */}
+                {floorArea > 0 && (buyInPsm > 0 || gdvPsm > 0) && (
+                  <div style={{ borderBottom: '1px solid #1e293b', background: '#0b1120', flexShrink: 0, display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '13px', padding: '5px 13px' }}>
+                    <span style={{ fontSize: '10px', color: '#475569', textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap' }}>Floor area <span style={{ color: '#94a3b8', fontWeight: '600' }}>{floorArea}m²</span></span>
+                    <span style={{ fontSize: '11px', color: '#64748b', whiteSpace: 'nowrap' }}>Buy-in <span style={{ color: buyInPsm ? '#4ade80' : '#f1f5f9', fontWeight: '600' }}>{buyInPsm ? `£${buyInPsm.toLocaleString()}/m²` : '—'}</span></span>
+                    <span style={{ fontSize: '11px', color: '#64748b', whiteSpace: 'nowrap' }}>GDV <span style={{ color: gdvPsm ? '#93c5fd' : '#f1f5f9', fontWeight: '600' }}>{gdvPsm ? `£${gdvPsm.toLocaleString()}/m²` : '—'}</span></span>
+                  </div>
+                )}
 
                 {/* Inline map panel */}
                 {propMapOpen && propPostcode && (
@@ -3150,7 +3290,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     { k: 'comparables', l: 'Comparables', count: ((an.compsList?.length || 0) + (intel.connectors?.landRegistry?.data?.items?.length || 0) + ((currentViewProperty.comparables || []).filter(c => !c.fromIntelligence).length)) || null },
                     { k: 'intel', l: 'Intelligence', dot: intel.lastRun },
                     { k: 'financials', l: 'Deal Analysis' },
-                    { k: 'documents', l: 'Documents', count: (Object.values(propFiles).filter(Boolean).length + (currentViewProperty.customDocs?.length || 0)) || null },
+                    { k: 'documents', l: 'Documents', count: (Object.values(propFiles).filter(Boolean).length + (currentViewProperty.customDocs?.length || 0) + (currentViewProperty.legalPackFiles?.length || 0)) || null },
+                    { k: 'tasks', l: 'Tasks', count: tasks.filter(t => t.linkedType === 'Property' && t.linkedId === currentViewProperty.id).length || null },
                     { k: 'notes', l: 'Notes', count: currentViewProperty.notesList?.length },
                     { k: 'timeline', l: 'Timeline', count: actLog.length > 0 ? actLog.length : null },
                   ].map(t => (
@@ -3261,6 +3402,13 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                         const active = st === s;
                         return <button key={s} onClick={() => updateFieldInView('status', s)} style={{ padding: isMobile ? '8px 12px' : '3px 8px', borderRadius: '4px', fontSize: '10px', border: '0.5px solid', cursor: 'pointer', fontFamily: 'inherit', background: active ? sel.bg : 'transparent', borderColor: active ? sel.bc : '#334155', color: active ? sel.tc : '#64748b' }}>{s}</button>;
                       })}
+                    </div>
+                    <div style={{ fontSize: '10px', color: '#475569', margin: '8px 0 5px' }}>Vetting</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                      {(() => {
+                        const active = st === 'Not Proceeding';
+                        return <button onClick={() => updateFieldInView('status', active ? 'Under Review' : 'Not Proceeding')} title="Decided not to bid — failed vetting" style={{ padding: isMobile ? '8px 12px' : '3px 8px', borderRadius: '4px', fontSize: '10px', border: '0.5px solid', cursor: 'pointer', fontFamily: 'inherit', background: active ? '#1e293b' : 'transparent', borderColor: active ? '#94a3b8' : '#334155', color: active ? '#cbd5e1' : '#64748b' }}>⛔ Not proceeding</button>;
+                      })()}
                     </div>
                   </div>
 
@@ -3384,6 +3532,20 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                   <div style={{ padding: '12px 16px', borderBottom: '1px solid #1e293b' }}>
                     <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.07em', color: '#475569', marginBottom: '8px' }}>Documents</div>
                     {FILE_KEYS.map(({ key, label, accept }) => {
+                      if (key === 'legalPack') {
+                        const lpCount = (currentViewProperty.legalPackFiles || []).length + (propFiles.legalPack ? 1 : 0);
+                        return (
+                          <div key={key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: '0.5px solid #1e293b', fontSize: '11px' }}>
+                            <span style={{ color: lpCount ? '#e2e8f0' : '#475569', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                              <FileText size={11} color={lpCount ? '#4ade80' : '#334155'} /> {label}{lpCount ? ` (${lpCount})` : ''}
+                            </span>
+                            <label style={{ cursor: 'pointer', fontSize: '10px', color: '#475569' }}>
+                              Add
+                              <input type="file" multiple accept={accept} style={{ display: 'none' }} onChange={handleLegalPackUpload} />
+                            </label>
+                          </div>
+                        );
+                      }
                       const rec = propFiles[key];
                       return (
                         <div key={key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: '0.5px solid #1e293b', fontSize: '11px' }}>
@@ -3460,6 +3622,13 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     // carries every source's tag. First writer wins on conflicting
                     // fields; later sources only fill blanks.
                     const normKey = (addr) => String(addr || '').split(',')[0].toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+                    const compOverrides = currentViewProperty.compOverrides || {};
+                    const setCompOverride = (key, patch) => {
+                      const prev = currentViewProperty.compOverrides || {};
+                      updateFieldInView('compOverrides', { ...prev, [key]: { ...(prev[key] || {}), ...patch } });
+                    };
+                    const TYPE_ABBR = { 'semi-detached': 'Semi-det.', 'semi detached': 'Semi-det.', 'detached': 'Det.', 'terraced': 'Terr.', 'end terrace': 'End-terr.', 'mid terrace': 'Mid-terr.', 'flat': 'Flat', 'maisonette': 'Maison.', 'bungalow': 'Bungalow' };
+                    const abbrType = (t) => { if (!t) return ''; return TYPE_ABBR[String(t).toLowerCase().trim()] || t; };
                     const merged = {};
                     const order = [];
                     let anon = 0;
@@ -3470,7 +3639,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                         if (!ex.tags.some(t => t.label === source)) ex.tags.push({ label: source, kind });
                         for (const [k, v] of Object.entries(fields)) { if ((ex[k] == null || ex[k] === '') && v != null && v !== '') ex[k] = v; }
                       } else {
-                        merged[key] = { ...fields, tags: [{ label: source, kind }] };
+                        merged[key] = { ...fields, tags: [{ label: source, kind }], _key: key };
                         order.push(key);
                       }
                     };
@@ -3523,13 +3692,23 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                               const epcBg = EPC_COL[r.epcRating] || null;
                               const epcTxt = r.epcRating ? (['A','B','C'].includes(r.epcRating) ? '#fff' : '#000') : '#000';
                               const ppsm = (r.floorArea && r.price) ? `£${Math.round(r.price / Number(r.floorArea)).toLocaleString()}/m²` : null;
+                              const beds = compOverrides[r._key]?.bedrooms ?? r.bedrooms;
+                              const bedsCtl = (
+                                <span key="beds" style={{ display: 'inline-flex', alignItems: 'center', gap: '2px', color: '#64748b' }}>
+                                  <input type="number" min="0" value={beds ?? ''} placeholder="+ bed"
+                                    onChange={e => setCompOverride(r._key, { bedrooms: e.target.value === '' ? null : (parseInt(e.target.value) || 0) })}
+                                    title="Bedrooms (editable)"
+                                    style={{ width: beds != null && beds !== '' ? '26px' : '40px', fontSize: '10px', color: '#64748b', border: 'none', borderBottom: '1px dashed #cbd5e1', background: 'transparent', outline: 'none', fontFamily: 'inherit', padding: '0', textAlign: 'center' }} />
+                                  {beds != null && beds !== '' ? 'bed' : ''}
+                                </span>
+                              );
                               return (
                                 <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '8px', padding: '7px 12px', borderBottom: '0.5px solid #f1f5f9', fontSize: '11px', alignItems: 'center' }}>
                                   <div style={{ minWidth: 0 }}>
                                     <div style={{ color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.address || '—'}</div>
                                     {metaLine([
-                                      r.propertyType && <span style={{ color: '#64748b' }}>{r.propertyType}{r.newBuild ? ' · New build' : ''}</span>,
-                                      r.bedrooms ? `${r.bedrooms} bed` : null,
+                                      r.propertyType && <span style={{ color: '#64748b' }}>{abbrType(r.propertyType)}{r.newBuild ? ' · New build' : ''}</span>,
+                                      bedsCtl,
                                       r.epcRating ? <span style={{ padding: '0 4px', borderRadius: '3px', background: epcBg, color: epcTxt, fontWeight: '700', lineHeight: '14px' }}>EPC {r.epcRating}</span> : null,
                                       r.habitableRooms ? `${r.habitableRooms} rooms` : null,
                                       r.floorArea ? `${r.floorArea}m²` : null,
@@ -3865,6 +4044,44 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                             {overStretch ? '⚠' : '✓'} Hammer price {noteParts.join(' · ')} · <b>Click “Won” to record the result</b>
                           </div>
                         )}
+                      </div>
+                    </div>
+                    );
+                  })()}
+
+                  {/* Bid & lot outcome — persists after recording; covers no-bid lots too */}
+                  {propCanvasTab === 'overview' && ((daysLeft !== null && daysLeft <= 0) || getBidResult(currentViewProperty) || currentViewProperty.lotOutcome || currentViewProperty.lotSalePrice) && (() => {
+                    const inpStyle2 = { width: '100%', padding: '6px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', fontFamily: 'inherit', background: '#fff', outline: 'none', boxSizing: 'border-box' };
+                    const lbl2 = { fontSize: '10px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' };
+                    return (
+                    <div style={{ margin: '14px 20px', border: '1px solid #e2e8f0', borderRadius: '10px', overflow: 'hidden', background: '#fff' }}>
+                      <div style={{ padding: '10px 14px', borderBottom: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ fontSize: '14px' }}>🔨</span>
+                        <span style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a' }}>Bid &amp; lot outcome</span>
+                        <button onClick={handleFetchLotResult} disabled={fetchingLotResult} title="Scrape the lot/listing page for sold status, price and bid count" style={{ marginLeft: 'auto', fontSize: '11px', fontWeight: '600', padding: '5px 11px', borderRadius: '6px', border: '1px solid #ddd6fe', background: '#f5f3ff', color: '#7C3AED', cursor: fetchingLotResult ? 'wait' : 'pointer', fontFamily: 'inherit' }}>{fetchingLotResult ? '⏳ Fetching…' : '⤓ Fetch result'}</button>
+                      </div>
+                      <div style={{ padding: '12px 14px' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4,1fr)', gap: '8px' }}>
+                          <div>
+                            <div style={lbl2}>Lot outcome</div>
+                            <select value={currentViewProperty.lotOutcome || ''} onChange={e => updateFieldInView('lotOutcome', e.target.value)} style={inpStyle2}>
+                              <option value="">—</option><option value="Sold">Sold</option><option value="Unsold">Unsold</option><option value="Withdrawn">Withdrawn</option>
+                            </select>
+                          </div>
+                          <div>
+                            <div style={lbl2}>Sold / highest bid</div>
+                            <input type="number" value={currentViewProperty.lotSalePrice || ''} onChange={e => updateFieldInView('lotSalePrice', parseInt(e.target.value) || null)} placeholder="£" style={inpStyle2} />
+                          </div>
+                          <div>
+                            <div style={lbl2}>Bids we placed</div>
+                            <input type="number" value={currentViewProperty.bidsPlaced || ''} onChange={e => updateFieldInView('bidsPlaced', parseInt(e.target.value) || null)} placeholder="0" style={inpStyle2} />
+                          </div>
+                          <div>
+                            <div style={lbl2}>Total bids at auction</div>
+                            <input type="number" value={currentViewProperty.lotBidCount || ''} onChange={e => updateFieldInView('lotBidCount', parseInt(e.target.value) || null)} placeholder="—" style={inpStyle2} />
+                          </div>
+                        </div>
+                        {currentViewProperty.lotResultFetchedAt && <div style={{ marginTop: '8px', fontSize: '10px', color: '#94a3b8' }}>Auto-fetched {fmtAt(currentViewProperty.lotResultFetchedAt)} · manual edits preserved</div>}
                       </div>
                     </div>
                     );
@@ -4278,7 +4495,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     <div style={{ padding: '14px 20px', borderBottom: '0.5px solid #e2e8f0' }}>
                       <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8', marginBottom: '12px' }}>Document vault</div>
                       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '8px', marginBottom: '16px' }}>
-                        {FILE_KEYS.map(({ key, label, accept }) => {
+                        {FILE_KEYS.filter(f => f.key !== 'legalPack').map(({ key, label, accept }) => {
                           const rec = propFiles[key];
                           const isReport = key === 'mainReport';
                           return (
@@ -4305,6 +4522,56 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                           );
                         })}
                       </div>
+                      {/* Legal pack — multiple files */}
+                      {(() => {
+                        const lpFiles = currentViewProperty.legalPackFiles || [];
+                        const legacy = propFiles.legalPack;
+                        const total = lpFiles.length + (legacy ? 1 : 0);
+                        return (
+                          <div style={{ marginBottom: '16px' }}>
+                            <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <span>Legal pack{total ? ` · ${total} file${total > 1 ? 's' : ''}` : ''}</span>
+                              <label style={{ fontSize: '11px', fontWeight: '600', color: '#7C3AED', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', textTransform: 'none', letterSpacing: 0 }}>
+                                <Plus size={13} /> Add files
+                                <input type="file" multiple accept=".pdf,.zip,.doc,.docx,.jpg,.jpeg,.png" style={{ display: 'none' }} onChange={handleLegalPackUpload} />
+                              </label>
+                            </div>
+                            {total === 0 ? (
+                              <div style={{ fontSize: '12px', color: '#94a3b8', padding: '10px 0' }}>No legal pack files — legal packs often contain several documents, add them all here.</div>
+                            ) : (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                {legacy && (
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', border: '1px solid #e2e8f0', borderRadius: '8px' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '9px', minWidth: 0 }}>
+                                      <FileText size={15} color="#059669" style={{ flexShrink: 0 }} />
+                                      <div style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={legacy.name}>{legacy.name}</div>
+                                    </div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                                      <button onClick={() => handleViewDocument(legacy)} style={{ padding: '5px 12px', fontSize: '11px', fontWeight: '600', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#fff', color: '#475569', cursor: 'pointer', fontFamily: 'inherit' }}>View</button>
+                                      <button onClick={() => handleDeleteReportFile('legalPack', 'Legal pack')} title="Remove" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#cbd5e1', padding: '3px', display: 'flex' }}><Trash2 size={14} /></button>
+                                    </div>
+                                  </div>
+                                )}
+                                {lpFiles.map(doc => (
+                                  <div key={doc.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', border: '1px solid #e2e8f0', borderRadius: '8px' }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '9px', minWidth: 0 }}>
+                                      <FileText size={15} color="#059669" style={{ flexShrink: 0 }} />
+                                      <div style={{ minWidth: 0 }}>
+                                        <div style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={doc.name}>{doc.name}</div>
+                                        {doc.uploadedAt && <div style={{ fontSize: '10px', color: '#94a3b8' }}>{new Date(doc.uploadedAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</div>}
+                                      </div>
+                                    </div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                                      <button onClick={() => handleViewDocument(doc)} style={{ padding: '5px 12px', fontSize: '11px', fontWeight: '600', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#fff', color: '#475569', cursor: 'pointer', fontFamily: 'inherit' }}>View</button>
+                                      <button onClick={() => handleRemoveLegalPackFile(doc.id)} title="Remove" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#cbd5e1', padding: '3px', display: 'flex' }}><Trash2 size={14} /></button>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                       <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <span>Additional documents</span>
                         <label style={{ fontSize: '11px', fontWeight: '600', color: '#7C3AED', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', textTransform: 'none', letterSpacing: 0 }}>
@@ -4335,6 +4602,52 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       )}
                     </div>
                   )}
+
+                  {/* Tasks — property Tasks tab */}
+                  {propCanvasTab === 'tasks' && (() => {
+                    const linked = tasks.filter(t => t.linkedType === 'Property' && t.linkedId === currentViewProperty.id);
+                    const STLAB = { not_started: 'Not started', in_progress: 'In progress', waiting: 'Waiting', blocked: 'Blocked', follow_up: 'Follow-up', done: 'Done' };
+                    const PRC = { High: '#dc2626', Medium: '#d97706', Low: '#16a34a' };
+                    const sorted = [...linked].sort((a, b) => {
+                      const ad = a.status === 'done', bd = b.status === 'done';
+                      if (ad !== bd) return ad ? 1 : -1;
+                      return String(a.dueDate || '9999').localeCompare(String(b.dueDate || '9999'));
+                    });
+                    return (
+                      <div style={{ padding: '14px 20px', borderBottom: '0.5px solid #e2e8f0' }}>
+                        <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <span>Tasks · {linked.length}</span>
+                          <button onClick={() => openPropertyTaskDrawer(currentViewProperty)} style={{ fontSize: '11px', fontWeight: '600', color: '#7C3AED', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', background: 'none', border: 'none', fontFamily: 'inherit', textTransform: 'none', letterSpacing: 0 }}><Plus size={13} /> New task</button>
+                        </div>
+                        {linked.length === 0 ? (
+                          <div style={{ fontSize: '12px', color: '#94a3b8', padding: '10px 0' }}>No tasks linked to this property yet — “New task” opens the full task editor (notes, subtasks, comments, assignee, reminders) pre-linked here.</div>
+                        ) : (
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            {sorted.map(task => {
+                              const done = task.status === 'done';
+                              const overdue = !done && task.dueDate && task.dueDate < new Date().toISOString().split('T')[0];
+                              return (
+                                <div key={task.id} onClick={() => { setDrawerTaskId(task.id); setDrawerMode('edit'); setShowTaskDrawer(true); }} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px 12px', border: '1px solid #e2e8f0', borderRadius: '8px', cursor: 'pointer', background: done ? '#f8fafc' : '#fff' }}>
+                                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: PRC[task.priority] || '#94a3b8', flexShrink: 0 }} />
+                                  <div style={{ minWidth: 0, flex: 1 }}>
+                                    <div style={{ fontSize: '12px', fontWeight: '600', color: done ? '#94a3b8' : '#0f172a', textDecoration: done ? 'line-through' : 'none', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{task.title || 'Untitled task'}</div>
+                                    <div style={{ fontSize: '10px', color: '#94a3b8', display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '2px' }}>
+                                      <span>{STLAB[task.status] || task.status}</span>
+                                      {task.dueDate && <span style={{ color: overdue ? '#dc2626' : '#94a3b8' }}>Due {task.dueDate}</span>}
+                                      {task.assignee && <span>· {task.assignee}</span>}
+                                      {task.notes && <span>· 📝</span>}
+                                      {task.subtasks?.length ? <span>· {task.subtasks.filter(s => s.done).length}/{task.subtasks.length} subtasks</span> : null}
+                                      {task.reminders?.length ? <span>· 🔔 {task.reminders.length}</span> : null}
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* Notes — Notes tab */}
                   {propCanvasTab === 'notes' && (
@@ -9799,6 +10112,37 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                             </div>
                             <span style={{ fontSize: '10px', padding: '3px 8px', borderRadius: '10px', backgroundColor: '#f1f5f9', color: '#94a3b8', fontWeight: '600', border: '1px solid #e2e8f0' }}>Coming soon</span>
                           </div>
+
+                          {/* Telegram */}
+                          <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '18px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
+                              <div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                  <span style={{ fontSize: '16px' }}>✈️</span>
+                                  <span style={{ fontSize: '13px', fontWeight: '700', color: '#0f172a' }}>Telegram (task reminders)</span>
+                                  {telegramStatus.linked && <span style={{ fontSize: '10px', padding: '2px 8px', borderRadius: '10px', backgroundColor: '#dcfce7', color: '#166534', fontWeight: '700' }}>Connected</span>}
+                                </div>
+                                <div style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>Free push reminders to your phone. Requires a Telegram bot — set its token as the <code>TELEGRAM_BOT_TOKEN</code> worker secret (and <code>TELEGRAM_BOT_USERNAME</code> for the one-tap link).</div>
+                              </div>
+                              {telegramStatus.linked ? (
+                                <button onClick={unlinkTelegram} style={{ padding: '7px 14px', backgroundColor: '#fff', color: '#dc2626', border: '1px solid #fca5a5', borderRadius: '6px', fontSize: '12px', fontWeight: '600', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}>Disconnect</button>
+                              ) : (
+                                <button onClick={generateTelegramCode} style={{ padding: '7px 14px', backgroundColor: '#229ED9', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '12px', fontWeight: '600', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}>Connect</button>
+                              )}
+                            </div>
+                            {!telegramStatus.linked && telegramCode && (
+                              <div style={{ marginTop: '12px', padding: '12px', background: '#fff', border: '1px dashed #cbd5e1', borderRadius: '8px', fontSize: '12px', color: '#334155' }}>
+                                {telegramCode.botUsername
+                                  ? <div>1. Open <a href={`https://t.me/${telegramCode.botUsername}?start=${telegramCode.code}`} target="_blank" rel="noreferrer" style={{ color: '#0284c7', fontWeight: '600' }}>@{telegramCode.botUsername} ↗</a> and press <b>Start</b>.</div>
+                                  : <div>1. Open your CRM Telegram bot in the app.</div>}
+                                <div style={{ marginTop: '6px' }}>2. Or send the bot this code: <code style={{ background: '#f1f5f9', padding: '2px 8px', borderRadius: '5px', fontWeight: '700', letterSpacing: '.05em' }}>{telegramCode.code}</code></div>
+                                <div style={{ marginTop: '8px', display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
+                                  <button onClick={loadTelegramStatus} style={{ padding: '6px 12px', backgroundColor: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: '600', cursor: 'pointer' }}>I've done it — check</button>
+                                  <span style={{ fontSize: '10px', color: '#94a3b8' }}>Code expires in 15 minutes.</span>
+                                </div>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       </div>
                     )}
@@ -10915,6 +11259,57 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     <div style={lbl}>Due date</div>
                     <input type="date" value={task.dueDate || ''} onChange={e => drawerUpdate({ dueDate: e.target.value })} style={{ ...inp }} />
                   </div>
+                </div>
+                {/* Reminders */}
+                <div style={fld}>
+                  <div style={lbl}>Reminders</div>
+                  {!task.dueDate && <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '6px' }}>Set a due date to schedule reminders.</div>}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                    {[['1w', '1 week'], ['3d', '3 days'], ['1d', '1 day'], ['2h', '2 hours']].map(([off, label]) => {
+                      const active = (task.reminders || []).some(r => r.offset === off);
+                      return (
+                        <button key={off} type="button" disabled={!task.dueDate}
+                          onClick={() => {
+                            const cur = task.reminders || [];
+                            const next = active ? cur.filter(r => r.offset !== off) : [...cur, { offset: off, channels: ['email'] }];
+                            drawerUpdate({ reminders: next });
+                          }}
+                          style={{ padding: '5px 10px', borderRadius: '14px', fontSize: '11px', fontWeight: '600', cursor: task.dueDate ? 'pointer' : 'not-allowed', fontFamily: 'inherit', border: `1px solid ${active ? '#c4b5fd' : '#e2e8f0'}`, background: active ? '#f5f3ff' : '#fff', color: active ? '#5b21b6' : '#64748b', opacity: task.dueDate ? 1 : 0.5 }}>
+                          🔔 {label} before
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {(task.reminders || []).length > 0 && (
+                    <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                      {(task.reminders || []).map((r, ri) => (
+                        <div key={r.offset} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: '#475569', flexWrap: 'wrap' }}>
+                          <span style={{ minWidth: '110px' }}>{({ '1w': '1 week', '3d': '3 days', '1d': '1 day', '2h': '2 hours' }[r.offset] || r.offset)} before via</span>
+                          {[['email', '✉ Email'], ['telegram', '✈ Telegram']].map(([ch, chLabel]) => {
+                            const on = (r.channels || ['email']).includes(ch);
+                            return (
+                              <button key={ch} type="button"
+                                onClick={() => {
+                                  const cur = task.reminders || [];
+                                  const next = cur.map((x, xi) => {
+                                    if (xi !== ri) return x;
+                                    const chs = new Set(x.channels || ['email']);
+                                    if (chs.has(ch)) chs.delete(ch); else chs.add(ch);
+                                    if (chs.size === 0) chs.add('email');
+                                    return { ...x, channels: Array.from(chs) };
+                                  });
+                                  drawerUpdate({ reminders: next });
+                                }}
+                                style={{ padding: '3px 8px', borderRadius: '6px', fontSize: '10px', fontWeight: '600', cursor: 'pointer', fontFamily: 'inherit', border: `1px solid ${on ? '#93c5fd' : '#e2e8f0'}`, background: on ? '#eff6ff' : '#fff', color: on ? '#1d4ed8' : '#94a3b8' }}>
+                                {chLabel}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ))}
+                      <div style={{ fontSize: '10px', color: '#94a3b8' }}>Reminders go to the assignee's email; Telegram needs connecting in Settings → Integrations.</div>
+                    </div>
+                  )}
                 </div>
                 {/* Waiting on */}
                 {(ns === 'waiting' || task.waitingOn) && (

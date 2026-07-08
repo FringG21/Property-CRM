@@ -240,6 +240,113 @@ async function sendCountdownAlerts(env) {
 }
 
 // ============================================================
+// TASK REMINDERS — Email + Telegram (free channels)
+// ============================================================
+
+const REMINDER_OFFSET_LABEL = { '1w': '1 week', '3d': '3 days', '2d': '2 days', '1d': '1 day', '4h': '4 hours', '2h': '2 hours', '1h': '1 hour' };
+
+function parseReminderOffsetMs(off) {
+  const m = /^(\d+)\s*([wdhm])$/i.exec(String(off || '').trim());
+  if (!m) return null;
+  const n = parseInt(m[1]);
+  const unit = m[2].toLowerCase();
+  const mult = unit === 'w' ? 604800000 : unit === 'd' ? 86400000 : unit === 'h' ? 3600000 : 60000;
+  return n * mult;
+}
+
+async function sendTelegram(env, chatId, text) {
+  if (!env.TELEGRAM_BOT_TOKEN || !chatId) return { ok: false };
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+    });
+    if (!res.ok) { console.error('Telegram error:', res.status, await res.text()); return { ok: false }; }
+    return { ok: true };
+  } catch (e) { console.error('Telegram send failed:', e); return { ok: false }; }
+}
+
+// Scan every user's CRM blob for tasks whose reminders are now due, and deliver
+// them via the requested channels. A KV marker (rem:{taskId}:{offset}) dedupes so
+// each reminder fires once even though the cron runs repeatedly. Marker keys are
+// used instead of writing sentAt back into the blob to avoid a lost-update race
+// with the SPA's own saves.
+async function dispatchTaskReminders(env) {
+  const userIds = (await env.SCRAPER_KV.get('crm:user-ids', 'json')) || [];
+  const users = (await env.SCRAPER_KV.get('users', 'json')) || [];
+  const userByName = {};
+  for (const u of users) { if (u.name) userByName[u.name.toLowerCase()] = u; }
+  const now = Date.now();
+  const seenTasks = new Set();
+
+  for (const uid of userIds) {
+    const blob = await env.SCRAPER_KV.get(`crm:user:${uid}`, 'json');
+    if (!blob || !Array.isArray(blob.tasks)) continue;
+    for (const t of blob.tasks) {
+      if (!t || seenTasks.has(t.id)) continue;
+      seenTasks.add(t.id);
+      if (!t.dueDate || !Array.isArray(t.reminders) || t.reminders.length === 0) continue;
+      if (t.status === 'done' || t.status === 'complete') continue;
+      const dueTime = (t.dueTime && /^\d{2}:\d{2}$/.test(t.dueTime)) ? t.dueTime : '09:00';
+      const dueTs = Date.parse(`${t.dueDate}T${dueTime}:00Z`);
+      if (isNaN(dueTs)) continue;
+
+      const assignee = t.assignee ? userByName[String(t.assignee).toLowerCase()] : null;
+      const ownerUser = users.find(u => u.id === uid);
+      const recipient = assignee || ownerUser;
+      const email = recipient && recipient.email;
+      const recipientId = (recipient && recipient.id) || uid;
+      const chatId = await env.SCRAPER_KV.get(`tg:chat:${recipientId}`);
+
+      for (const r of t.reminders) {
+        const offMs = parseReminderOffsetMs(r.offset);
+        if (offMs == null) continue;
+        const fireTs = dueTs - offMs;
+        if (now < fireTs) continue;                 // not yet time
+        if (now > dueTs + 2 * 86400000) continue;   // too far past due — skip
+        const marker = `rem:${t.id}:${r.offset}`;
+        if (await env.SCRAPER_KV.get(marker)) continue;
+
+        const channels = Array.isArray(r.channels) && r.channels.length ? r.channels : ['email'];
+        const label = REMINDER_OFFSET_LABEL[r.offset] || r.offset;
+        const safeTitle = String(t.title || 'Untitled task');
+        let sentAny = false;
+
+        if (channels.includes('email') && email) {
+          const res = await sendEmail(env, {
+            to: email,
+            subject: `🔔 Task reminder — ${safeTitle} (due ${t.dueDate})`,
+            html: `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:28px">
+              <div style="background:#0f172a;padding:14px 22px;border-radius:10px 10px 0 0"><h2 style="color:#fff;margin:0;font-size:17px">🔔 Task reminder</h2></div>
+              <div style="border:1px solid #e2e8f0;border-top:none;padding:22px;border-radius:0 0 10px 10px">
+                <p style="font-size:16px;font-weight:bold;color:#0f172a;margin:0 0 10px">${safeTitle.replace(/</g, '&lt;')}</p>
+                <table style="width:100%;border-collapse:collapse;font-size:13px">
+                  <tr><td style="padding:5px 0;color:#64748b">Due</td><td style="font-weight:600;color:#0f172a">${t.dueDate}</td></tr>
+                  <tr><td style="padding:5px 0;color:#64748b">Reminder</td><td style="font-weight:600;color:#0f172a">${label} before</td></tr>
+                  ${t.linkedName ? `<tr><td style="padding:5px 0;color:#64748b">Linked to</td><td style="font-weight:600;color:#0f172a">${String(t.linkedName).replace(/</g, '&lt;')}</td></tr>` : ''}
+                  ${t.assignee ? `<tr><td style="padding:5px 0;color:#64748b">Assignee</td><td style="font-weight:600;color:#0f172a">${String(t.assignee).replace(/</g, '&lt;')}</td></tr>` : ''}
+                </table>
+                ${t.notes ? `<p style="margin-top:14px;font-size:13px;color:#334155;white-space:pre-wrap">${String(t.notes).slice(0, 500).replace(/</g, '&lt;')}</p>` : ''}
+              </div>
+              <p style="font-size:11px;color:#94a3b8;margin-top:14px;text-align:center">A&A Partners CRM</p>
+            </div>`,
+          });
+          if (res.ok) sentAny = true;
+        }
+        if (channels.includes('telegram') && chatId) {
+          const tgTitle = safeTitle.replace(/[<>&]/g, '');
+          const linkLine = t.linkedName ? `\n${String(t.linkedName).replace(/[<>&]/g, '')}` : '';
+          const res = await sendTelegram(env, chatId, `🔔 <b>Task reminder</b>\n<b>${tgTitle}</b>\nDue ${t.dueDate} · ${label} before${linkLine}${t.assignee ? `\nAssignee: ${String(t.assignee).replace(/[<>&]/g, '')}` : ''}`);
+          if (res.ok) sentAny = true;
+        }
+        if (sentAny) await env.SCRAPER_KV.put(marker, String(now), { expirationTtl: 30 * 86400 });
+      }
+    }
+  }
+}
+
+// ============================================================
 // CALENDAR OAUTH HELPERS
 // ============================================================
 
@@ -1653,11 +1760,18 @@ function enrichCompsWithEPC(lrItems, epcItems) {
 export default {
   // Cron handler — runs Wednesday 22:00 and Saturday 22:00 UTC
   async scheduled(event, env, ctx) {
+    // Hourly cron only fires task reminders — the heavy scraping/alert jobs stay
+    // on their twice-weekly schedule to avoid running them every hour.
+    if (event.cron === '0 * * * *') {
+      ctx.waitUntil(dispatchTaskReminders(env).catch(err => console.error('Task reminders failed:', err)));
+      return;
+    }
     ctx.waitUntil(Promise.all([
       runScrape(env),
       sendCountdownAlerts(env),
       generateAutoChaseAlerts(env).catch(err => console.error('Auto-chase alerts failed:', err)),
       runScheduledLotScan(env).catch(err => console.error('Lot scan failed:', err)),
+      dispatchTaskReminders(env).catch(err => console.error('Task reminders failed:', err)),
     ]));
   },
 
@@ -2772,6 +2886,90 @@ async function handleApiRoutes(request, env, url) {
       } catch (err) {
         return corsResponse({ success: false, message: 'Could not fetch that URL. Check it is publicly accessible.' }, 400);
       }
+    }
+
+    // POST /api/scrape-lot-result — best-effort parse of an auction lot's result
+    // page (sold/unsold + price + bid count). Server-rendered pages only; JS-gated
+    // or login-walled results return nulls and the caller falls back to manual entry.
+    if (url.pathname === '/api/scrape-lot-result' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const { url: lotUrl } = await request.json();
+      if (!lotUrl || !/^https?:\/\//i.test(lotUrl)) return corsResponse({ success: false, error: 'Invalid URL' }, 400);
+      try {
+        const res = await fetch(lotUrl, { headers: { 'User-Agent': SCRAPER_UA } });
+        const html = await res.text();
+        const text = html.replace(/<[^>]+>/g, ' ').replace(/&nbsp;/gi, ' ').replace(/&pound;/gi, '£').replace(/\s+/g, ' ');
+        let outcome = null;
+        if (/withdrawn/i.test(text)) outcome = 'Withdrawn';
+        else if (/\bunsold\b|not sold|did not sell|no sale|lot unsold/i.test(text)) outcome = 'Unsold';
+        else if (/\bsold\b/i.test(text)) outcome = 'Sold';
+        let salePrice = null;
+        const priceMatch = text.match(/sold[^£]{0,40}£\s?([\d][\d,]{2,})/i)
+          || text.match(/(?:sale price|result|hammer price|sold for|final bid)[^£]{0,20}£\s?([\d][\d,]{2,})/i);
+        if (priceMatch) salePrice = parseInt(priceMatch[1].replace(/,/g, '')) || null;
+        let bidCount = null;
+        const bidMatch = text.match(/(\d+)\s*bids?\b/i);
+        if (bidMatch) bidCount = parseInt(bidMatch[1]) || null;
+        return corsResponse({ success: true, outcome, salePrice, bidCount, source: 'page' });
+      } catch (err) {
+        return corsResponse({ success: false, error: 'Could not fetch that URL. It may require login or block automated access.' }, 400);
+      }
+    }
+
+    // --------------------------------------------------------
+    // TELEGRAM LINKING (task reminders)
+    // --------------------------------------------------------
+
+    // POST /api/telegram/link — issue a one-time code the user sends to the bot
+    if (url.pathname === '/api/telegram/link' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const code = bytesToHex(crypto.getRandomValues(new Uint8Array(4)));
+      await env.SCRAPER_KV.put(`tg:link:${code}`, String(session.userId), { expirationTtl: 900 });
+      return corsResponse({ success: true, code, botUsername: env.TELEGRAM_BOT_USERNAME || null });
+    }
+
+    // GET /api/telegram/status — is this user's Telegram connected?
+    if (url.pathname === '/api/telegram/status' && request.method === 'GET') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const chatId = await env.SCRAPER_KV.get(`tg:chat:${session.userId}`);
+      return corsResponse({ success: true, linked: !!chatId, botUsername: env.TELEGRAM_BOT_USERNAME || null });
+    }
+
+    // POST /api/telegram/unlink — disconnect
+    if (url.pathname === '/api/telegram/unlink' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      await env.SCRAPER_KV.delete(`tg:chat:${session.userId}`);
+      return corsResponse({ success: true });
+    }
+
+    // POST /api/telegram/webhook — called by Telegram; resolves the code → chat id
+    if (url.pathname === '/api/telegram/webhook' && request.method === 'POST') {
+      if (env.TELEGRAM_WEBHOOK_SECRET) {
+        const sig = request.headers.get('X-Telegram-Bot-Api-Secret-Token');
+        if (sig !== env.TELEGRAM_WEBHOOK_SECRET) return new Response('Forbidden', { status: 403 });
+      }
+      let update;
+      try { update = await request.json(); } catch { return corsResponse({ ok: true }); }
+      const msg = update && (update.message || update.edited_message);
+      const chatId = msg && msg.chat && msg.chat.id;
+      const text = ((msg && msg.text) || '').trim();
+      if (chatId && text) {
+        const m = /(?:\/start\s+)?([A-Za-z0-9]{4,16})/.exec(text);
+        const code = m ? m[1] : null;
+        const uid = code ? await env.SCRAPER_KV.get(`tg:link:${code}`) : null;
+        if (uid) {
+          await env.SCRAPER_KV.put(`tg:chat:${uid}`, String(chatId));
+          await env.SCRAPER_KV.delete(`tg:link:${code}`);
+          await sendTelegram(env, chatId, '✅ Connected to A&A Partners CRM. Task reminders will arrive here.');
+        } else {
+          await sendTelegram(env, chatId, '⚠️ That code is invalid or has expired. Generate a fresh one in the CRM under Settings → Integrations → Telegram.');
+        }
+      }
+      return corsResponse({ ok: true });
     }
 
     // --------------------------------------------------------
