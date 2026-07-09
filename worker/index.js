@@ -254,6 +254,46 @@ function parseReminderOffsetMs(off) {
   return n * mult;
 }
 
+// ── UK bank holidays (gov.uk, free, keyless) — cached 24h in KV ──────────────
+async function getBankHolidays(env, division = 'england-and-wales') {
+  const cacheKey = `bankhols:${division}`;
+  const cached = await env.SCRAPER_KV.get(cacheKey, 'json');
+  if (cached) return cached;
+  try {
+    const res = await fetch('https://www.gov.uk/bank-holidays.json', {
+      headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) throw new Error(`Bank holidays HTTP ${res.status}`);
+    const data = await res.json();
+    const events = (data[division]?.events || []).map(e => ({ date: e.date, title: e.title }));
+    const payload = { division, dates: events.map(e => e.date), events, fetchedAt: new Date().toISOString() };
+    await env.SCRAPER_KV.put(cacheKey, JSON.stringify(payload), { expirationTtl: 86400 });
+    return payload;
+  } catch (e) {
+    return { division, dates: [], events: [], error: e.message };
+  }
+}
+
+function isWorkingDay(dateStr, holidaySet) {
+  const d = new Date(`${dateStr}T00:00:00Z`);
+  if (isNaN(d)) return true;
+  const dow = d.getUTCDay();
+  if (dow === 0 || dow === 6) return false;
+  return !holidaySet.has(dateStr);
+}
+
+// First working day on or after dateStr (looks up to 21 days ahead).
+function nextWorkingDay(dateStr, holidaySet) {
+  let d = new Date(`${dateStr}T00:00:00Z`);
+  if (isNaN(d)) return dateStr;
+  for (let i = 0; i < 21; i++) {
+    const s = d.toISOString().slice(0, 10);
+    if (isWorkingDay(s, holidaySet)) return s;
+    d = new Date(d.getTime() + 86400000);
+  }
+  return dateStr;
+}
+
 async function sendTelegram(env, chatId, text) {
   if (!env.TELEGRAM_BOT_TOKEN || !chatId) return { ok: false };
   try {
@@ -279,6 +319,11 @@ async function dispatchTaskReminders(env) {
   for (const u of users) { if (u.name) userByName[u.name.toLowerCase()] = u; }
   const now = Date.now();
   const seenTasks = new Set();
+
+  const bankHols = await getBankHolidays(env);
+  const holidaySet = new Set(bankHols.dates || []);
+  const holidayTitleByDate = {};
+  for (const e of (bankHols.events || [])) holidayTitleByDate[e.date] = e.title;
 
   for (const uid of userIds) {
     const blob = await env.SCRAPER_KV.get(`crm:user:${uid}`, 'json');
@@ -313,6 +358,11 @@ async function dispatchTaskReminders(env) {
         const safeTitle = String(t.title || 'Untitled task');
         let sentAny = false;
 
+        // Flag due dates that land on a weekend or bank holiday
+        const dueNonWorking = !isWorkingDay(t.dueDate, holidaySet);
+        const dueNwd = dueNonWorking ? nextWorkingDay(t.dueDate, holidaySet) : null;
+        const dueReason = dueNonWorking ? (holidayTitleByDate[t.dueDate] || 'weekend') : null;
+
         if (channels.includes('email') && email) {
           const res = await sendEmail(env, {
             to: email,
@@ -327,6 +377,7 @@ async function dispatchTaskReminders(env) {
                   ${t.linkedName ? `<tr><td style="padding:5px 0;color:#64748b">Linked to</td><td style="font-weight:600;color:#0f172a">${String(t.linkedName).replace(/</g, '&lt;')}</td></tr>` : ''}
                   ${t.assignee ? `<tr><td style="padding:5px 0;color:#64748b">Assignee</td><td style="font-weight:600;color:#0f172a">${String(t.assignee).replace(/</g, '&lt;')}</td></tr>` : ''}
                 </table>
+                ${dueNonWorking ? `<p style="margin-top:12px;padding:8px 12px;background:#fffbeb;border:1px solid #fcd34d;border-radius:6px;font-size:12px;color:#92400e">⚠️ Due date is a non-working day (${String(dueReason).replace(/</g, '&lt;')}). Nearest working day: <strong>${dueNwd}</strong>.</p>` : ''}
                 ${t.notes ? `<p style="margin-top:14px;font-size:13px;color:#334155;white-space:pre-wrap">${String(t.notes).slice(0, 500).replace(/</g, '&lt;')}</p>` : ''}
               </div>
               <p style="font-size:11px;color:#94a3b8;margin-top:14px;text-align:center">A&A Partners CRM</p>
@@ -337,7 +388,8 @@ async function dispatchTaskReminders(env) {
         if (channels.includes('telegram') && chatId) {
           const tgTitle = safeTitle.replace(/[<>&]/g, '');
           const linkLine = t.linkedName ? `\n${String(t.linkedName).replace(/[<>&]/g, '')}` : '';
-          const res = await sendTelegram(env, chatId, `🔔 <b>Task reminder</b>\n<b>${tgTitle}</b>\nDue ${t.dueDate} · ${label} before${linkLine}${t.assignee ? `\nAssignee: ${String(t.assignee).replace(/[<>&]/g, '')}` : ''}`);
+          const holLine = dueNonWorking ? `\n⚠️ Due on a non-working day (${String(dueReason).replace(/[<>&]/g, '')}) — nearest working day ${dueNwd}` : '';
+          const res = await sendTelegram(env, chatId, `🔔 <b>Task reminder</b>\n<b>${tgTitle}</b>\nDue ${t.dueDate} · ${label} before${linkLine}${t.assignee ? `\nAssignee: ${String(t.assignee).replace(/[<>&]/g, '')}` : ''}${holLine}`);
           if (res.ok) sentAny = true;
         }
         if (sentAny) await env.SCRAPER_KV.put(marker, String(now), { expirationTtl: 30 * 86400 });
@@ -898,7 +950,7 @@ function extractLotNumber(text) {
 }
 
 function extractPropertyType(text) {
-  const m = String(text || '').match(/\b(?:end[- ]|mid[- ])?(?:semi[- ]detached|detached|terraced?|flat|apartment|bungalow|maisonette|land|garage|commercial|hmo)\b(?:[ \t]+(?:house|bungalow|flat|apartment))?/i);
+  const m = String(text || '').match(/\b(?:end[- ]|mid[- ])?(?:semi[- ]detached|detached|terraced?|town[- ]?house|cottage|flat|apartment|studio|bungalow|maisonette|mews|block of flats|building plot|land|plot|garage|lock[- ]?up|commercial|retail|office|shop|mixed[- ]use|hmo)\b(?:[ \t]+(?:house|bungalow|flat|apartment))?/i);
   return m ? m[0].replace(/\s+/g, ' ').trim() : null;
 }
 
@@ -1056,12 +1108,31 @@ async function enrichLotFromDetailPage(lot) {
   let m = html.match(/closing on\s*(\d{2})\/(\d{2})\/(\d{4})/i);
   if (!m) m = html.match(/Bidding Opens\s*(\d{2})\/(\d{2})\/(\d{4})/i);
   if (m) lot.auctionDate = `${m[3]}-${m[2]}-${m[1]}`;
+  const stripped = stripHtml(html);
+  if (!lot.auctionDate) {
+    const d = extractAuctionDate(stripped.slice(0, 6000));
+    if (d) lot.auctionDate = d;
+  }
   if (lot.guidePrice == null) {
-    const g = stripHtml(html).match(/Guide Price\*?\s*:?\s*£\s*([\d,]+)/i);
+    const g = stripped.match(/Guide Price\*?\s*:?\s*£\s*([\d,]+)/i) || stripped.match(/£\s*([\d,]{4,})/);
     if (g) {
       const n = Number(g[1].replace(/,/g, ''));
       if (Number.isFinite(n) && n > 0) lot.guidePrice = n;
     }
+  }
+  // Detail pages carry the full description, so fill the fields the terse
+  // catalogue card left blank — never overwrite good card data.
+  if (!lot.propertyType) {
+    const pt = extractPropertyType(stripped);
+    if (pt) lot.propertyType = pt;
+  }
+  if (!lot.bedrooms) {
+    const bd = extractBedrooms(stripped);
+    if (bd) lot.bedrooms = bd;
+  }
+  if (!lot.address) {
+    const fields = parseLotText(stripped);
+    if (fields && fields.address) lot.address = fields.address;
   }
   return lot;
 }
@@ -1075,8 +1146,8 @@ function lotScraperConfigs() {
       startUrls: ['https://www.auctionhouse.co.uk/southyorkshire/current-lots', 'https://www.auctionhouse.co.uk/southyorkshire'],
       followRe: /(view-lots|current-lots|catalogue|online\.auctionhouse)/i,
       anchorRe: /online\.auctionhouse\.co\.uk\/lot\/|\/lot\/(?:redirect\/)?\d+/i,
-      maxFollow: 3,
-      maxPages: 5,
+      maxFollow: 4,
+      maxPages: 8,
       enrichFromLotPage: true,
     },
     {
@@ -1086,8 +1157,9 @@ function lotScraperConfigs() {
       startUrls: ['https://www.pugh-auctions.com/auction-diary'],
       followRe: /(\/auctions?\/|catalogue|\/lots|\/search|\/propert)/i,
       anchorRe: /\/propert(?:y|ies)\/[\w-]+|\/lot[\/-]?\d+/i,
-      maxFollow: 3,
-      maxPages: 4,
+      maxFollow: 4,
+      maxPages: 6,
+      enrichFromLotPage: true,
     },
     {
       houseId: 'mchugh',
@@ -1095,9 +1167,47 @@ function lotScraperConfigs() {
       diaryUrl: 'https://www.mchughandco.com/',
       startUrls: ['https://www.mchughandco.com/pages/auctions', 'https://www.mchughandco.com/'],
       followRe: /(current|catalogue|\/lots|auction)/i,
-      anchorRe: /\/(?:propert(?:y|ies)|lots?)\/[\w-]+/i,
-      maxFollow: 2,
-      maxPages: 3,
+      anchorRe: /\/(?:propert(?:y|ies)|lots?)\/[\w-]+|\/auction\/details\/\d+/i,
+      maxFollow: 3,
+      maxPages: 4,
+      enrichFromLotPage: true,
+    },
+    {
+      houseId: 'sdl',
+      houseName: 'SDL Property Auctions',
+      diaryUrl: 'https://www.sdlauctions.co.uk/property-auctions/upcoming-auctions/',
+      startUrls: ['https://www.sdlauctions.co.uk/find-a-property/', 'https://www.sdlauctions.co.uk/property-auctions/upcoming-auctions/'],
+      followRe: /(find-a-property|upcoming-auctions|catalogue|\/lot|\/propert)/i,
+      anchorRe: /\/(?:property|lot)\/[\w-]+/i,
+      maxFollow: 4,
+      maxPages: 6,
+      enrichFromLotPage: true,
+    },
+    {
+      // Diary lists /auction/<code> catalogue links; each lot is /property/<code>
+      // and catalogue cards already carry address + guide price.
+      houseId: 'mj',
+      houseName: 'Mark Jenkinson & Son',
+      diaryUrl: 'https://www.markjenkinson.co.uk/auction-diary',
+      startUrls: ['https://www.markjenkinson.co.uk/auctions', 'https://www.markjenkinson.co.uk/auction-diary'],
+      followRe: /(\/auction\/|catalogue|\/lots|current)/i,
+      anchorRe: /\/(?:property|lot)\/[\w-]+/i,
+      maxFollow: 4,
+      maxPages: 6,
+      enrichFromLotPage: true,
+    },
+    {
+      // Lots surface via the JS-rendered property search (residential, Sheffield
+      // radius) — Browser Rendering paints the cards a plain fetch can't.
+      houseId: 'allsop',
+      houseName: 'Allsop Residential',
+      diaryUrl: 'https://www.allsop.co.uk/auctions/property-for-auction-in-sheffield/',
+      startUrls: ['https://www.allsop.co.uk/property-search?available_only=true&lot_type=residential&location=sheffield-uk&radius=15', 'https://www.allsop.co.uk/auctions/property-for-auction-in-sheffield/'],
+      followRe: /(property-search|auctions?|catalogue|\/lots|property-details|lot-details)/i,
+      anchorRe: /\/(?:property-details|lot-details|property|lot)\/[\w-]+/i,
+      maxFollow: 4,
+      maxPages: 6,
+      enrichFromLotPage: true,
     },
   ];
 }
@@ -1193,9 +1303,15 @@ async function runLotScan(env, settings, opts = {}) {
   const today = now.split('T')[0];
   const results = [];
   const matchedLotRecords = [];
+  // Scan-wide detail-page fetch budget so 6 houses of enrichment can't blow the
+  // request time limit (which was silently starving the later houses).
+  let enrichBudget = 50;
+  // Manual scans run one house per request so no single house can be starved by
+  // the request time limit; cron passes no houseId and scans them all.
+  const configs = opts.houseId ? lotScraperConfigs().filter(c => c.houseId === opts.houseId) : lotScraperConfigs();
   const browser = await puppeteer.launch(env.BROWSER);
   try {
-    for (const cfg of lotScraperConfigs()) {
+    for (const cfg of configs) {
       const res = await scrapeHouseLots(browser, cfg);
       const summary = { houseId: cfg.houseId, name: cfg.houseName, lotsFound: res.lots.length, matched: 0, newLots: 0, updated: 0, withdrawn: 0, error: res.error };
       let matched = res.lots.filter(l => matchesRegion(l.address, settings) && (l.guidePrice == null || l.guidePrice <= settings.maxGuidePrice) && !(l.listingStatus && l.guidePrice == null));
@@ -1205,10 +1321,12 @@ async function runLotScan(env, settings, opts = {}) {
       // Fill missing auction dates (and guides) from lot detail pages —
       // plain fetch, capped so a large catalogue can't stall the scan.
       if (cfg.enrichFromLotPage && !opts.dryRun) {
-        let enriched = 0;
         for (const lot of matched) {
-          if (lot.auctionDate || !lot.lotUrl || enriched >= 15) continue;
-          enriched++;
+          // Enrich when the card is missing an auction date OR a usable property
+          // type — the detail page is where both usually live.
+          const needsEnrich = !lot.auctionDate || !lot.propertyType;
+          if (!needsEnrich || !lot.lotUrl || enrichBudget <= 0) continue;
+          enrichBudget--;
           try { await enrichLotFromDetailPage(lot); } catch {}
         }
       }
@@ -1709,6 +1827,79 @@ async function connectorCensus(msoaCode) {
   };
 }
 
+// ── Open-Meteo weather forecast (free, keyless) — inspection/viewing planning ──
+const WMO_CODE = {
+  0: 'Clear', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast',
+  45: 'Fog', 48: 'Rime fog', 51: 'Light drizzle', 53: 'Drizzle', 55: 'Heavy drizzle',
+  61: 'Light rain', 63: 'Rain', 65: 'Heavy rain', 66: 'Freezing rain', 67: 'Freezing rain',
+  71: 'Light snow', 73: 'Snow', 75: 'Heavy snow', 77: 'Snow grains',
+  80: 'Rain showers', 81: 'Rain showers', 82: 'Violent rain showers',
+  85: 'Snow showers', 86: 'Snow showers', 95: 'Thunderstorm', 96: 'Thunderstorm w/ hail', 99: 'Thunderstorm w/ hail',
+};
+async function connectorWeather(lat, lng) {
+  const res = await fetch(
+    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}` +
+    `&current=temperature_2m,weathercode,windspeed_10m,precipitation` +
+    `&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max,windspeed_10m_max` +
+    `&forecast_days=7&timezone=Europe%2FLondon`,
+    { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(8000) },
+  );
+  if (!res.ok) throw new Error(`Open-Meteo HTTP ${res.status}`);
+  const data = await res.json();
+  const cur = data.current || {};
+  const dl = data.daily || {};
+  const days = (dl.time || []).map((t, i) => {
+    const code = dl.weathercode?.[i];
+    const pop = dl.precipitation_probability_max?.[i];
+    const wind = dl.windspeed_10m_max?.[i];
+    return {
+      date: t,
+      summary: WMO_CODE[code] || 'Unknown',
+      tempMax: dl.temperature_2m_max?.[i] != null ? Math.round(dl.temperature_2m_max[i]) : null,
+      tempMin: dl.temperature_2m_min?.[i] != null ? Math.round(dl.temperature_2m_min[i]) : null,
+      precipProb: pop != null ? pop : null,
+      windMax: wind != null ? Math.round(wind) : null,
+      // Dry, low-wind, daylight-friendly day for viewings / drone / roof work
+      goodForInspection: (pop == null || pop <= 30) && (wind == null || wind <= 35) && ![61,63,65,66,67,71,73,75,80,81,82,85,86,95,96,99].includes(code),
+    };
+  });
+  return {
+    current: {
+      temp: cur.temperature_2m != null ? Math.round(cur.temperature_2m) : null,
+      summary: WMO_CODE[cur.weathercode] || 'Unknown',
+      wind: cur.windspeed_10m != null ? Math.round(cur.windspeed_10m) : null,
+      precipitation: cur.precipitation ?? null,
+    },
+    forecast: days,
+    nextGoodInspectionDay: days.find(d => d.goodForInspection)?.date || null,
+  };
+}
+
+// ── Open-Meteo air quality (free, keyless) — feeds Neighbourhood score ──
+async function connectorAirQuality(lat, lng) {
+  const res = await fetch(
+    `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lng}` +
+    `&current=european_aqi,pm10,pm2_5,nitrogen_dioxide,ozone&timezone=Europe%2FLondon`,
+    { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(8000) },
+  );
+  if (!res.ok) throw new Error(`Open-Meteo AQ HTTP ${res.status}`);
+  const data = await res.json();
+  const cur = data.current || {};
+  const aqi = cur.european_aqi;
+  if (aqi == null) throw new Error('No air quality index');
+  const label = aqi <= 20 ? 'Good' : aqi <= 40 ? 'Fair' : aqi <= 60 ? 'Moderate' : aqi <= 80 ? 'Poor' : aqi <= 100 ? 'Very poor' : 'Extremely poor';
+  return {
+    europeanAqi: Math.round(aqi),
+    label,
+    pm25: cur.pm2_5 != null ? Math.round(cur.pm2_5 * 10) / 10 : null,
+    pm10: cur.pm10 != null ? Math.round(cur.pm10 * 10) / 10 : null,
+    no2: cur.nitrogen_dioxide != null ? Math.round(cur.nitrogen_dioxide) : null,
+    ozone: cur.ozone != null ? Math.round(cur.ozone) : null,
+    // 0–100 where higher = cleaner, for the Neighbourhood composite
+    qualityScore: Math.max(0, Math.min(100, Math.round(100 - aqi))),
+  };
+}
+
 function addressSimilarity(a, b) {
   if (!a || !b) return 0;
   const norm = s => s.toLowerCase().replace(/[^a-z0-9\s]/g,'').replace(/\s+/g,' ').trim();
@@ -1754,6 +1945,203 @@ function enrichCompsWithEPC(lrItems, epcItems) {
 }
 
 // ============================================================
+// COMPOSITE SCORES — derived purely from connector data (no new API calls)
+// Each score is 0–100. `invert:true` means higher = worse (risk scores).
+// A score is null when no contributing connector returned data.
+// ============================================================
+function computeScores(connectors) {
+  const d = k => (connectors?.[k]?.status === 'success' ? connectors[k].data : null);
+  const police = d('police'), osm = d('osm'), flood = d('flood'), plan = d('planning'),
+        imd = d('imd'), hpi = d('hpi'), lr = d('landRegistry'), tfl = d('tfl'),
+        schl = d('schools'), epc = d('epc'), cens = d('census'), air = d('airQuality');
+
+  const clamp = n => Math.max(0, Math.min(100, Math.round(n)));
+  const band = s => s == null ? 'No data' : s >= 80 ? 'Excellent' : s >= 65 ? 'Strong' : s >= 50 ? 'Moderate' : s >= 35 ? 'Weak' : 'Poor';
+  const riskBand = s => s == null ? 'No data' : s >= 70 ? 'High' : s >= 45 ? 'Moderate' : s >= 25 ? 'Low' : 'Minimal';
+  // Weighted mean over the entries that actually have a value.
+  const blend = entries => {
+    const valid = entries.filter(e => e && e.v != null && !isNaN(e.v));
+    if (!valid.length) return { score: null, factors: [], have: 0 };
+    const tw = valid.reduce((s, e) => s + e.w, 0);
+    const score = clamp(valid.reduce((s, e) => s + e.v * e.w, 0) / tw);
+    const factors = valid
+      .filter(e => e.label)
+      .sort((a, b) => (b.v * b.w) - (a.v * a.w))
+      .slice(0, 4)
+      .map(e => e.label);
+    return { score, factors, have: valid.length };
+  };
+
+  // ── Reusable normalised sub-signals (0–100, higher = better) ──
+  const EPC_Q = { A: 100, B: 88, C: 72, D: 55, E: 38, F: 22, G: 8 };
+  const epcRating = epc?.epcRating || epc?.best?.currentRating || null;
+  const epcQ      = epcRating ? (EPC_Q[epcRating] ?? null) : null;
+
+  const crimeQ = police?.riskScore != null ? clamp((10 - police.riskScore) / 9 * 100) : null;
+  const amenityQ = osm?.amenityScore != null ? osm.amenityScore * 10 : null;
+  const deprivQ = imd?.decile != null ? imd.decile * 10 : null;
+
+  // Transport: TfL score in London, else OSM nearest-station proximity.
+  let transportQ = null;
+  if (tfl?.inLondon && tfl?.transportScore != null) transportQ = tfl.transportScore * 10;
+  else if (osm?.nearestStationM != null) transportQ = osm.nearestStationM <= 500 ? 90 : osm.nearestStationM <= 1000 ? 72 : osm.nearestStationM <= 1600 ? 52 : 34;
+
+  // Schools: best Ofsted rating nearby, nudged by how many are Outstanding/Good.
+  let schoolsQ = null;
+  if (schl?.schoolCount) {
+    const baseByRating = { Outstanding: 92, Good: 74, 'Requires Improvement': 46, Inadequate: 22 };
+    const base = baseByRating[schl.bestRating] ?? 55;
+    const boost = Math.min(12, (schl.outstandingCount || 0) * 6 + (schl.goodCount || 0) * 2);
+    schoolsQ = clamp(base + boost);
+  }
+
+  // Capital growth from official HPI (3yr) with LR price trend as a secondary signal.
+  const growthQ = hpi?.growth3yr != null ? clamp(50 + hpi.growth3yr * 1.4)
+    : (lr?.priceGrowth != null ? clamp(50 + lr.priceGrowth * 1.4) : null);
+
+  const airQ = air?.qualityScore != null ? air.qualityScore : null;
+  const parksQ = osm ? clamp(Math.min(3, (osm.parks?.length || 0)) / 3 * 100) : null;
+  const healthQ = osm ? clamp(Math.min(3, (osm.gp?.length || 0) + (osm.hospitals?.length || 0)) / 3 * 100) : null;
+
+  // Flood risk (higher = worse).
+  let floodRisk = null;
+  if (flood) floodRisk = flood.hasCurrentWarning ? 90 : flood.floodAreasNearby > 1 ? 60 : flood.floodAreasNearby === 1 ? 40 : 8;
+
+  // ── 1. Investment Score — headline blend of return + area quality − risk ──
+  const investment = blend([
+    { v: growthQ,     w: 3, label: hpi?.growth3yr != null ? `${hpi.growth3yr >= 0 ? '+' : ''}${hpi.growth3yr}% 3yr HPI growth` : (lr?.priceGrowth != null ? `${lr.priceGrowth >= 0 ? '+' : ''}${lr.priceGrowth}% local price trend` : null) },
+    { v: deprivQ,     w: 2, label: imd?.label ? `${imd.label} (IMD decile ${imd.decile})` : null },
+    { v: crimeQ,      w: 2, label: police?.riskLabel ? `${police.riskLabel} crime` : null },
+    { v: amenityQ,    w: 2, label: osm?.amenityLabel ? `${osm.amenityLabel} amenities` : null },
+    { v: transportQ,  w: 1.5, label: transportQ != null ? 'Transport access' : null },
+    { v: schoolsQ,    w: 1, label: schl?.bestRating ? `${schl.bestRating} school nearby` : null },
+    { v: epcQ,        w: 1, label: epcRating ? `EPC ${epcRating}` : null },
+    { v: floodRisk != null ? 100 - floodRisk : null, w: 1, label: flood && flood.floodAreasNearby === 0 ? 'No flood areas nearby' : null },
+    { v: plan?.constraintCount != null ? clamp(100 - plan.constraintCount * 22) : null, w: 1, label: plan && plan.constraintCount === 0 ? 'No planning constraints' : null },
+  ]);
+
+  // ── 2. Neighbourhood Score — liveability (amenities, green, health, air, crime) ──
+  const neighbourhood = blend([
+    { v: amenityQ,   w: 3, label: osm?.amenityLabel ? `${osm.amenityLabel} amenities` : null },
+    { v: parksQ,     w: 1.5, label: osm?.parks?.length ? `${osm.parks.length} park(s) nearby` : null },
+    { v: healthQ,    w: 1.5, label: (osm?.gp?.length || osm?.hospitals?.length) ? 'GP / hospital access' : null },
+    { v: crimeQ,     w: 2, label: police?.riskLabel ? `${police.riskLabel} crime` : null },
+    { v: airQ,       w: 1.5, label: air?.label ? `${air.label} air quality` : null },
+    { v: transportQ, w: 1.5, label: transportQ != null ? 'Transport access' : null },
+    { v: schoolsQ,   w: 1, label: schl?.bestRating ? `${schl.bestRating} school nearby` : null },
+  ]);
+
+  // ── 3. Refurbishment Risk — higher = MORE work/risk (EPC, planning, flood) ──
+  const refurbRisk = blend([
+    { v: epcQ != null ? 100 - epcQ : null, w: 3, label: epcRating && ['E', 'F', 'G'].includes(epcRating) ? `Poor EPC (${epcRating})` : null },
+    { v: epc?.energyFlags?.length ? clamp(epc.energyFlags.length * 25) : (epc ? 0 : null), w: 1.5, label: epc?.energyFlags?.length ? epc.energyFlags.join(', ') : null },
+    { v: plan?.listedBuilding ? 100 : (plan?.constraintCount != null ? clamp(plan.constraintCount * 30) : null), w: 2.5, label: plan?.listedBuilding ? `Listed building${plan.listedBuildingGrade ? ` (Grade ${plan.listedBuildingGrade})` : ''}` : (plan?.conservationArea ? 'Conservation area' : null) },
+    { v: floodRisk, w: 1.5, label: flood?.floodAreasNearby > 0 ? `${flood.floodAreasNearby} flood area(s) nearby` : null },
+  ]);
+  if (refurbRisk.score != null) refurbRisk.invert = true;
+
+  // ── 4. Rental Demand — tenant pool, transport, employment, amenities ──
+  const rentPct = cens?.tenure?.privateRentPct;
+  const rentDemandFromTenure = rentPct != null ? clamp(30 + rentPct * 2) : null;
+  const rentalDemand = blend([
+    { v: rentDemandFromTenure, w: 2.5, label: rentPct != null ? `${rentPct}% private rented locally` : null },
+    { v: cens?.population?.under35Pct != null ? clamp(cens.population.under35Pct * 2) : null, w: 1.5, label: cens?.population?.under35Pct != null ? `${cens.population.under35Pct}% under 35` : null },
+    { v: cens?.employment?.employedPct != null ? cens.employment.employedPct : null, w: 1.5, label: cens?.employment?.employedPct != null ? `${cens.employment.employedPct}% employed` : null },
+    { v: transportQ, w: 2, label: transportQ != null ? 'Transport access' : null },
+    { v: amenityQ,   w: 1.5, label: osm?.amenityLabel ? `${osm.amenityLabel} amenities` : null },
+    { v: schoolsQ,   w: 1, label: schl?.bestRating ? `${schl.bestRating} school nearby` : null },
+  ]);
+
+  // ── 5. Flip Potential — growth momentum, low friction, redevelopment upside ──
+  const flipPotential = blend([
+    { v: growthQ, w: 3, label: (hpi?.growth1yr != null || hpi?.growth3yr != null) ? `${hpi.growth1yr != null ? hpi.growth1yr : hpi.growth3yr}% recent growth` : null },
+    { v: lr?.priceGrowth != null ? clamp(50 + lr.priceGrowth * 1.4) : null, w: 1.5, label: lr?.priceGrowth != null ? `${lr.priceGrowth >= 0 ? '+' : ''}${lr.priceGrowth}% postcode price trend` : null },
+    { v: (plan?.brownfield || plan?.opportunityArea || plan?.enterpriseZone) ? 90 : null, w: 1, label: plan?.brownfield ? 'Brownfield / regen upside' : (plan?.opportunityArea ? 'Opportunity area' : null) },
+    { v: plan?.constraintCount != null ? clamp(100 - plan.constraintCount * 22) : null, w: 1.5, label: plan && plan.constraintCount === 0 ? 'Low planning friction' : null },
+    { v: deprivQ != null ? clamp(deprivQ * 0.7 + 30) : null, w: 1, label: null },
+    { v: amenityQ, w: 1, label: osm?.amenityLabel ? `${osm.amenityLabel} amenities` : null },
+  ]);
+
+  const pack = (key, label, r, invert = false) => ({
+    key, label,
+    score: r.score,
+    band: invert ? riskBand(r.score) : band(r.score),
+    invert,
+    factors: r.factors,
+    coverage: r.have,
+  });
+
+  return {
+    generatedAt: new Date().toISOString(),
+    investment:    pack('investment', 'Investment Score', investment),
+    neighbourhood: pack('neighbourhood', 'Neighbourhood Score', neighbourhood),
+    refurbRisk:    pack('refurbRisk', 'Refurb Risk Score', refurbRisk, true),
+    rentalDemand:  pack('rentalDemand', 'Rental Demand Score', rentalDemand),
+    flipPotential: pack('flipPotential', 'Flip Potential Score', flipPotential),
+  };
+}
+
+// ============================================================
+// SEMANTIC SEARCH — Workers AI (toMarkdown + bge embeddings) + Vectorize
+// All inert unless env.AI and env.VECTORIZE bindings are present.
+// ============================================================
+const SEARCHABLE_DOC = /\.(pdf|docx?|txt|md|html?|csv|xlsx?|pptx?|png|jpe?g|webp)$/i;
+
+// Stable, ASCII-safe short hash for building Vectorize vector ids from R2 keys.
+function shortHash(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h) ^ s.charCodeAt(i);
+  return (h >>> 0).toString(36);
+}
+
+function chunkText(text, size = 900, overlap = 150) {
+  const clean = String(text || '').replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  if (!clean) return [];
+  const chunks = [];
+  let i = 0;
+  while (i < clean.length && chunks.length < 80) {
+    chunks.push(clean.slice(i, i + size));
+    i += size - overlap;
+  }
+  return chunks;
+}
+
+// Convert a document to text, chunk, embed, and upsert into Vectorize.
+async function indexDocumentForSearch(env, { key, name, propertyId, userId, blob }) {
+  if (!env.AI || !env.VECTORIZE) return { indexed: 0, reason: 'not-configured' };
+  if (!SEARCHABLE_DOC.test(name || key || '')) return { indexed: 0, reason: 'unsupported-type' };
+  try {
+    const md = await env.AI.toMarkdown([{ name: name || 'document', blob }]);
+    const text = (Array.isArray(md) ? md[0]?.data : md?.data) || '';
+    const chunks = chunkText(text);
+    if (!chunks.length) return { indexed: 0, reason: 'no-text' };
+
+    const vectors = [];
+    const idBase = shortHash(key);
+    for (let i = 0; i < chunks.length; i += 50) {
+      const batch = chunks.slice(i, i + 50);
+      const emb = await env.AI.run('@cf/baai/bge-base-en-v1.5', { text: batch });
+      const data = emb?.data || [];
+      data.forEach((values, j) => {
+        vectors.push({
+          id: `${idBase}-${i + j}`,
+          values,
+          metadata: {
+            userId: String(userId), propertyId: String(propertyId || 'unknown'),
+            key, name: name || key, chunk: batch[j].slice(0, 900),
+          },
+        });
+      });
+    }
+    if (vectors.length) await env.VECTORIZE.upsert(vectors);
+    return { indexed: vectors.length };
+  } catch (e) {
+    console.error('indexDocumentForSearch failed:', e);
+    return { indexed: 0, reason: e.message };
+  }
+}
+
+// ============================================================
 // MAIN WORKER EXPORT
 // ============================================================
 
@@ -1775,7 +2163,7 @@ export default {
     ]));
   },
 
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     // Handle CORS preflight
@@ -2289,6 +2677,33 @@ async function handleApiRoutes(request, env, url) {
     // GET /api/auth/google
     if (url.pathname === '/api/auth/google' && request.method === 'GET') {
       return corsResponse({ message: 'Google OAuth requires Cloudflare Access setup - see README' });
+    }
+
+    // --------------------------------------------------------
+    // BANK HOLIDAYS — gov.uk (free, cached 24h). Optional ?date=YYYY-MM-DD
+    // returns working-day info so the UI can warn on non-working due dates.
+    // --------------------------------------------------------
+    if (url.pathname === '/api/bank-holidays' && request.method === 'GET') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const division = url.searchParams.get('division') || 'england-and-wales';
+      const bankHols = await getBankHolidays(env, division);
+      const holidaySet = new Set(bankHols.dates || []);
+      const titleByDate = {};
+      for (const e of (bankHols.events || [])) titleByDate[e.date] = e.title;
+      const date = url.searchParams.get('date');
+      let dateInfo = null;
+      if (date && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        const working = isWorkingDay(date, holidaySet);
+        dateInfo = {
+          date, isWorkingDay: working,
+          reason: working ? null : (titleByDate[date] || 'weekend'),
+          nextWorkingDay: working ? date : nextWorkingDay(date, holidaySet),
+        };
+      }
+      const today = new Date().toISOString().slice(0, 10);
+      const upcoming = (bankHols.events || []).filter(e => e.date >= today).slice(0, 8);
+      return corsResponse({ success: true, division, upcoming, dates: bankHols.dates || [], dateInfo });
     }
 
     // --------------------------------------------------------
@@ -2990,9 +3405,21 @@ async function handleApiRoutes(request, env, url) {
       // the upload response returns rather than reconstructing it, so this is safe to add.
       const keyToken = bytesToHex(crypto.getRandomValues(new Uint8Array(8)));
       const key = `${session.userId}/${propertyId}/${fileKey}/${keyToken}/${file.name}`;
-      await env.CRM_DOCS.put(key, file.stream(), {
-        httpMetadata: { contentType: file.type || 'application/octet-stream' },
-      });
+
+      // When semantic search is configured, buffer the file once so it can be both
+      // stored in R2 and passed to the indexer. Cap the in-memory buffer to keep the
+      // Worker within its memory budget; larger files fall back to streaming (no index).
+      const searchable = env.AI && env.VECTORIZE && SEARCHABLE_DOC.test(file.name) && file.size <= 20 * 1024 * 1024;
+      if (searchable) {
+        const buf = await file.arrayBuffer();
+        await env.CRM_DOCS.put(key, buf, { httpMetadata: { contentType: file.type || 'application/octet-stream' } });
+        const blob = new Blob([buf], { type: file.type || 'application/octet-stream' });
+        ctx.waitUntil(indexDocumentForSearch(env, { key, name: file.name, propertyId, userId: session.userId, blob }));
+      } else {
+        await env.CRM_DOCS.put(key, file.stream(), {
+          httpMetadata: { contentType: file.type || 'application/octet-stream' },
+        });
+      }
       return corsResponse({ success: true, key, name: file.name });
     }
 
@@ -3010,6 +3437,62 @@ async function handleApiRoutes(request, env, url) {
       headers.set('Cache-Control', 'private, max-age=3600');
       headers.set('Content-Disposition', 'inline');
       return new Response(object.body, { headers });
+    }
+
+    // --------------------------------------------------------
+    // SEMANTIC DOCUMENT SEARCH (Workers AI + Vectorize)
+    // --------------------------------------------------------
+
+    // POST /api/search/semantic — natural-language search over indexed documents
+    if (url.pathname === '/api/search/semantic' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      if (!env.AI || !env.VECTORIZE) return corsResponse({ success: false, message: 'Semantic search not configured — add the AI and VECTORIZE bindings (see setup notes).' }, 400);
+      const { query, propertyId, topK } = await request.json();
+      if (!query || !query.trim()) return corsResponse({ success: false, message: 'Missing query' }, 400);
+      try {
+        const emb = await env.AI.run('@cf/baai/bge-base-en-v1.5', { text: [query.trim()] });
+        const vector = emb?.data?.[0];
+        if (!vector) return corsResponse({ success: false, message: 'Could not embed query' }, 502);
+        const filter = { userId: String(session.userId) };
+        if (propertyId) filter.propertyId = String(propertyId);
+        const res = await env.VECTORIZE.query(vector, { topK: Math.min(topK || 10, 20), returnMetadata: 'all', filter });
+        const seen = new Set();
+        const matches = (res.matches || []).map(m => ({
+          score: Math.round((m.score || 0) * 100) / 100,
+          key: m.metadata?.key, name: m.metadata?.name,
+          propertyId: m.metadata?.propertyId, snippet: m.metadata?.chunk,
+        })).filter(m => {
+          const dedup = `${m.key}::${m.snippet?.slice(0, 40)}`;
+          if (seen.has(dedup)) return false; seen.add(dedup); return true;
+        });
+        return corsResponse({ success: true, matches });
+      } catch (err) {
+        return corsResponse({ success: false, message: `Search failed: ${err.message}` }, 502);
+      }
+    }
+
+    // POST /api/search/reindex — backfill the search index for a property's documents
+    if (url.pathname === '/api/search/reindex' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      if (!env.AI || !env.VECTORIZE) return corsResponse({ success: false, message: 'Semantic search not configured.' }, 400);
+      const { propertyId } = await request.json();
+      const prefix = propertyId ? `${session.userId}/${propertyId}/` : `${session.userId}/`;
+      const listed = await env.CRM_DOCS.list({ prefix, limit: 200 });
+      let indexed = 0, files = 0;
+      for (const obj of (listed.objects || [])) {
+        if (!SEARCHABLE_DOC.test(obj.key) || obj.size > 20 * 1024 * 1024) continue;
+        const r2 = await env.CRM_DOCS.get(obj.key);
+        if (!r2) continue;
+        const blob = await r2.blob();
+        const parts = obj.key.split('/');
+        const name = parts[parts.length - 1];
+        const pid = parts[1] || 'unknown';
+        const r = await indexDocumentForSearch(env, { key: obj.key, name, propertyId: pid, userId: session.userId, blob });
+        files++; indexed += r.indexed || 0;
+      }
+      return corsResponse({ success: true, files, chunks: indexed });
     }
 
     // --------------------------------------------------------
@@ -3101,7 +3584,7 @@ async function handleApiRoutes(request, env, url) {
     if (url.pathname === '/api/scrape-lots' && request.method === 'POST') {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
-      if (!(await checkRateLimit(env, 'scrape-lots', 3))) return corsResponse({ success: false, message: 'Rate limit exceeded — try again in a minute' }, 429);
+      if (!(await checkRateLimit(env, 'scrape-lots', 20))) return corsResponse({ success: false, message: 'Rate limit exceeded — try again in a minute' }, 429);
       const body = await request.json().catch(() => ({}));
       const base = await getScanSettings(env);
       const settings = {
@@ -3132,7 +3615,7 @@ async function handleApiRoutes(request, env, url) {
 
       await ensureAuctionMigratedToD1(env);
       try {
-        const result = await runLotScan(env, settings, { dryRun: !!body.dryRun });
+        const result = await runLotScan(env, settings, { dryRun: !!body.dryRun, houseId: body.house || null });
         return corsResponse(result);
       } catch (err) {
         return corsResponse({ success: false, message: `Lot scan failed: ${err.message}` });
@@ -3256,6 +3739,8 @@ async function handleApiRoutes(request, env, url) {
           connectorOSM(resolvedLat, resolvedLng).then(data=>({ key:'osm', status:'success', data, source:'OpenStreetMap' })).catch(err=>({ key:'osm', status:'error', error:err.message, source:'OpenStreetMap' })),
           connectorSchools(resolvedLat, resolvedLng).then(data=>({ key:'schools', status:'success', data, source:'DfE GIAS / Ofsted' })).catch(err=>({ key:'schools', status:'error', error:err.message, source:'DfE GIAS' })),
           connectorTfL(resolvedLat, resolvedLng).then(data=>({ key:'tfl', status:'success', data, source:'TfL Unified API' })).catch(err=>({ key:'tfl', status:'error', error:err.message, source:'TfL' })),
+          connectorWeather(resolvedLat, resolvedLng).then(data=>({ key:'weather', status:'success', data, source:'Open-Meteo' })).catch(err=>({ key:'weather', status:'error', error:err.message, source:'Open-Meteo' })),
+          connectorAirQuality(resolvedLat, resolvedLng).then(data=>({ key:'airQuality', status:'success', data, source:'Open-Meteo Air Quality' })).catch(err=>({ key:'airQuality', status:'error', error:err.message, source:'Open-Meteo Air Quality' })),
         );
       }
 
@@ -3274,6 +3759,9 @@ async function handleApiRoutes(request, env, url) {
         lrConn.data.items = enrichCompsWithEPC(lrConn.data.items, epcConn.data.allItems);
         lrConn.data.compsEnriched = true;
       }
+
+      // Composite scores derived from whatever connectors succeeded
+      result.scores = computeScores(result.connectors);
 
       return corsResponse({ success: true, intelligence: result });
     }

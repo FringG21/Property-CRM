@@ -753,6 +753,46 @@ export default function App({ user = {}, onLogout }) {
   };
 
   // Run all public API connectors for a property and merge results
+  const runDocSearch = async (prop, { global = false } = {}) => {
+    const q = docSearchQuery.trim();
+    if (!q) return;
+    setDocSearchBusy(true); setDocSearchError(''); setDocSearchResults(null);
+    const token = localStorage.getItem('crm_session');
+    try {
+      const res = await fetch('/api/search/semantic', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ query: q, propertyId: global ? undefined : prop?.id, topK: 10 }),
+      });
+      const data = await res.json();
+      if (!data.success) { setDocSearchError(data.message || 'Search failed.'); return; }
+      setDocSearchResults(data.matches || []);
+    } catch {
+      setDocSearchError('Search failed — please check your connection.');
+    } finally {
+      setDocSearchBusy(false);
+    }
+  };
+
+  const reindexPropertyDocs = async (prop) => {
+    setDocSearchBusy(true); setDocSearchError('');
+    const token = localStorage.getItem('crm_session');
+    try {
+      const res = await fetch('/api/search/reindex', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ propertyId: prop?.id }),
+      });
+      const data = await res.json();
+      if (!data.success) { setDocSearchError(data.message || 'Reindex failed.'); return; }
+      setDocSearchError(`Indexed ${data.files} file(s) · ${data.chunks} passage(s). You can now search.`);
+    } catch {
+      setDocSearchError('Reindex failed — please check your connection.');
+    } finally {
+      setDocSearchBusy(false);
+    }
+  };
+
   const runPropertyIntelligence = async (prop, opts = {}) => {
     const { silent = false } = opts;
     const postcode = (prop.postcode || extractPostcode(prop.address || '')).trim().toUpperCase();
@@ -2303,6 +2343,12 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
   // Intelligence state
   const [intelligenceRunning, setIntelligenceRunning] = useState(false);
   const [duplicateModal, setDuplicateModal] = useState(null); // { matches, pendingAnalytics, pendingFileRecord }
+  const [bankHolidaySet, setBankHolidaySet] = useState(null); // Set<YYYY-MM-DD> for non-working-day warnings
+  // Semantic document search (Phase 4)
+  const [docSearchQuery, setDocSearchQuery] = useState('');
+  const [docSearchResults, setDocSearchResults] = useState(null);
+  const [docSearchBusy, setDocSearchBusy] = useState(false);
+  const [docSearchError, setDocSearchError] = useState('');
 
   // ==========================================
   // REFURB COST & QUOTE BUILDER STATE
@@ -2438,6 +2484,16 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
     fetch('/api/notify/settings', { headers: { 'Authorization': `Bearer ${token}` } })
       .then(r => r.json())
       .then(data => { if (data.success) setSettingsNotifications(data.prefs); })
+      .catch(() => {});
+  }, []);
+
+  // Load UK bank holidays once — used to warn on non-working task due dates
+  useEffect(() => {
+    const token = localStorage.getItem('crm_session');
+    if (!token) return;
+    fetch('/api/bank-holidays', { headers: { 'Authorization': `Bearer ${token}` } })
+      .then(r => r.json())
+      .then(data => { if (data.success && Array.isArray(data.dates)) setBankHolidaySet(new Set(data.dates)); })
       .catch(() => {});
   }, []);
 
@@ -4493,6 +4549,36 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                   {/* Documents — Documents tab */}
                   {propCanvasTab === 'documents' && (
                     <div style={{ padding: '14px 20px', borderBottom: '0.5px solid #e2e8f0' }}>
+                      {/* ── Ask the documents (semantic search) ── */}
+                      <div style={{ marginBottom: '16px', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px 14px', background: '#fafafa' }}>
+                        <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8', marginBottom: '8px' }}>🔎 Ask these documents</div>
+                        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                          <input
+                            value={docSearchQuery}
+                            onChange={e => setDocSearchQuery(e.target.value)}
+                            onKeyDown={e => { if (e.key === 'Enter') runDocSearch(currentViewProperty); }}
+                            placeholder="e.g. is there asbestos? · any restrictive covenants? · service charge amount"
+                            style={{ flex: '1 1 240px', minWidth: 0, padding: '9px 11px', fontSize: '12px', borderRadius: '6px', border: '1px solid #e2e8f0', fontFamily: 'inherit' }}
+                          />
+                          <button onClick={() => runDocSearch(currentViewProperty)} disabled={docSearchBusy || !docSearchQuery.trim()} style={{ padding: '9px 14px', fontSize: '12px', fontWeight: '600', borderRadius: '6px', border: 'none', background: docSearchBusy ? '#c4b5fd' : '#7C3AED', color: '#fff', cursor: docSearchBusy || !docSearchQuery.trim() ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>{docSearchBusy ? '…' : 'Search'}</button>
+                          <button onClick={() => reindexPropertyDocs(currentViewProperty)} disabled={docSearchBusy} title="Index this property's existing documents so they become searchable" style={{ padding: '9px 12px', fontSize: '12px', fontWeight: '600', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#fff', color: '#475569', cursor: docSearchBusy ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}>Index docs</button>
+                        </div>
+                        {docSearchError && <div style={{ fontSize: '11px', color: docSearchError.startsWith('Indexed') ? '#166534' : '#b45309', marginTop: '8px' }}>{docSearchError}</div>}
+                        {docSearchResults && (
+                          <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            {docSearchResults.length === 0 && <div style={{ fontSize: '11px', color: '#94a3b8' }}>No passages found. If documents were uploaded before search was enabled, click "Index docs" first.</div>}
+                            {docSearchResults.map((m, i) => (
+                              <div key={i} style={{ border: '1px solid #eee', borderRadius: '6px', padding: '8px 10px', background: '#fff' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', marginBottom: '3px' }}>
+                                  <button onClick={() => handleViewDocument({ key: m.key, name: m.name })} style={{ border: 'none', background: 'none', padding: 0, fontSize: '11px', fontWeight: '600', color: '#7C3AED', cursor: 'pointer', fontFamily: 'inherit', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>📄 {m.name}</button>
+                                  <span style={{ flexShrink: 0, fontSize: '10px', color: '#94a3b8' }}>match {Math.round((m.score || 0) * 100)}%</span>
+                                </div>
+                                <div style={{ fontSize: '11px', color: '#475569', lineHeight: '1.5', maxHeight: '54px', overflow: 'hidden' }}>…{m.snippet}…</div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                       <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8', marginBottom: '12px' }}>Document vault</div>
                       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '8px', marginBottom: '16px' }}>
                         {FILE_KEYS.filter(f => f.key !== 'legalPack').map(({ key, label, accept }) => {
@@ -4799,7 +4885,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
 
                     {intelligenceRunning && (
                       <div style={{ border: '1px solid #bfdbfe', borderRadius: '8px', padding: '16px', background: '#eff6ff', textAlign: 'center', color: '#1d4ed8', fontSize: '12px' }}>
-                        ⏳ Querying public APIs — Land Registry, EPC, Police.uk, Flood, Planning, OSM, IMD, UK HPI, Schools (Ofsted), TfL, ONS Census…
+                        ⏳ Querying public APIs — Land Registry, EPC, Police.uk, Flood, Planning, OSM, IMD, UK HPI, Schools (Ofsted), TfL, ONS Census, Weather & Air Quality…
                       </div>
                     )}
 
@@ -4817,6 +4903,18 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       const tfl   = c.tfl?.data;
                       const schl  = c.schools?.data;
                       const cens  = c.census?.data;
+                      const weather = c.weather?.data;
+                      const air   = c.airQuality?.data;
+                      const scores = intel.scores;
+
+                      const scoreColour = (sc) => {
+                        if (sc == null || sc.score == null) return { bg: '#f1f5f9', fg: '#64748b', bar: '#cbd5e1' };
+                        const s = sc.score;
+                        const good = sc.invert
+                          ? (s < 45 ? 'ok' : s < 70 ? 'warn' : 'bad')
+                          : (s >= 65 ? 'ok' : s >= 50 ? 'warn' : 'bad');
+                        return { ok: { bg: '#f0fdf4', fg: '#166534', bar: '#22c55e' }, warn: { bg: '#fffbeb', fg: '#92400e', bar: '#f59e0b' }, bad: { bg: '#fef2f2', fg: '#991b1b', bar: '#ef4444' } }[good];
+                      };
 
                       const Card = ({ title, icon, children, status }) => (
                         <div style={{ border: '1px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden', marginBottom: '8px' }}>
@@ -4840,6 +4938,39 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                               <strong>⚠️ {intelConflicts.filter(x=>!x.resolved).length} conflict{intelConflicts.filter(x=>!x.resolved).length!==1?'s':''} between report and API data:</strong>
                               {intelConflicts.filter(x=>!x.resolved).map((conf,i) => <div key={i} style={{ marginTop: '3px' }}>· {conf.text}</div>)}
                               <div style={{ marginTop: '6px', color: '#78350f', fontSize: '10px' }}>Assessment report data takes priority. Review and resolve if needed.</div>
+                            </div>
+                          )}
+
+                          {/* ── Composite scores ── */}
+                          {scores && [scores.investment, scores.neighbourhood, scores.refurbRisk, scores.rentalDemand, scores.flipPotential].some(s => s && s.score != null) && (
+                            <div style={{ marginBottom: '12px' }}>
+                              <div style={{ fontSize: '10px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.06em', color: '#94a3b8', marginBottom: '6px' }}>Composite Scores <span style={{ fontWeight: '400', textTransform: 'none', letterSpacing: 0 }}>· derived from the data below</span></div>
+                              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(5, 1fr)', gap: '6px' }}>
+                                {[
+                                  { s: scores.investment, icon: '💷', short: 'Investment' },
+                                  { s: scores.neighbourhood, icon: '🏘️', short: 'Neighbourhood' },
+                                  { s: scores.refurbRisk, icon: '🔨', short: 'Refurb Risk' },
+                                  { s: scores.rentalDemand, icon: '🔑', short: 'Rental Demand' },
+                                  { s: scores.flipPotential, icon: '📈', short: 'Flip Potential' },
+                                ].map(({ s, icon, short }) => {
+                                  const col = scoreColour(s);
+                                  const has = s && s.score != null;
+                                  return (
+                                    <div key={short} title={s?.factors?.length ? s.factors.join(' · ') : ''} style={{ border: '1px solid #e2e8f0', borderRadius: '8px', padding: '8px 10px', background: col.bg }}>
+                                      <div style={{ fontSize: '10px', color: '#64748b', display: 'flex', alignItems: 'center', gap: '3px', marginBottom: '3px' }}><span>{icon}</span><span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{short}</span></div>
+                                      <div style={{ display: 'flex', alignItems: 'baseline', gap: '3px' }}>
+                                        <span style={{ fontSize: '18px', fontWeight: '700', color: col.fg }}>{has ? s.score : '—'}</span>
+                                        {has && <span style={{ fontSize: '10px', color: '#94a3b8' }}>/100</span>}
+                                      </div>
+                                      <div style={{ fontSize: '10px', fontWeight: '600', color: col.fg }}>{has ? s.band : 'No data'}</div>
+                                      {has && <div style={{ height: '3px', borderRadius: '2px', background: '#e2e8f0', marginTop: '4px', overflow: 'hidden' }}><div style={{ height: '100%', width: `${s.score}%`, background: col.bar }} /></div>}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                              {scores.investment?.factors?.length > 0 && (
+                                <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '5px' }}>Key drivers: {scores.investment.factors.join(' · ')}</div>
+                              )}
                             </div>
                           )}
 
@@ -4968,6 +5099,20 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                 <div style={{ marginTop: '4px', fontSize: '10px', color: '#94a3b8' }}>MHCLG IMD 2019 · LSOA level</div>
                               </Card>
                             )}
+
+                            {/* Air Quality */}
+                            {air && (
+                              <Card title="Air Quality" icon="🌬️" status={c.airQuality?.status}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                                  <div style={{ padding: '2px 8px', borderRadius: '4px', fontWeight: '600', fontSize: '12px', background: air.europeanAqi <= 20 ? '#dcfce7' : air.europeanAqi <= 40 ? '#ecfccb' : air.europeanAqi <= 60 ? '#fef9c3' : air.europeanAqi <= 80 ? '#fed7aa' : '#fee2e2', color: air.europeanAqi <= 40 ? '#166534' : air.europeanAqi <= 60 ? '#92400e' : '#991b1b' }}>{air.label}</div>
+                                  <span style={{ color: '#94a3b8' }}>EU AQI {air.europeanAqi}</span>
+                                </div>
+                                <Row l="PM2.5" v={air.pm25 != null ? `${air.pm25} µg/m³` : null} />
+                                <Row l="PM10" v={air.pm10 != null ? `${air.pm10} µg/m³` : null} />
+                                <Row l="NO₂" v={air.no2 != null ? `${air.no2} µg/m³` : null} />
+                                <div style={{ marginTop: '4px', fontSize: '10px', color: '#94a3b8' }}>Open-Meteo · current conditions</div>
+                              </Card>
+                            )}
                           </div>
 
                           {/* Schools */}
@@ -5065,6 +5210,27 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                   {cens.employment?.unemployedPct != null && <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#64748b' }}>Unemployed</span><span style={{ fontWeight: '500' }}>{cens.employment.unemployedPct}%</span></div>}
                                 </div>
                               </div>
+                            </div>
+                          )}
+
+                          {/* Weather — inspection / viewing planning */}
+                          {weather?.forecast?.length > 0 && (
+                            <div style={{ border: '1px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden', marginBottom: '8px' }}>
+                              <div style={{ padding: '8px 12px', background: '#f8fafc', borderBottom: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', gap: '6px', justifyContent: 'space-between' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}><span style={{ fontSize: '14px' }}>🌦️</span><span style={{ fontSize: '11px', fontWeight: '600', color: '#0f172a' }}>7-Day Weather</span>{weather.current?.temp != null && <span style={{ fontSize: '10px', color: '#94a3b8' }}>Now {weather.current.temp}°C · {weather.current.summary}</span>}</div>
+                                {weather.nextGoodInspectionDay && <span style={{ fontSize: '10px', color: '#166534', fontWeight: '600' }}>✅ Next dry day: {new Date(weather.nextGoodInspectionDay).toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })}</span>}
+                              </div>
+                              <div style={{ padding: '10px 12px', display: 'grid', gridTemplateColumns: isMobile ? 'repeat(4, 1fr)' : 'repeat(7, 1fr)', gap: '6px', fontSize: '11px' }}>
+                                {weather.forecast.slice(0, isMobile ? 4 : 7).map(d => (
+                                  <div key={d.date} title={`${d.summary} · ${d.precipProb != null ? d.precipProb + '% rain' : ''}`} style={{ textAlign: 'center', padding: '6px 2px', borderRadius: '6px', background: d.goodForInspection ? '#f0fdf4' : '#f8fafc', border: `1px solid ${d.goodForInspection ? '#bbf7d0' : '#f1f5f9'}` }}>
+                                    <div style={{ fontSize: '10px', color: '#94a3b8' }}>{new Date(d.date).toLocaleDateString('en-GB', { weekday: 'short' })}</div>
+                                    <div style={{ fontWeight: '600', color: '#0f172a', margin: '2px 0' }}>{d.tempMax}°<span style={{ color: '#94a3b8', fontWeight: '400' }}>/{d.tempMin}°</span></div>
+                                    <div style={{ fontSize: '9px', color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.summary}</div>
+                                    {d.precipProb != null && <div style={{ fontSize: '9px', color: d.precipProb > 40 ? '#2563eb' : '#94a3b8' }}>💧{d.precipProb}%</div>}
+                                  </div>
+                                ))}
+                              </div>
+                              <div style={{ padding: '0 12px 8px', fontSize: '10px', color: '#94a3b8' }}>Open-Meteo · green = dry, low-wind day suitable for viewings, drone or roof work</div>
                             </div>
                           )}
 
@@ -5945,9 +6111,20 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       propertyTypes: auctionScanSettings.propertyTypes || 'all',
                     };
                     fetch('/api/scan-settings', { method: 'POST', headers: h, body: JSON.stringify(settings) }).catch(() => {});
-                    const res = await fetch('/api/scrape-lots', { method: 'POST', headers: h, body: JSON.stringify(settings) });
-                    const data = await res.json();
-                    setAuctionScanResults(data.results || []);
+                    // One request per house — a single request can't scrape all
+                    // houses before Cloudflare's time limit, which was starving
+                    // the later houses. Fastest/most-reliable houses go first.
+                    const scanOrder = ['ah_sy', 'pugh', 'mj', 'sdl', 'allsop', 'mchugh'];
+                    const allResults = [];
+                    for (const houseId of scanOrder) {
+                      try {
+                        const res = await fetch('/api/scrape-lots', { method: 'POST', headers: h, body: JSON.stringify({ ...settings, house: houseId }) });
+                        const data = await res.json();
+                        if (Array.isArray(data.results)) allResults.push(...data.results);
+                        setAuctionScanResults([...allResults]);
+                        await loadAuctionData();
+                      } catch {}
+                    }
                   } catch { setAuctionScanResults([]); }
                   setAuctionScanLoading(false);
                   await loadAuctionData();
@@ -11258,6 +11435,29 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                   <div>
                     <div style={lbl}>Due date</div>
                     <input type="date" value={task.dueDate || ''} onChange={e => drawerUpdate({ dueDate: e.target.value })} style={{ ...inp }} />
+                    {task.dueDate && (() => {
+                      const d = new Date(`${task.dueDate}T00:00:00Z`);
+                      if (isNaN(d)) return null;
+                      const dow = d.getUTCDay();
+                      const isHol = bankHolidaySet?.has(task.dueDate);
+                      const nonWorking = dow === 0 || dow === 6 || isHol;
+                      if (!nonWorking) return null;
+                      let nd = new Date(d);
+                      for (let i = 0; i < 21; i++) {
+                        nd = new Date(nd.getTime() + 86400000);
+                        const s = nd.toISOString().slice(0, 10);
+                        const w = nd.getUTCDay();
+                        if (w !== 0 && w !== 6 && !bankHolidaySet?.has(s)) break;
+                      }
+                      const ndStr = nd.toISOString().slice(0, 10);
+                      const reason = isHol ? 'a bank holiday' : 'a weekend';
+                      return (
+                        <div style={{ marginTop: '6px', fontSize: '11px', color: '#92400e', background: '#fffbeb', border: '1px solid #fcd34d', borderRadius: '6px', padding: '6px 8px', display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                          <span>⚠️ Due date is {reason}.</span>
+                          <button type="button" onClick={() => drawerUpdate({ dueDate: ndStr })} style={{ border: 'none', background: 'none', color: '#7c3aed', fontWeight: '600', cursor: 'pointer', fontFamily: 'inherit', fontSize: '11px', padding: 0 }}>Use next working day ({ndStr}) →</button>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
                 {/* Reminders */}

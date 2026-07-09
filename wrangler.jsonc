@@ -45,6 +45,15 @@
 			"bucket_name": "crm-docs"
 		}
 	],
+	"ai": {
+		"binding": "AI"
+	},
+	"vectorize": [
+		{
+			"binding": "VECTORIZE",
+			"index_name": "crm-docs-index"
+		}
+	],
 	"browser": {
 		"binding": "BROWSER"
 	}
