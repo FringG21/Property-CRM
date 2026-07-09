@@ -325,6 +325,7 @@ export default function App({ user = {}, onLogout }) {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [vw, setVw] = useState(window.innerWidth);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(window.innerWidth < 1024);
+  const [navTooltip, setNavTooltip] = useState(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   useEffect(() => {
@@ -2869,6 +2870,16 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
     .crm-mobile-tab-scroll::-webkit-scrollbar { display: none; }
   `;
 
+  const navTipProps = (label) => ({
+    onMouseEnter: (e) => {
+      if (sidebarCollapsed && !isMobile) {
+        const r = e.currentTarget.getBoundingClientRect();
+        setNavTooltip({ label, top: r.top + r.height / 2 });
+      }
+    },
+    onMouseLeave: () => setNavTooltip(null),
+  });
+
   const navBtnStyle = (tabKey, activeColor = '#059669') => ({
     width: '100%',
     display: 'flex',
@@ -3041,27 +3052,27 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
           <Building2 size={22} style={{ color: '#10b981', flexShrink: 0 }} />
           {!sidebarCollapsed && <span style={{ fontSize: '17px', fontWeight: 'bold', whiteSpace: 'nowrap' }}>A&A Partners CRM</span>}
         </div>
-        <nav style={{ padding: sidebarCollapsed ? '12px 4px' : '12px', display: 'flex', flexDirection: 'column', gap: '4px', flex: 1, minHeight: 0, overflowY: 'auto' }}>
+        <nav onScroll={() => setNavTooltip(null)} style={{ padding: sidebarCollapsed ? '12px 4px' : '12px', display: 'flex', flexDirection: 'column', gap: '4px', flex: 1, minHeight: 0, overflowY: 'auto' }}>
           {(() => {
             const isAdmin = user.role === 'Admin';
             const allowed = isAdmin ? null : (user.allowedTabs || []);
             const can = (tab) => isAdmin || allowed.includes(tab);
-            const go = (tab) => { setActiveTab(tab); setCurrentViewProperty(null); setCurrentViewCompany(null); setCurrentViewContact(null); setMobileMenuOpen(false); };
+            const go = (tab) => { setActiveTab(tab); setCurrentViewProperty(null); setCurrentViewCompany(null); setCurrentViewContact(null); setMobileMenuOpen(false); setNavTooltip(null); };
             return (
               <>
-                {can('dashboard') && <button onClick={() => go('dashboard')} style={navBtnStyle('dashboard')}><LayoutDashboard size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Dashboard</span>}</button>}
-                {can('pipeline') && <button onClick={() => go('pipeline')} style={navBtnStyle('pipeline')}><MapPin size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Auction Pipeline</span>}</button>}
-                {can('scraper') && <button onClick={() => go('scraper')} style={navBtnStyle('scraper')}><Calendar size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Auction Triage {unreviewedScrapedCount > 0 && <span style={{ marginLeft: '4px', background: '#f87171', color: '#fff', borderRadius: '8px', fontSize: '10px', padding: '1px 5px' }}>{unreviewedScrapedCount}</span>}</span>}</button>}
-                {can('surveyors') && <button onClick={() => go('surveyors')} style={navBtnStyle('surveyors')}><ClipboardList size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Surveyor Intel</span>}</button>}
-                {can('auctionintel') && <button onClick={() => go('auctionintel')} style={navBtnStyle('auctionintel')}><TrendingUp size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Auction Intel</span>}</button>}
-                {can('dealanalysis') && <button onClick={() => go('dealanalysis')} style={navBtnStyle('dealanalysis', '#7C3AED')}><BarChart2 size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Deal Analysis</span>}</button>}
-                {can('portfolio') && <button onClick={() => go('portfolio')} style={navBtnStyle('portfolio', '#059669')}><DollarSign size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Portfolio</span>}</button>}
+                {can('dashboard') && <button onClick={() => go('dashboard')} {...navTipProps('Dashboard')} style={navBtnStyle('dashboard')}><LayoutDashboard size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Dashboard</span>}</button>}
+                {can('pipeline') && <button onClick={() => go('pipeline')} {...navTipProps('Auction Pipeline')} style={navBtnStyle('pipeline')}><MapPin size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Auction Pipeline</span>}</button>}
+                {can('scraper') && <button onClick={() => go('scraper')} {...navTipProps('Auction Triage')} style={navBtnStyle('scraper')}><Calendar size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Auction Triage {unreviewedScrapedCount > 0 && <span style={{ marginLeft: '4px', background: '#f87171', color: '#fff', borderRadius: '8px', fontSize: '10px', padding: '1px 5px' }}>{unreviewedScrapedCount}</span>}</span>}</button>}
+                {can('surveyors') && <button onClick={() => go('surveyors')} {...navTipProps('Surveyor Intel')} style={navBtnStyle('surveyors')}><ClipboardList size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Surveyor Intel</span>}</button>}
+                {can('auctionintel') && <button onClick={() => go('auctionintel')} {...navTipProps('Auction Intel')} style={navBtnStyle('auctionintel')}><TrendingUp size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Auction Intel</span>}</button>}
+                {can('dealanalysis') && <button onClick={() => go('dealanalysis')} {...navTipProps('Deal Analysis')} style={navBtnStyle('dealanalysis', '#7C3AED')}><BarChart2 size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Deal Analysis</span>}</button>}
+                {can('portfolio') && <button onClick={() => go('portfolio')} {...navTipProps('Portfolio')} style={navBtnStyle('portfolio', '#059669')}><DollarSign size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Portfolio</span>}</button>}
                 <div style={{ margin: '8px 0 0', borderTop: '1px solid #1e293b', paddingTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                  {can('companies') && <button onClick={() => go('companies')} style={{ ...navBtnStyle('companies', '#0284c7'), color: '#ffffff' }}><Briefcase size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Companies</span>}</button>}
-                  {can('contacts') && <button onClick={() => go('contacts')} style={{ ...navBtnStyle('contacts', '#0284c7'), color: '#ffffff' }}><Contact size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Contacts</span>}</button>}
-                  {can('tasks') && <button onClick={() => go('tasks')} style={{ ...navBtnStyle('tasks', '#d97706'), color: '#ffffff' }}><ClipboardList size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Tasks</span>}</button>}
-                  {can('refurb') && <button onClick={() => go('refurb')} style={{ ...navBtnStyle('refurb', '#b45309'), color: '#ffffff' }}><Briefcase size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Refurb Quotes</span>}</button>}
-                  {can('spec') && <button onClick={() => go('spec')} style={{ ...navBtnStyle('spec', '#b45309'), color: '#ffffff' }}><ClipboardList size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Spec Builder</span>}</button>}
+                  {can('companies') && <button onClick={() => go('companies')} {...navTipProps('Companies')} style={{ ...navBtnStyle('companies', '#0284c7'), color: '#ffffff' }}><Briefcase size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Companies</span>}</button>}
+                  {can('contacts') && <button onClick={() => go('contacts')} {...navTipProps('Contacts')} style={{ ...navBtnStyle('contacts', '#0284c7'), color: '#ffffff' }}><Contact size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Contacts</span>}</button>}
+                  {can('tasks') && <button onClick={() => go('tasks')} {...navTipProps('Tasks')} style={{ ...navBtnStyle('tasks', '#d97706'), color: '#ffffff' }}><ClipboardList size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Tasks</span>}</button>}
+                  {can('refurb') && <button onClick={() => go('refurb')} {...navTipProps('Refurb Quotes')} style={{ ...navBtnStyle('refurb', '#b45309'), color: '#ffffff' }}><Briefcase size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Refurb Quotes</span>}</button>}
+                  {can('spec') && <button onClick={() => go('spec')} {...navTipProps('Spec Builder')} style={{ ...navBtnStyle('spec', '#b45309'), color: '#ffffff' }}><ClipboardList size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Spec Builder</span>}</button>}
                 </div>
               </>
             );
@@ -3089,7 +3100,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
             };
             return (
               <div style={{ position: 'relative', marginBottom: '8px' }}>
-                <button onClick={() => { setShowNotifPanel(p => !p); if (!showNotifPanel) loadServerAlerts(); }} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: (sidebarCollapsed && !isMobile) ? '0' : '11px', padding: (sidebarCollapsed && !isMobile) ? '8px 0' : '8px 14px', justifyContent: (sidebarCollapsed && !isMobile) ? 'center' : 'flex-start', border: 'none', backgroundColor: showNotifPanel ? '#334155' : 'transparent', color: '#94a3b8', cursor: 'pointer', borderRadius: '8px', position: 'relative', marginBottom: '4px' }}>
+                <button onClick={() => { setShowNotifPanel(p => !p); if (!showNotifPanel) loadServerAlerts(); }} {...navTipProps('Alerts')} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: (sidebarCollapsed && !isMobile) ? '0' : '11px', padding: (sidebarCollapsed && !isMobile) ? '8px 0' : '8px 14px', justifyContent: (sidebarCollapsed && !isMobile) ? 'center' : 'flex-start', border: 'none', backgroundColor: showNotifPanel ? '#334155' : 'transparent', color: '#94a3b8', cursor: 'pointer', borderRadius: '8px', position: 'relative', marginBottom: '4px' }}>
                   <span style={{ position: 'relative', display: 'inline-flex', flexShrink: 0 }}>
                     <Bell size={18} />
                     {notifCount > 0 && <span style={{ position: 'absolute', top: '-5px', right: '-6px', background: '#ef4444', color: '#fff', borderRadius: '8px', fontSize: '10px', fontWeight: '700', padding: '1px 4px', lineHeight: 1.2 }}>{notifCount}</span>}
@@ -3142,17 +3153,22 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
               </div>
             );
           })()}
-          {!isMobile && <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)} style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '8px', border: 'none', backgroundColor: '#1e293b', color: '#94a3b8', cursor: 'pointer', borderRadius: '8px', marginBottom: '6px' }}>
+          {!isMobile && <button onClick={() => { setSidebarCollapsed(!sidebarCollapsed); setNavTooltip(null); }} {...navTipProps(sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar')} style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '8px', border: 'none', backgroundColor: '#1e293b', color: '#94a3b8', cursor: 'pointer', borderRadius: '8px', marginBottom: '6px' }}>
             {sidebarCollapsed ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
           </button>}
-          <button onClick={() => { setActiveTab('settings'); setCurrentViewProperty(null); setCurrentViewCompany(null); setCurrentViewContact(null); setMobileMenuOpen(false); }} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: (sidebarCollapsed && !isMobile) ? '0' : '11px', padding: (sidebarCollapsed && !isMobile) ? '9px 0' : '9px 14px', justifyContent: (sidebarCollapsed && !isMobile) ? 'center' : 'flex-start', borderRadius: '8px', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '13.5px', fontWeight: '500', backgroundColor: activeTab === 'settings' ? '#334155' : 'transparent', color: activeTab === 'settings' ? '#ffffff' : '#94a3b8' }}>
+          <button onClick={() => { setActiveTab('settings'); setCurrentViewProperty(null); setCurrentViewCompany(null); setCurrentViewContact(null); setMobileMenuOpen(false); }} {...navTipProps('Settings')} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: (sidebarCollapsed && !isMobile) ? '0' : '11px', padding: (sidebarCollapsed && !isMobile) ? '9px 0' : '9px 14px', justifyContent: (sidebarCollapsed && !isMobile) ? 'center' : 'flex-start', borderRadius: '8px', border: 'none', cursor: 'pointer', textAlign: 'left', fontSize: '13.5px', fontWeight: '500', backgroundColor: activeTab === 'settings' ? '#334155' : 'transparent', color: activeTab === 'settings' ? '#ffffff' : '#94a3b8' }}>
             <Settings size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Settings</span>}
           </button>
-          <button onClick={onLogout} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: (sidebarCollapsed && !isMobile) ? '0' : '11px', padding: (sidebarCollapsed && !isMobile) ? '8px 0' : '8px 14px', justifyContent: (sidebarCollapsed && !isMobile) ? 'center' : 'flex-start', border: 'none', backgroundColor: 'transparent', color: '#94a3b8', cursor: 'pointer', fontSize: '13.5px' }}>
+          <button onClick={onLogout} {...navTipProps('Log Out')} style={{ width: '100%', display: 'flex', alignItems: 'center', gap: (sidebarCollapsed && !isMobile) ? '0' : '11px', padding: (sidebarCollapsed && !isMobile) ? '8px 0' : '8px 14px', justifyContent: (sidebarCollapsed && !isMobile) ? 'center' : 'flex-start', border: 'none', backgroundColor: 'transparent', color: '#94a3b8', cursor: 'pointer', fontSize: '13.5px' }}>
             <LogOut size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Log Out</span>}
           </button>
         </div>
       </aside>
+      {navTooltip && sidebarCollapsed && !isMobile && (
+        <div style={{ position: 'fixed', left: '68px', top: navTooltip.top, transform: 'translateY(-50%)', background: '#1e293b', border: '1px solid #334155', color: '#f1f5f9', padding: '5px 10px', borderRadius: '6px', fontSize: '12px', fontWeight: '500', whiteSpace: 'nowrap', zIndex: 600, pointerEvents: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.3)' }}>
+          {navTooltip.label}
+        </div>
+      )}
 
       {/* CORE DISPLAY WORKSPACE SHELL */}
       <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minWidth: 0 }}>
