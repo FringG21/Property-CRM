@@ -97,6 +97,19 @@ npm run build
 npx wrangler deploy
 Always build and deploy after changes. The chunk size warning is expected and harmless.
 
+- **Validate before deploying binding changes:** `npx wrangler deploy --dry-run --outdir .wrangler-dryrun` bundles the worker and resolves all bindings without touching the account. Run it after any `wrangler.jsonc` edit. (`.wrangler-dryrun` is gitignored.)
+- **Commit before you deploy**, or immediately after verifying, so `main` always reflects what is live. Keep commits atomic — check `git status` before starting so pre-existing edits don't get folded into a feature commit. This repo deploys direct from `main`; branch only for infra/binding changes you may want to review or revert.
+
+## Cloudflare deployment learnings (2026-07-09, semantic search build)
+- **Vectorize / new resources must exist before deploy.** A `vectorize` (or any) binding that points at a non-existent resource makes `wrangler deploy` fail. Create the resource first: `npx wrangler vectorize create <name> --dimensions=768 --metric=cosine`.
+- **Metadata indexes are required for `filter` queries and are async.** You can only `VECTORIZE.query(..., { filter: { field } })` on fields that have a metadata index (`wrangler vectorize create-metadata-index <idx> --property-name=<field> --type=string`). Creation is *enqueued* and takes a few minutes to activate — filtered queries won't work until then. We index on `userId` and `propertyId`.
+- **Text extraction in a Worker = `env.AI.toMarkdown([{ name, blob }])`.** Handles PDF/docx/images (with OCR). Tesseract/PaddleOCR/ReportLab/Puppeteer/any Python do **not** run in the Workers runtime — don't reach for them.
+- **Embedding model:** `@cf/baai/bge-base-en-v1.5` → 768 dims, cosine. Batch up to ~50 chunks per `AI.run` call.
+- **A File/stream can only be read once.** The upload route buffers to `arrayBuffer()` (capped at 20MB) when indexing so the same bytes feed both `CRM_DOCS.put` and the indexer; larger/other files still stream straight to R2.
+- **`fetch(request, env, ctx)`** — `ctx` was added to the signature so background indexing can run via `ctx.waitUntil()` without delaying the upload response.
+- **New pipelines don't touch old data.** Documents uploaded before indexing existed need a one-off backfill (`POST /api/search/reindex`, "Index docs" button). Assume any "process on write" feature needs a matching reindex/backfill path for existing records.
+- **Workers AI + Vectorize are billed beyond free daily allowances** — keep chunk counts bounded (we cap at 80 chunks/doc).
+
 ## Rules
 1. Read a function fully before editing it
 2. Do not remove existing fields from any list (reportFields, connector results, etc.)
