@@ -6974,12 +6974,16 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 const clearCoFilters = () => { setCompanySort('newest'); setCompanySearchType('ALL'); setCompanySearchTier('ALL'); setCompanySearchCity('ALL'); setCompanyHasContacts('ANY'); setCompanyHasProperties('ANY'); setCompanyPropCount('ANY'); setCompanyLastActivity('ANY'); setCompanyDateAdded('ANY'); setCompanySearchQuery(''); setCompanyQuickKeyRel(false); setCompanyQuickInactive(false); setCompanyQuickOpenProps(false); };
                 return (
                   <div style={{ display: 'flex', gap: '0', flexDirection: isMobile ? 'column' : 'row', minHeight: 0, flex: '1 1 0', overflow: 'hidden', backgroundColor: '#ffffff', borderRadius: isMobile ? '8px' : '12px', border: '1px solid #e2e8f0' }}>
-                    {/* Left list */}
-                    <div style={{ width: isMobile ? '100%' : '260px', maxHeight: isMobile ? (currentViewCompany ? '0' : '100%') : 'none', overflow: isMobile ? 'hidden' : 'visible', display: isMobile && currentViewCompany ? 'none' : 'flex', borderRight: isMobile ? 'none' : '1px solid #e2e8f0', borderBottom: isMobile ? '1px solid #e2e8f0' : 'none', flexDirection: 'column', flexShrink: 0 }}>
-                      <div style={{ padding: '8px 10px', borderBottom: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                        <div style={{ position: 'relative' }}>
-                          <Search size={13} style={{ position: 'absolute', top: '9px', left: '9px', color: '#94a3b8' }} />
-                          <input placeholder="Search companies..." value={companySearchQuery} onChange={e => setCompanySearchQuery(e.target.value)} style={{ width: '100%', padding: '7px 7px 7px 28px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', boxSizing: 'border-box', backgroundColor: '#f8fafc' }} />
+                    {/* Full-width list / new form / record view */}
+                    {!currentViewCompany ? (
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+                      <div style={{ padding: '10px 12px', borderBottom: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                          <div style={{ position: 'relative', flex: 1, maxWidth: isMobile ? 'none' : '340px' }}>
+                            <Search size={13} style={{ position: 'absolute', top: '9px', left: '9px', color: '#94a3b8' }} />
+                            <input placeholder="Search companies..." value={companySearchQuery} onChange={e => setCompanySearchQuery(e.target.value)} style={{ width: '100%', padding: '7px 7px 7px 28px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', boxSizing: 'border-box', backgroundColor: '#f8fafc' }} />
+                          </div>
+                          <button onClick={() => setCurrentViewCompany({ _new: true })} style={{ marginLeft: 'auto', padding: '8px 14px', backgroundColor: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '12px', fontWeight: '600', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}>+ New company</button>
                         </div>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '4px', overflowX: 'auto', flexWrap: 'nowrap', paddingBottom: '1px' }}>
                           <div style={lp(companySort !== 'newest')}>
@@ -7088,41 +7092,73 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                           )}
                         </div>
                       </div>
-                      <div style={{ flex: 1, overflowY: 'auto' }}>
-                        {filteredCompanies.map(c => {
-                          const tc = typeColour(c.type);
-                          const conCount = contacts.filter(con => con.companyId === c.id).length;
-                          const propCount = properties.filter(p => (p.linkedCompanyIds || []).includes(c.id)).length;
-                          const lastNote = globalNotes.filter(n => n.targetType === 'Company' && n.targetId === c.id).sort((a, b) => b.date.localeCompare(a.date))[0]?.date || '';
-                          const isRecent = lastNote && Math.floor((new Date() - new Date(lastNote)) / 86400000) <= 7;
-                          return (
-                            <div key={c.id} onClick={() => { setCurrentViewCompany(c); setCompanyDetailTab('overview'); }} style={{ padding: '10px 12px', cursor: 'pointer', borderBottom: '1px solid #f1f5f9', backgroundColor: currentViewCompany?.id === c.id ? '#f0fdf4' : '#ffffff', borderLeft: currentViewCompany?.id === c.id ? '3px solid #059669' : '3px solid transparent' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px' }}>
-                                <div style={{ fontSize: '13px', fontWeight: '600', color: '#0f172a', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</div>
-                                {c.tier && <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', backgroundColor: c.tier === 'Gold' ? '#fef3c7' : c.tier === 'Silver' ? '#f1f5f9' : '#fdf6ec', color: c.tier === 'Gold' ? '#92400e' : c.tier === 'Silver' ? '#475569' : '#9a3412', fontWeight: '600', flexShrink: 0 }}>{c.tier}</span>}
+                      {isMobile ? (
+                        <div style={{ flex: 1, overflowY: 'auto' }}>
+                          {filteredCompanies.map(c => {
+                            const tc = typeColour(c.type);
+                            const conCount = contacts.filter(con => con.companyId === c.id).length;
+                            const propCount = properties.filter(p => (p.linkedCompanyIds || []).includes(c.id)).length;
+                            const lastNote = globalNotes.filter(n => n.targetType === 'Company' && n.targetId === c.id).sort((a, b) => b.date.localeCompare(a.date))[0]?.date || '';
+                            const isRecent = lastNote && Math.floor((new Date() - new Date(lastNote)) / 86400000) <= 7;
+                            return (
+                              <div key={c.id} onClick={() => { setCurrentViewCompany(c); setCompanyDetailTab('overview'); }} style={{ padding: '12px', cursor: 'pointer', borderBottom: '1px solid #f1f5f9', backgroundColor: '#ffffff' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px' }}>
+                                  <div style={{ fontSize: '14px', fontWeight: '600', color: '#0f172a', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</div>
+                                  {c.tier && <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', backgroundColor: c.tier === 'Gold' ? '#fef3c7' : c.tier === 'Silver' ? '#f1f5f9' : '#fdf6ec', color: c.tier === 'Gold' ? '#92400e' : c.tier === 'Silver' ? '#475569' : '#9a3412', fontWeight: '600', flexShrink: 0 }}>{c.tier}</span>}
+                                </div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginTop: '3px', flexWrap: 'wrap' }}>
+                                  <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', backgroundColor: tc.bg, color: tc.color, fontWeight: '600' }}>{c.type}</span>
+                                  {conCount > 0 && <span style={{ fontSize: '10px', color: '#94a3b8' }}>{conCount} con</span>}
+                                  {propCount > 0 && <span style={{ fontSize: '10px', color: '#94a3b8' }}>{propCount} prop{propCount !== 1 ? 's' : ''}</span>}
+                                </div>
+                                {lastNote && <div style={{ fontSize: '10px', color: isRecent ? '#059669' : '#94a3b8', marginTop: '2px' }}>{isRecent ? '● ' : ''}{lastNote}</div>}
                               </div>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginTop: '3px', flexWrap: 'wrap' }}>
-                                <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', backgroundColor: tc.bg, color: tc.color, fontWeight: '600' }}>{c.type}</span>
-                                {conCount > 0 && <span style={{ fontSize: '10px', color: '#94a3b8' }}>{conCount} con</span>}
-                                {propCount > 0 && <span style={{ fontSize: '10px', color: '#94a3b8' }}>{propCount} prop{propCount !== 1 ? 's' : ''}</span>}
-                              </div>
-                              {lastNote && <div style={{ fontSize: '10px', color: isRecent ? '#059669' : '#94a3b8', marginTop: '2px' }}>{isRecent ? '● ' : ''}{lastNote}</div>}
-                            </div>
-                          );
-                        })}
-                      </div>
-                      <div style={{ padding: '10px', borderTop: '1px solid #e2e8f0' }}>
-                        <button onClick={() => setCurrentViewCompany({ _new: true })} style={{ width: '100%', padding: '8px', border: '1px dashed #e2e8f0', borderRadius: '6px', backgroundColor: '#f8fafc', fontSize: '12px', color: '#64748b', cursor: 'pointer' }}>+ New company</button>
-                      </div>
+                            );
+                          })}
+                          {filteredCompanies.length === 0 && <div style={{ padding: '32px', textAlign: 'center', color: '#94a3b8', fontSize: '13px' }}>No companies match the current filters</div>}
+                        </div>
+                      ) : (
+                        <div style={{ flex: 1, overflowY: 'auto' }} className="crm-table-wrap">
+                          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', minWidth: '760px' }}>
+                            <thead>
+                              <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0', position: 'sticky', top: 0, zIndex: 1 }}>
+                                {['Name', 'Type', 'City', 'Phone', 'Contacts', 'Properties', 'Last activity', 'Added'].map(h => (
+                                  <th key={h} style={{ padding: '10px 14px', textAlign: ['Contacts', 'Properties'].includes(h) ? 'center' : 'left', fontWeight: '600', color: '#64748b', fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.05em', backgroundColor: '#f8fafc' }}>{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {filteredCompanies.map(c => {
+                                const tc = typeColour(c.type);
+                                const conCount = contacts.filter(con => con.companyId === c.id).length;
+                                const propCount = properties.filter(p => (p.linkedCompanyIds || []).includes(c.id)).length;
+                                const lastNote = globalNotes.filter(n => n.targetType === 'Company' && n.targetId === c.id).sort((a, b) => b.date.localeCompare(a.date))[0]?.date || '';
+                                const isRecent = lastNote && Math.floor((new Date() - new Date(lastNote)) / 86400000) <= 7;
+                                return (
+                                  <tr key={c.id} onClick={() => { setCurrentViewCompany(c); setCompanyDetailTab('overview'); }} style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer' }} onMouseEnter={e => e.currentTarget.style.backgroundColor = '#f8fafc'} onMouseLeave={e => e.currentTarget.style.backgroundColor = ''}>
+                                    <td style={{ padding: '10px 14px' }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                        <div style={{ width: '28px', height: '28px', borderRadius: '8px', backgroundColor: tc.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: '700', color: tc.color, flexShrink: 0 }}>{(c.name || '?')[0]}</div>
+                                        <span style={{ fontWeight: '600', color: '#0f172a' }}>{c.name}</span>
+                                        {c.tier && <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', backgroundColor: c.tier === 'Gold' ? '#fef3c7' : c.tier === 'Silver' ? '#f1f5f9' : '#fdf6ec', color: c.tier === 'Gold' ? '#92400e' : c.tier === 'Silver' ? '#475569' : '#9a3412', fontWeight: '600' }}>{c.tier}</span>}
+                                      </div>
+                                    </td>
+                                    <td style={{ padding: '10px 14px' }}><span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', backgroundColor: tc.bg, color: tc.color, fontWeight: '600' }}>{c.type}</span></td>
+                                    <td style={{ padding: '10px 14px', color: '#475569' }}>{c.city && c.city !== '--' ? c.city : '—'}</td>
+                                    <td style={{ padding: '10px 14px', color: '#475569' }}>{c.phone || '—'}</td>
+                                    <td style={{ padding: '10px 14px', textAlign: 'center', color: conCount ? '#0f172a' : '#cbd5e1', fontWeight: conCount ? '600' : '400' }}>{conCount || '—'}</td>
+                                    <td style={{ padding: '10px 14px', textAlign: 'center', color: propCount ? '#0f172a' : '#cbd5e1', fontWeight: propCount ? '600' : '400' }}>{propCount || '—'}</td>
+                                    <td style={{ padding: '10px 14px', color: isRecent ? '#059669' : '#94a3b8' }}>{lastNote ? `${isRecent ? '● ' : ''}${lastNote}` : '—'}</td>
+                                    <td style={{ padding: '10px 14px', color: '#94a3b8' }}>{c.createdDate || '—'}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                          {filteredCompanies.length === 0 && <div style={{ padding: '32px', textAlign: 'center', color: '#94a3b8', fontSize: '13px' }}>No companies match the current filters</div>}
+                        </div>
+                      )}
                     </div>
-
-                    {/* Right detail / empty / add form */}
-                    {!currentViewCompany ? (
-                      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: '8px', color: '#94a3b8' }}>
-                        <Briefcase size={32} style={{ opacity: 0.3 }} />
-                        <div style={{ fontSize: '14px', fontWeight: '500' }}>Select a company</div>
-                        <div style={{ fontSize: '12px' }}>or click + New company below the list</div>
-                      </div>
                     ) : currentViewCompany._new ? (
                       <div style={{ flex: 1, padding: '24px', overflowY: 'auto' }}>
                         <div style={{ fontSize: '15px', fontWeight: '600', marginBottom: '20px', color: '#0f172a' }}>New company</div>
