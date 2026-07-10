@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "property-crm-dev",
-      "runtimeExecutable": "npx",
-      "runtimeArgs": ["wrangler", "dev", "--port", "8787"],
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["node_modules/wrangler/bin/wrangler.js", "dev", "--port", "8787"],
       "port": 8787
     }
   ]
