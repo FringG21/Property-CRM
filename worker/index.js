@@ -1657,6 +1657,235 @@ async function connectorIMD(lsoaCode) {
   };
 }
 
+// ── Shared ArcGIS point-query helper (coal / radon / landfill) ───────────────
+async function arcgisPointQuery(layerUrl, lat, lng, outFields, distanceM) {
+  const params = new URLSearchParams({
+    where: '1=1',
+    geometry: JSON.stringify({ x: lng, y: lat }),
+    geometryType: 'esriGeometryPoint',
+    inSR: '4326',
+    spatialRel: 'esriSpatialRelIntersects',
+    outFields: outFields || '*',
+    returnGeometry: 'false',
+    f: 'json',
+  });
+  if (distanceM) { params.set('distance', String(distanceM)); params.set('units', 'esriSRUnit_Meter'); }
+  const res = await fetch(`${layerUrl}/query?${params.toString()}`, { signal: AbortSignal.timeout(10000) });
+  if (!res.ok) throw new Error(`ArcGIS HTTP ${res.status}`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || 'ArcGIS query error');
+  return (data.features || []).map(f => f.attributes);
+}
+
+// ── Coal mining legacy (Mining Remediation Authority open data, free) ────────
+const COAL_ARCGIS = 'https://services-eu1.arcgis.com/Qn4lKcPDVHNivEyr/arcgis/rest/services';
+async function connectorCoal(lat, lng) {
+  const [field, high, highNear, low] = await Promise.allSettled([
+    arcgisPointQuery(`${COAL_ARCGIS}/Coalfield_Consultation_Areas/FeatureServer/0`, lat, lng, 'TYPE'),
+    arcgisPointQuery(`${COAL_ARCGIS}/DevelopmentHighRiskArea/FeatureServer/0`, lat, lng, 'FEATURE_TY'),
+    arcgisPointQuery(`${COAL_ARCGIS}/DevelopmentHighRiskArea/FeatureServer/0`, lat, lng, 'FEATURE_TY', 500),
+    arcgisPointQuery(`${COAL_ARCGIS}/DevelopmentLowRiskArea/FeatureServer/0`, lat, lng, 'FEATURE_TY'),
+  ]);
+  if (field.status !== 'fulfilled' && high.status !== 'fulfilled') throw new Error('Coal Authority services unreachable');
+  const ok = r => (r.status === 'fulfilled' ? r.value : []);
+  const inCoalfield = ok(field).length > 0;
+  const highRisk = ok(high).length > 0;
+  const highRiskWithin500m = ok(highNear).length;
+  const lowRisk = ok(low).length > 0;
+  return {
+    inCoalfield,
+    coalfieldType: ok(field)[0]?.TYPE || null,
+    highRisk,
+    highRiskWithin500m,
+    lowRisk,
+    riskLevel: highRisk ? 'High' : highRiskWithin500m > 0 ? 'Elevated' : inCoalfield ? 'Low' : 'None',
+    note: highRisk
+      ? 'In a Development High Risk Area — recorded coal mining features at/near surface; obtain a Coal Authority mining report before bidding'
+      : highRiskWithin500m > 0
+        ? `Development High Risk Area within 500m (${highRiskWithin500m} feature area${highRiskWithin500m > 1 ? 's' : ''})`
+        : inCoalfield
+          ? 'In the coalfield but no recorded high-risk features at this location'
+          : 'Not in a coal mining reporting area',
+  };
+}
+
+// ── Radon potential (UKHSA/BGS indicative atlas v3, free) ────────────────────
+async function connectorRadon(lat, lng) {
+  const rows = await arcgisPointQuery(
+    'https://services3.arcgis.com/7bJVHfju2RXdGZa4/arcgis/rest/services/Radon_Indicative_Atlas_v3/FeatureServer/0',
+    lat, lng, 'CLASS_MAX',
+  );
+  if (!rows.length) throw new Error('No radon atlas coverage at this location');
+  const cls = rows[0].CLASS_MAX || 1;
+  const BAND = { 1: 'less than 1%', 2: '1–3%', 3: '3–5%', 4: '5–10%', 5: '10–30%', 6: '30% or more' };
+  return {
+    radonClass: cls,
+    homesAffectedBand: BAND[cls] || 'unknown',
+    affectedArea: cls >= 2,
+    testingAdvised: cls >= 3,
+    note: cls >= 3
+      ? `Radon affected area — class ${cls}/6, ${BAND[cls]} of homes above action level; testing advised`
+      : cls === 2
+        ? 'Marginal radon potential (1–3% of homes above action level)'
+        : 'Low radon potential (below 1% of homes)',
+  };
+}
+
+// ── Historic landfill proximity (Environment Agency, free) ───────────────────
+async function connectorLandfill(lat, lng) {
+  const base = 'https://environment.data.gov.uk/arcgis/rest/services/EA/HistoricLandfill/FeatureServer/0';
+  const [onSiteR, nearR] = await Promise.allSettled([
+    arcgisPointQuery(base, lat, lng, 'hld_ref,site_name', 50),
+    arcgisPointQuery(base, lat, lng, 'hld_ref,site_name,last_input_date', 500),
+  ]);
+  if (onSiteR.status !== 'fulfilled' && nearR.status !== 'fulfilled') throw new Error('EA landfill service unreachable');
+  const onSite = onSiteR.status === 'fulfilled' ? onSiteR.value : [];
+  const near = nearR.status === 'fulfilled' ? nearR.value : [];
+  return {
+    onFormerLandfill: onSite.length > 0,
+    sitesWithin500m: near.length,
+    siteNames: [...new Set(near.map(s => s.site_name).filter(Boolean))].slice(0, 5),
+    note: onSite.length > 0
+      ? `On or within 50m of a historic landfill (${onSite[0].site_name || onSite[0].hld_ref}) — contamination/ground gas risk, expect lender scrutiny`
+      : near.length > 0
+        ? `${near.length} historic landfill site(s) within 500m`
+        : 'No historic landfill within 500m',
+  };
+}
+
+// ── Road/rail noise (Defra strategic noise mapping Round 3, free) ────────────
+async function connectorNoise(lat, lng) {
+  const d = 0.0015;
+  const bbox = `${lng - d},${lat - d},${lng + d},${lat + d}`;
+  const getBands = async (slug, coll) => {
+    const res = await fetch(
+      `https://environment.data.gov.uk/spatialdata/${slug}/ogc/features/v1/collections/${coll}/items?bbox=${bbox}&limit=25&f=json`,
+      { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) },
+    );
+    if (!res.ok) throw new Error(`Noise HTTP ${res.status}`);
+    const data = await res.json();
+    return (data.features || []).map(f => f.properties?.noiseclass).filter(Boolean);
+  };
+  const bandRank = c => (c.startsWith('>=75') ? 5 : parseInt(c) >= 70 ? 4 : parseInt(c) >= 65 ? 3 : parseInt(c) >= 60 ? 2 : 1);
+  const [roadR, railR] = await Promise.allSettled([
+    getBands('road-noise-lden-england-round-3', 'Road_Noise_Lden_England_Round_3'),
+    getBands('rail-noise-lden-england-round-3', 'Rail_Noise_Lden_England_Round_3'),
+  ]);
+  if (roadR.status !== 'fulfilled' && railR.status !== 'fulfilled') throw new Error('Defra noise services unreachable');
+  const top = arr => (arr.length ? [...arr].sort((a, b) => bandRank(b) - bandRank(a))[0] : null);
+  const road = roadR.status === 'fulfilled' ? top(roadR.value) : null;
+  const rail = railR.status === 'fulfilled' ? top(railR.value) : null;
+  const worst = [road, rail].filter(Boolean).sort((a, b) => bandRank(b) - bandRank(a))[0] || null;
+  return {
+    roadNoiseBand: road,
+    railNoiseBand: rail,
+    quiet: !worst,
+    highNoise: worst ? bandRank(worst) >= 3 : false,
+    note: !worst
+      ? 'No mapped road/rail noise above 55 dB Lden within ~150m'
+      : `Mapped ${road && rail ? 'road and rail' : road ? 'road' : 'rail'} noise ${worst} dB Lden within ~150m (Defra 2017 mapping)`,
+  };
+}
+
+// ── Live planning applications nearby (PlanIt, free) ─────────────────────────
+async function connectorPlanIt(lat, lng) {
+  const res = await fetch(
+    `https://www.planit.org.uk/api/applics/json?krad=0.25&lat=${lat}&lng=${lng}&recent=548&pg_sz=20`,
+    { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(12000) },
+  );
+  if (!res.ok) throw new Error(`PlanIt HTTP ${res.status}`);
+  const data = await res.json();
+  const recs = data.records || [];
+  const apps = recs.map(r => ({
+    name: r.name || '',
+    address: r.address || '',
+    description: (r.description || '').slice(0, 160),
+    type: r.app_type || '',
+    size: r.app_size || '',
+    state: r.app_state || '',
+    decidedDate: r.decided_date || null,
+    distanceKm: r.distance != null ? Math.round(r.distance * 100) / 100 : null,
+    link: r.link || '',
+  }));
+  const count = s => apps.filter(a => a.state === s).length;
+  return {
+    totalNearby: data.total != null ? data.total : apps.length,
+    permitted: count('Permitted'),
+    rejected: count('Rejected'),
+    undecided: count('Undecided'),
+    withdrawn: count('Withdrawn'),
+    apps: apps.slice(0, 8),
+    note: apps.length === 0
+      ? 'No planning applications within 250m in the last 18 months'
+      : `${apps.length} planning application(s) within 250m in the last 18 months`,
+  };
+}
+
+// ── Bank of England Bank Rate (IADB CSV, free; KV-cached 24h) ────────────────
+async function connectorRates(env) {
+  const CACHE_KEY = 'boe-bank-rate-cache';
+  try {
+    const cached = await env.SCRAPER_KV.get(CACHE_KEY, 'json');
+    if (cached && Date.now() - cached.cachedAt < 24 * 3600 * 1000) return cached.data;
+  } catch (e) {}
+  const from = new Date(Date.now() - 400 * 24 * 3600 * 1000);
+  const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const fromStr = `${String(from.getDate()).padStart(2, '0')}/${MON[from.getMonth()]}/${from.getFullYear()}`;
+  // The IADB endpoint intermittently returns 500 — retry once before failing
+  const boeUrl = `https://www.bankofengland.co.uk/boeapps/iadb/fromshowcolumns.asp?csv.x=yes&Datefrom=${fromStr}&Dateto=now&SeriesCodes=IUDBEDR&CSVF=TN&UsingCodes=Y&VPD=Y&VFD=N`;
+  let res = await fetch(boeUrl, { headers: { Accept: 'text/csv,*/*' }, signal: AbortSignal.timeout(15000) });
+  if (!res.ok) {
+    await new Promise(r => setTimeout(r, 1500));
+    res = await fetch(boeUrl, { headers: { Accept: 'text/csv,*/*' }, signal: AbortSignal.timeout(15000) });
+  }
+  if (!res.ok) throw new Error(`BoE HTTP ${res.status}`);
+  const csv = await res.text();
+  const rows = csv.trim().split('\n').slice(1)
+    .map(l => { const [dt, v] = l.trim().split(','); return { date: dt, rate: parseFloat(v) }; })
+    .filter(r => r.date && !isNaN(r.rate));
+  if (!rows.length) throw new Error('No BoE rate data');
+  const current = rows[rows.length - 1];
+  const yearAgo = rows[0];
+  const data = {
+    baseRate: current.rate,
+    asOf: current.date,
+    baseRate12mAgo: yearAgo.rate,
+    change12m: Math.round((current.rate - yearAgo.rate) * 100) / 100,
+    trend: current.rate < yearAgo.rate ? 'falling' : current.rate > yearAgo.rate ? 'rising' : 'flat',
+  };
+  try { await env.SCRAPER_KV.put(CACHE_KEY, JSON.stringify({ cachedAt: Date.now(), data }), { expirationTtl: 48 * 3600 }); } catch (e) {}
+  return data;
+}
+
+// ── Ofcom Connected Nations broadband coverage (free API key required) ───────
+async function connectorBroadband(postcode, env) {
+  if (!env.OFCOM_API_KEY) throw new Error('OFCOM_API_KEY not configured');
+  const pc = postcode.replace(/\s+/g, '');
+  const res = await fetch(
+    `https://api-proxy.ofcom.org.uk/broadband/coverage/${encodeURIComponent(pc)}`,
+    { headers: { 'Ofcom-API-Key': env.OFCOM_API_KEY, Accept: 'application/json' }, signal: AbortSignal.timeout(12000) },
+  );
+  if (!res.ok) throw new Error(`Ofcom HTTP ${res.status}`);
+  const data = await res.json();
+  const avail = (Array.isArray(data?.Availability) && data.Availability[0]) || (Array.isArray(data?.availability) && data.availability[0]) || data || {};
+  const num = (...keys) => {
+    for (const k of keys) {
+      const v = avail[k];
+      if (typeof v === 'number') return v;
+      if (v != null && !isNaN(parseFloat(v))) return parseFloat(v);
+    }
+    return null;
+  };
+  const down = num('MaxPredictedDown', 'maxPredictedDown', 'MaxDown');
+  return {
+    maxDownMbps: down,
+    maxUpMbps: num('MaxPredictedUp', 'maxPredictedUp', 'MaxUp'),
+    ultrafastAvailable: down != null ? down >= 300 : null,
+    superfastAvailable: down != null ? down >= 30 : null,
+    note: down == null ? 'Ofcom response shape unrecognised — raw data not stored' : `Max predicted download ${down} Mbps`,
+  };
+}
+
 // ── UK House Price Index (Land Registry linked data, free, no auth) ──────────
 async function connectorHPI(laCode) {
   if (!laCode) throw new Error('No LA code');
@@ -2739,6 +2968,63 @@ async function handleApiRoutes(request, env, url) {
       }
     }
 
+    // GET /api/companies-house/detail?number= — profile + officers + charges + insolvency
+    if (url.pathname === '/api/companies-house/detail' && request.method === 'GET') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+
+      const num = (url.searchParams.get('number') || '').trim();
+      if (!num) return corsResponse({ success: false, message: 'Missing company number' }, 400);
+
+      const apiKey = request.headers.get('X-CH-Key') || env.CH_API_KEY;
+      if (!apiKey) return corsResponse({ success: false, message: 'No Companies House API key configured' }, 400);
+
+      const chGet = async path => {
+        const r = await fetch(`https://api.company-information.service.gov.uk${path}`, {
+          headers: { 'Authorization': 'Basic ' + btoa(apiKey + ':') }, signal: AbortSignal.timeout(10000),
+        });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      };
+      try {
+        const enc = encodeURIComponent(num);
+        const [profileR, officersR, chargesR, insolvencyR] = await Promise.allSettled([
+          chGet(`/company/${enc}`),
+          chGet(`/company/${enc}/officers?items_per_page=10`),
+          chGet(`/company/${enc}/charges`),
+          chGet(`/company/${enc}/insolvency`),
+        ]);
+        if (profileR.status !== 'fulfilled') {
+          return corsResponse({ success: false, message: `Companies House profile error (${profileR.reason?.message || 'unreachable'})` }, 502);
+        }
+        const p = profileR.value;
+        const officers = officersR.status === 'fulfilled' ? (officersR.value.items || []).map(o => ({
+          name: o.name || '', role: o.officer_role || '', appointedOn: o.appointed_on || null, resignedOn: o.resigned_on || null,
+        })) : [];
+        const charges = chargesR.status === 'fulfilled' ? (chargesR.value.items || []).map(c => ({
+          description: c.classification?.description || c.charge_code || '', status: c.status || '',
+          createdOn: c.created_on || null, personsEntitled: (c.persons_entitled || []).map(pe => pe.name).slice(0, 3),
+        })) : [];
+        const insolvency = insolvencyR.status === 'fulfilled' ? (insolvencyR.value.cases || []).map(c => ({
+          type: c.type || '', dates: (c.dates || []).map(d => `${d.type}: ${d.date}`).slice(0, 3),
+        })) : [];
+        return corsResponse({
+          success: true,
+          profile: {
+            companyName: p.company_name || '', companyNumber: p.company_number || num,
+            status: p.company_status || '', type: p.type || '', incorporatedOn: p.date_of_creation || null,
+            registeredOffice: [p.registered_office_address?.address_line_1, p.registered_office_address?.locality, p.registered_office_address?.postal_code].filter(Boolean).join(', '),
+            sicCodes: p.sic_codes || [],
+            accountsOverdue: !!p.accounts?.overdue, confirmationOverdue: !!p.confirmation_statement?.overdue,
+            hasInsolvencyHistory: !!p.has_insolvency_history, hasCharges: !!p.has_charges,
+          },
+          officers, charges, insolvency,
+        });
+      } catch (err) {
+        return corsResponse({ success: false, message: 'Could not reach Companies House' }, 502);
+      }
+    }
+
     // --------------------------------------------------------
     // LAND REGISTRY — Price Paid Data (free, keyless linked-data API)
     // --------------------------------------------------------
@@ -2808,6 +3094,7 @@ async function handleApiRoutes(request, env, url) {
           propertyType: r['property-type'] || '',
           floorArea: r['total-floor-area'] || '',
           inspectionDate: r['inspection-date'] || r['lodgement-date'] || '',
+          lmkKey: r['lmk-key'] || '',
         }));
         return corsResponse({ success: true, items });
       } catch (err) {
@@ -3682,7 +3969,7 @@ async function handleApiRoutes(request, env, url) {
             fetch(
               `https://epc.opendatacommunities.org/api/v1/domestic/search?postcode=${encodeURIComponent(postcode)}&size=25`,
               { headers: { 'Authorization':'Basic '+btoa(`${env.EPC_EMAIL}:${env.EPC_API_KEY}`), 'Accept':'application/json' }, signal: AbortSignal.timeout(8000) },
-            ).then(r => r.json()).then(data => {
+            ).then(r => r.json()).then(async data => {
               const items=(data.rows||[]).map(r=>({
                 address1: r.address1||'', address2: r.address2||'', address3: r.address3||'',
                 address:[r.address1,r.address2,r.address3].filter(Boolean).join(', '),
@@ -3691,6 +3978,7 @@ async function handleApiRoutes(request, env, url) {
                 habitableRooms: r['number-habitable-rooms'] ? Number(r['number-habitable-rooms']) : null,
                 inspectionDate:r['inspection-date']||r['lodgement-date']||'',
                 heatingType:r['main-fuel']||'', walls:r['walls-description']||'', windows:r['windows-description']||'',
+                lmkKey:r['lmk-key']||'',
               }));
               const best=items[0];
               const flags=[
@@ -3699,7 +3987,23 @@ async function handleApiRoutes(request, env, url) {
                 best?.windows?.toLowerCase().includes('single')?'Single glazing':null,
                 best?.walls?.toLowerCase().includes('no insulation')?'Uninsulated walls':null,
               ].filter(Boolean);
-              return { key:'epc', status:'success', data:{ items:items.slice(0,5), allItems:items, best, epcRating:best?.currentRating, potentialRating:best?.potentialRating, floorArea:best?.floorArea, heatingType:best?.heatingType, energyFlags:flags }, source:'EPC Open Data' };
+              let recommendations = [];
+              if (best?.lmkKey) {
+                try {
+                  const recRes = await fetch(
+                    `https://epc.opendatacommunities.org/api/v1/domestic/recommendations/${encodeURIComponent(best.lmkKey)}`,
+                    { headers: { 'Authorization':'Basic '+btoa(`${env.EPC_EMAIL}:${env.EPC_API_KEY}`), 'Accept':'application/json' }, signal: AbortSignal.timeout(8000) },
+                  );
+                  if (recRes.ok) {
+                    const recData = await recRes.json();
+                    recommendations = (recData.rows||[]).map(r=>({
+                      code: r['improvement-item']||'', text: r['improvement-id-text']||r['improvement-summary-text']||'',
+                      indicativeCost: r['indicative-cost']||'',
+                    })).filter(r=>r.text).slice(0,10);
+                  }
+                } catch (e) {}
+              }
+              return { key:'epc', status:'success', data:{ items:items.slice(0,5), allItems:items, best, epcRating:best?.currentRating, potentialRating:best?.potentialRating, floorArea:best?.floorArea, heatingType:best?.heatingType, energyFlags:flags, recommendations }, source:'EPC Open Data' };
             }).catch(err => ({ key:'epc', status:'error', error:err.message, source:'EPC' }))
           );
         }
@@ -3742,6 +4046,20 @@ async function handleApiRoutes(request, env, url) {
           connectorTfL(resolvedLat, resolvedLng).then(data=>({ key:'tfl', status:'success', data, source:'TfL Unified API' })).catch(err=>({ key:'tfl', status:'error', error:err.message, source:'TfL' })),
           connectorWeather(resolvedLat, resolvedLng).then(data=>({ key:'weather', status:'success', data, source:'Open-Meteo' })).catch(err=>({ key:'weather', status:'error', error:err.message, source:'Open-Meteo' })),
           connectorAirQuality(resolvedLat, resolvedLng).then(data=>({ key:'airQuality', status:'success', data, source:'Open-Meteo Air Quality' })).catch(err=>({ key:'airQuality', status:'error', error:err.message, source:'Open-Meteo Air Quality' })),
+          connectorCoal(resolvedLat, resolvedLng).then(data=>({ key:'coal', status:'success', data, source:'Mining Remediation Authority' })).catch(err=>({ key:'coal', status:'error', error:err.message, source:'Mining Remediation Authority' })),
+          connectorRadon(resolvedLat, resolvedLng).then(data=>({ key:'radon', status:'success', data, source:'UKHSA/BGS Radon Atlas' })).catch(err=>({ key:'radon', status:'error', error:err.message, source:'UKHSA/BGS Radon Atlas' })),
+          connectorLandfill(resolvedLat, resolvedLng).then(data=>({ key:'landfill', status:'success', data, source:'EA Historic Landfill' })).catch(err=>({ key:'landfill', status:'error', error:err.message, source:'EA Historic Landfill' })),
+          connectorNoise(resolvedLat, resolvedLng).then(data=>({ key:'noise', status:'success', data, source:'Defra Strategic Noise Mapping' })).catch(err=>({ key:'noise', status:'error', error:err.message, source:'Defra Strategic Noise Mapping' })),
+          connectorPlanIt(resolvedLat, resolvedLng).then(data=>({ key:'planApps', status:'success', data, source:'PlanIt Planning Applications' })).catch(err=>({ key:'planApps', status:'error', error:err.message, source:'PlanIt' })),
+        );
+      }
+
+      tasks.push(
+        connectorRates(env).then(data=>({ key:'rates', status:'success', data, source:'Bank of England' })).catch(err=>({ key:'rates', status:'error', error:err.message, source:'Bank of England' })),
+      );
+      if (postcode && env.OFCOM_API_KEY) {
+        tasks.push(
+          connectorBroadband(postcode, env).then(data=>({ key:'broadband', status:'success', data, source:'Ofcom Connected Nations' })).catch(err=>({ key:'broadband', status:'error', error:err.message, source:'Ofcom Connected Nations' })),
         );
       }
 

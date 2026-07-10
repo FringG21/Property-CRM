@@ -607,6 +607,7 @@ export default function App({ user = {}, onLogout }) {
   });
   const togglePropSidebar = () => setPropSidebarCollapsed(c => { const n = !c; try { localStorage.setItem('propSidebarCollapsed', n ? '1' : '0'); } catch (e) {} return n; });
   const [propMapOpen, setPropMapOpen] = useState(false);
+  const [propStreetOpen, setPropStreetOpen] = useState(false);
   const openPropertyView = (p) => { setCurrentViewProperty(p); setPropCanvasTab('overview'); setPropMapOpen(false); };
 
   // Unified Note Creation Fields
@@ -2083,6 +2084,14 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
             deprivation: intel.imd?.data ? `${intel.imd.data.label} (decile ${intel.imd.data.decile})` : null,
             areaPrices: intel.hpi?.data ? { avg: intel.hpi.data.avgPrice, growth1yr: intel.hpi.data.growth1yr } : null,
             epc: intel.epc?.data ? { rating: intel.epc.data.epcRating, flags: intel.epc.data.energyFlags } : null,
+            coalMining: intel.coal?.data?.note || null,
+            radon: intel.radon?.data?.note || null,
+            landfill: intel.landfill?.data?.note || null,
+            noise: intel.noise?.data?.note || null,
+            nearbyPlanningApps: intel.planApps?.data?.note || null,
+            baseRate: intel.rates?.data ? `${intel.rates.data.baseRate}% (${intel.rates.data.trend})` : null,
+            broadband: intel.broadband?.data?.note || null,
+            epcImprovements: (intel.epc?.data?.recommendations || []).slice(0, 5).map(r => `${r.text}${r.indicativeCost ? ` (${r.indicativeCost})` : ''}`),
           },
           refurbSummary: {
             quotes: propQuotes.length,
@@ -2422,6 +2431,27 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
   const [chQuery, setChQuery] = useState('');
   const [chResults, setChResults] = useState(null);
   const [chLoading, setChLoading] = useState(false);
+  const [chDetailNumber, setChDetailNumber] = useState('');
+  const [chDetail, setChDetail] = useState(null);
+  const [chDetailLoading, setChDetailLoading] = useState(false);
+  const fetchCompaniesHouseDetail = async (number) => {
+    const num = (number || '').trim();
+    if (!num) return;
+    setChDetailLoading(true); setChDetail(null);
+    try {
+      const token = localStorage.getItem('crm_session');
+      const headers = { 'Authorization': `Bearer ${token}` };
+      if (settingsIntegrations.companiesHouse) headers['X-CH-Key'] = settingsIntegrations.companiesHouse;
+      const res = await fetch(`/api/companies-house/detail?number=${encodeURIComponent(num)}`, { headers });
+      const data = await res.json();
+      if (!data.success) { alert(data.message || 'Companies House lookup failed.'); return; }
+      setChDetail(data);
+    } catch {
+      alert('Companies House lookup failed — network error.');
+    } finally {
+      setChDetailLoading(false);
+    }
+  };
 
   // Refurb Tracker state
   const [refurbPropertyId, setRefurbPropertyId] = useState(null);
@@ -3017,7 +3047,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
         const q = cmdSearch.toLowerCase();
         const has = (s) => (s || '').toLowerCase().includes(q);
         const openProperty = (p) => { setActiveTab('pipeline'); setCurrentViewProperty(p); setShowCmdPalette(false); };
-        const openCompanyRecord = (c) => { setActiveTab('companies'); setCurrentViewCompany(c); setCompanyDetailTab('overview'); setCompanyActivityTab('activity'); setCompanyActivityFilter('All'); setCompanyRailTab((DEFAULT_RAIL_TABS[c.type] || DEFAULT_RAIL_TABS._default)[0]); setCompanyRailPanel(null); setShowCmdPalette(false); };
+        const openCompanyRecord = (c) => { setActiveTab('companies'); setCurrentViewCompany(c); setCompanyDetailTab('overview'); setCompanyActivityTab('activity'); setCompanyActivityFilter('All'); setCompanyRailTab((DEFAULT_RAIL_TABS[c.type] || DEFAULT_RAIL_TABS._default)[0]); setCompanyRailPanel(null); setShowCmdPalette(false); setChDetail(null); setChDetailNumber(c.companyNumber || ''); };
         const openContactRecord = (c) => { setActiveTab('contacts'); setCurrentViewContact(c); setContactActivityTab('activity'); setContactActivityFilter('All'); setContactRailTab('company'); setContactRailPanel(null); setShowCmdPalette(false); };
         const matchedProps = q.length > 1 ? properties.filter(p => has(p.address) || has(p.postcode) || has(p.status) || has(p.dealName)).slice(0, 5) : properties.slice(0, 4);
         const matchedCompanies = q.length > 1 ? companies.filter(c => has(c.name) || has(c.type) || has(c.city)).slice(0, 4) : [];
@@ -3429,6 +3459,13 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                         📍
                       </button>
                       <button
+                        onClick={() => { setPropStreetOpen(o => !o); }}
+                        title={propStreetOpen ? 'Hide Street View' : 'Show Street View'}
+                        style={{ display: 'flex', alignItems: 'center', fontSize: '11px', padding: '4px 8px', borderRadius: '6px', border: `1px solid ${propStreetOpen ? '#38bdf8' : '#334155'}`, background: propStreetOpen ? '#0c2a3d' : 'transparent', color: propStreetOpen ? '#38bdf8' : '#94a3b8', cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}
+                      >
+                        🛣️
+                      </button>
+                      <button
                         onClick={() => runPropertyIntelligence(currentViewProperty)}
                         disabled={intelligenceRunning || !propPostcode}
                         title={propPostcode ? (intel.lastRun ? 'Refresh public API intelligence' : 'Run public API intelligence for this property') : 'Add a postcode to the address to enable intelligence'}
@@ -3552,6 +3589,14 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 {propMapOpen && propPostcode && (
                   <div style={{ borderBottom: '0.5px solid #e2e8f0', position: 'relative', flexShrink: 0 }}>
                     <iframe title="Property location map" width="100%" height="200" style={{ border: 0, display: 'block' }} src={`https://www.google.com/maps/embed/v1/place?key=${import.meta.env.VITE_GOOGLE_MAPS_KEY}&q=${encodeURIComponent(currentViewProperty.address)}&zoom=14`} allowFullScreen />
+                    <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(currentViewProperty.address)}`} target="_blank" rel="noreferrer" style={{ position: 'absolute', bottom: '8px', right: '8px', fontSize: '10px', background: 'rgba(255,255,255,0.9)', padding: '3px 8px', borderRadius: '4px', color: '#0284c7', textDecoration: 'none', border: '1px solid #bfdbfe' }}>Open in Google Maps ↗</a>
+                  </div>
+                )}
+
+                {/* Inline Street View panel */}
+                {propStreetOpen && (currentViewProperty.lat || currentViewProperty.address) && (
+                  <div style={{ borderBottom: '0.5px solid #e2e8f0', position: 'relative', flexShrink: 0 }}>
+                    <iframe title="Property Street View" width="100%" height="200" style={{ border: 0, display: 'block' }} src={`https://www.google.com/maps/embed/v1/streetview?key=${import.meta.env.VITE_GOOGLE_MAPS_KEY}&location=${currentViewProperty.lat ? `${currentViewProperty.lat},${currentViewProperty.lng}` : encodeURIComponent(currentViewProperty.address)}`} allowFullScreen />
                     <a href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(currentViewProperty.address)}`} target="_blank" rel="noreferrer" style={{ position: 'absolute', bottom: '8px', right: '8px', fontSize: '10px', background: 'rgba(255,255,255,0.9)', padding: '3px 8px', borderRadius: '4px', color: '#0284c7', textDecoration: 'none', border: '1px solid #bfdbfe' }}>Open in Google Maps ↗</a>
                   </div>
                 )}
@@ -4034,6 +4079,13 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     const tflD    = ic.tfl?.data || {};
                     const schoolD = ic.schools?.data || {};
                     const censD   = ic.census?.data || {};
+                    const coalD   = ic.coal?.data || {};
+                    const radonD  = ic.radon?.data || {};
+                    const lfD     = ic.landfill?.data || {};
+                    const noiseD  = ic.noise?.data || {};
+                    const pAppsD  = ic.planApps?.data || {};
+                    const ratesD  = ic.rates?.data || {};
+                    const bbD     = ic.broadband?.data || {};
                     const fmtAge = iso => { const d = new Date(iso); const h = Math.floor((Date.now() - d) / 3600000); return h < 1 ? 'just now' : h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`; };
                     const connCount = Object.values(ic).filter(c => c?.status === 'success').length;
                     const totalConn = Object.keys(ic).length;
@@ -4114,6 +4166,13 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       { icon: '🏘️', l: 'Amenities', v: osmD.amenityLabel || (ic.osm ? 'No data' : 'Run intel'), d: stationM ? `Stn ${stationM}m` : '', ok: osmD.amenityScore != null ? (osmD.amenityScore >= 7 ? 'ok' : osmD.amenityScore >= 4 ? 'warn' : 'bad') : 'neutral' },
                       { icon: '🚇', l: 'Transport', v: transportV, ok: transportOk },
                       { icon: '📊', l: 'IMD',       v: imdDec != null ? `Decile ${imdDec} · ${imdD.label || ''}` : ic.imd ? 'No data' : 'Run intel', ok: imdDec != null ? (imdDec >= 7 ? 'ok' : imdDec >= 4 ? 'warn' : 'bad') : 'neutral' },
+                      { icon: '⛏️', l: 'Coal',      v: ic.coal ? (coalD.riskLevel === 'High' ? 'High risk area' : coalD.riskLevel === 'Elevated' ? 'High-risk <500m' : coalD.riskLevel === 'Low' ? 'Coalfield · low risk' : 'Not coalfield') : 'Run intel', ok: coalD.riskLevel === 'High' ? 'bad' : coalD.riskLevel === 'Elevated' ? 'warn' : ic.coal ? 'ok' : 'neutral' },
+                      { icon: '☢️', l: 'Radon',     v: radonD.radonClass != null ? `Class ${radonD.radonClass}/6 · ${radonD.homesAffectedBand}` : ic.radon ? 'No data' : 'Run intel', ok: radonD.radonClass != null ? (radonD.radonClass >= 3 ? 'bad' : radonD.radonClass === 2 ? 'warn' : 'ok') : 'neutral' },
+                      { icon: '🗑️', l: 'Landfill',  v: ic.landfill ? (lfD.onFormerLandfill ? 'On former landfill!' : lfD.sitesWithin500m > 0 ? `${lfD.sitesWithin500m} within 500m` : 'None within 500m') : 'Run intel', ok: lfD.onFormerLandfill ? 'bad' : lfD.sitesWithin500m > 0 ? 'warn' : ic.landfill ? 'ok' : 'neutral' },
+                      { icon: '🔊', l: 'Noise',     v: ic.noise ? (noiseD.quiet ? 'Below 55 dB' : `${noiseD.roadNoiseBand && noiseD.railNoiseBand ? 'Road+rail' : noiseD.roadNoiseBand ? 'Road' : 'Rail'} ${noiseD.roadNoiseBand || noiseD.railNoiseBand} dB`) : 'Run intel', ok: noiseD.highNoise ? 'warn' : ic.noise ? 'ok' : 'neutral' },
+                      { icon: '📋', l: 'Plan apps', v: ic.planApps ? ((pAppsD.apps || []).length > 0 ? `${pAppsD.totalNearby || (pAppsD.apps || []).length} <250m · ${pAppsD.permitted || 0} OK’d` : 'None <250m') : 'Run intel', ok: pAppsD.rejected > 0 ? 'warn' : ic.planApps ? 'ok' : 'neutral' },
+                      { icon: '📶', l: 'Broadband', v: bbD.maxDownMbps != null ? `${Math.round(bbD.maxDownMbps)} Mbps max` : ic.broadband ? 'No data' : 'Needs Ofcom key', ok: bbD.maxDownMbps != null ? (bbD.maxDownMbps >= 80 ? 'ok' : bbD.maxDownMbps >= 30 ? 'warn' : 'bad') : 'neutral' },
+                      { icon: '🏦', l: 'Base rate', v: ratesD.baseRate != null ? `${ratesD.baseRate}% · ${ratesD.trend}` : ic.rates ? 'No data' : 'Run intel', ok: ratesD.baseRate != null ? (ratesD.trend === 'rising' ? 'warn' : 'ok') : 'neutral' },
                     ];
 
                     return (
@@ -7720,6 +7779,54 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                         <input value={co[field] || ''} onChange={e => updateCompanyField(field, e.target.value)} placeholder={ph} style={inputStyle} />
                                       </div>
                                     ))}
+                                  </div>
+                                  <div style={{ ...cardStyle, padding: '14px' }}>
+                                    <div style={sectionTitle}>Companies House</div>
+                                    <div style={{ display: 'flex', gap: '6px', marginBottom: '10px' }}>
+                                      <input
+                                        value={chDetailNumber || co.companyNumber || ''}
+                                        onChange={e => setChDetailNumber(e.target.value)}
+                                        placeholder="Company number, e.g. 01234567"
+                                        style={{ ...inputStyle, flex: 1, marginBottom: 0 }}
+                                      />
+                                      <button
+                                        onClick={() => { const n = (chDetailNumber || co.companyNumber || '').trim(); if (!n) { alert('Enter a company number.'); return; } updateCompanyField('companyNumber', n); fetchCompaniesHouseDetail(n); }}
+                                        disabled={chDetailLoading}
+                                        style={{ padding: '8px 12px', border: '1px solid #cbd5e1', borderRadius: '6px', background: '#f8fafc', fontSize: '12px', cursor: chDetailLoading ? 'wait' : 'pointer', whiteSpace: 'nowrap', fontFamily: 'inherit' }}
+                                      >
+                                        {chDetailLoading ? 'Loading…' : 'Look up'}
+                                      </button>
+                                    </div>
+                                    {chDetail?.profile && (
+                                      <div style={{ fontSize: '12px', color: '#334155' }}>
+                                        <div style={{ fontWeight: '600', marginBottom: '2px' }}>{chDetail.profile.companyName} <span style={{ color: '#64748b', fontWeight: '400' }}>({chDetail.profile.companyNumber})</span></div>
+                                        <div style={{ marginBottom: '6px' }}>
+                                          <span style={{ padding: '1px 7px', borderRadius: '9px', fontSize: '11px', fontWeight: '500', background: chDetail.profile.status === 'active' ? '#dcfce7' : '#fee2e2', color: chDetail.profile.status === 'active' ? '#166534' : '#991b1b' }}>{chDetail.profile.status || 'unknown'}</span>
+                                          {chDetail.profile.incorporatedOn && <span style={{ marginLeft: '8px', color: '#64748b' }}>Inc. {chDetail.profile.incorporatedOn}</span>}
+                                        </div>
+                                        {chDetail.profile.registeredOffice && <div style={{ color: '#64748b', marginBottom: '6px' }}>{chDetail.profile.registeredOffice}</div>}
+                                        {(chDetail.profile.accountsOverdue || chDetail.profile.confirmationOverdue || chDetail.profile.hasInsolvencyHistory) && (
+                                          <div style={{ marginBottom: '6px' }}>
+                                            {chDetail.profile.accountsOverdue && <div style={{ color: '#dc2626' }}>⚠ Accounts overdue</div>}
+                                            {chDetail.profile.confirmationOverdue && <div style={{ color: '#dc2626' }}>⚠ Confirmation statement overdue</div>}
+                                            {chDetail.profile.hasInsolvencyHistory && <div style={{ color: '#dc2626' }}>⚠ Insolvency history</div>}
+                                          </div>
+                                        )}
+                                        {chDetail.officers?.length > 0 && (
+                                          <div style={{ marginBottom: '6px' }}>
+                                            <div style={{ fontSize: '11px', fontWeight: '600', color: '#64748b', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: '2px' }}>Officers</div>
+                                            {chDetail.officers.filter(o => !o.resignedOn).slice(0, 5).map((o, i) => <div key={i}>{o.name} <span style={{ color: '#94a3b8' }}>— {o.role}</span></div>)}
+                                          </div>
+                                        )}
+                                        {chDetail.charges?.length > 0 && (
+                                          <div style={{ marginBottom: '2px' }}>
+                                            <div style={{ fontSize: '11px', fontWeight: '600', color: '#64748b', textTransform: 'uppercase', letterSpacing: '.04em', marginBottom: '2px' }}>Charges ({chDetail.charges.length})</div>
+                                            {chDetail.charges.slice(0, 3).map((c, i) => <div key={i} style={{ color: c.status === 'outstanding' ? '#b45309' : '#64748b' }}>{c.description || 'Charge'} — {c.status}</div>)}
+                                          </div>
+                                        )}
+                                      </div>
+                                    )}
+                                    {!chDetail && !chDetailLoading && <div style={{ fontSize: '11px', color: '#94a3b8' }}>Check status, officers, charges and insolvency history from the official register.</div>}
                                   </div>
                                   <div style={{ ...cardStyle, padding: '14px', marginBottom: 0 }}>
                                     <div style={sectionTitle}>Custom fields</div>
