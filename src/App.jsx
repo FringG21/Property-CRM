@@ -3190,7 +3190,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
 
       {/* MENU SIDEBAR BAR OVERVIEW CONTROLS */}
       <aside style={{
-        width: isMobile ? '260px' : sidebarCollapsed ? '60px' : '260px',
+        width: isMobile ? '260px' : sidebarCollapsed ? '48px' : '260px',
         backgroundColor: '#0f172a',
         color: '#ffffff',
         display: 'flex',
@@ -3411,8 +3411,41 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       <ArrowLeft size={12} /> Pipeline
                     </button>
                     <span style={{ color: '#475569', fontSize: '11px', flexShrink: 0 }}>/</span>
-                    <span style={{ color: '#cbd5e1', fontSize: '11px', fontWeight: '500', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 1, minWidth: 0 }}>{currentViewProperty.dealName || currentViewProperty.address}</span>
+                    <span style={{ color: '#f1f5f9', fontSize: '13px', fontWeight: '600', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flexShrink: 1, minWidth: 0 }}>{currentViewProperty.dealName || currentViewProperty.address}</span>
+                    <span style={{ padding: '2px 8px', borderRadius: '10px', fontSize: '10px', fontWeight: '500', background: '#1e3a5f', color: '#60a5fa', flexShrink: 0, whiteSpace: 'nowrap' }}>{st}</span>
+                    {currentViewProperty.planningToBid && <span style={{ padding: '2px 8px', borderRadius: '10px', fontSize: '10px', fontWeight: '500', background: '#1e3a5f', color: '#93c5fd', flexShrink: 0, whiteSpace: 'nowrap' }}>Planning to bid</span>}
+                    {currentViewProperty.auctionDate && (
+                      <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: '#64748b', flexShrink: 0, whiteSpace: 'nowrap' }}>
+                        <Clock size={11} /> {currentViewProperty.auctionDate}{currentViewProperty.auctionTime ? ` · ${currentViewProperty.auctionTime}` : ''}
+                      </span>
+                    )}
+                    {currentViewProperty.sourcePlatform && <span style={{ fontSize: '11px', color: '#64748b', flexShrink: 0, whiteSpace: 'nowrap' }}>{currentViewProperty.sourcePlatform}</span>}
                     <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0 }}>
+                      <button
+                        onClick={() => { setPropMapOpen(o => !o); }}
+                        title={propMapOpen ? 'Hide property location map' : 'Show property location map'}
+                        style={{ display: 'flex', alignItems: 'center', fontSize: '11px', padding: '4px 8px', borderRadius: '6px', border: `1px solid ${propMapOpen ? '#38bdf8' : '#334155'}`, background: propMapOpen ? '#0c2a3d' : 'transparent', color: propMapOpen ? '#38bdf8' : '#94a3b8', cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}
+                      >
+                        📍
+                      </button>
+                      <button
+                        onClick={() => runPropertyIntelligence(currentViewProperty)}
+                        disabled={intelligenceRunning || !propPostcode}
+                        title={propPostcode ? (intel.lastRun ? 'Refresh public API intelligence' : 'Run public API intelligence for this property') : 'Add a postcode to the address to enable intelligence'}
+                        style={{ display: 'flex', alignItems: 'center', fontSize: '11px', padding: '4px 8px', borderRadius: '6px', border: '1px solid', cursor: intelligenceRunning || !propPostcode ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap', opacity: !propPostcode ? 0.45 : 1, background: intel.lastRun ? '#052e16' : 'transparent', borderColor: intel.lastRun ? '#166534' : '#334155', color: intel.lastRun ? '#86efac' : '#94a3b8', fontFamily: 'inherit' }}
+                      >
+                        {intelligenceRunning ? '⏳' : '🔍'}
+                      </button>
+                      {currentViewProperty.listingUrl && (
+                        <a href={currentViewProperty.listingUrl} target="_blank" rel="noreferrer" title="Open listing" style={{ display: 'flex', alignItems: 'center', fontSize: '11px', color: '#38bdf8', padding: '4px 8px', border: '1px solid #0c4a6e', borderRadius: '6px', background: '#0c2a3d', textDecoration: 'none', whiteSpace: 'nowrap' }}>
+                          <ExternalLink size={11} />
+                        </a>
+                      )}
+                      {daysLeft != null && (
+                        <span style={{ background: '#1e293b', borderRadius: '6px', padding: '3px 9px', fontSize: '12px', fontWeight: '600', whiteSpace: 'nowrap', color: daysLeft <= 3 && daysLeft >= 0 ? '#f87171' : '#f8fafc' }}>
+                          {daysLeft > 0 ? `${daysLeft}d to go` : daysLeft === 0 ? 'today!' : 'passed'}
+                        </span>
+                      )}
                       <span style={{ fontSize: '10px', color: '#475569', textTransform: 'uppercase', letterSpacing: '.05em' }}>Stage</span>
                       {MAIN_STAGES.map((s, i) => {
                         const done = stIdx > i; const cur = st === s;
@@ -3422,7 +3455,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                   </div>
                 )}
 
-                {/* Property header — dark */}
+                {/* Property header — dark (mobile only; desktop header is merged into the breadcrumb bar above) */}
+                {isMobile && (
                 <div style={{ padding: '12px 20px', borderBottom: '1px solid #1e293b', background: '#0f172a', flexShrink: 0 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
                     <div style={{ minWidth: 0 }}>
@@ -3470,6 +3504,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     {currentViewProperty.planningToBid && <span style={{ padding: '2px 8px', borderRadius: '10px', fontSize: '10px', fontWeight: '500', background: '#1e3a5f', color: '#93c5fd' }}>Planning to bid</span>}
                   </div>
                 </div>
+                )}
 
                 {/* KPI strip — compact inline bar (label value, colour-coded) */}
                 <div style={{ borderBottom: '1px solid #1e293b', background: '#0b1120', flexShrink: 0, display: 'flex', alignItems: 'center', flexWrap: 'wrap', padding: '7px 13px' }}>
