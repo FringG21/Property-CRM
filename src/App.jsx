@@ -549,6 +549,8 @@ export default function App({ user = {}, onLogout }) {
   const [companyRailPanel, setCompanyRailPanel] = useState(null);
   const [railSearch, setRailSearch] = useState('');
   const [railForm, setRailForm] = useState({});
+  const [newCustomFieldLabel, setNewCustomFieldLabel] = useState('');
+  const [newCustomFieldValue, setNewCustomFieldValue] = useState('');
   const companyNoteRef = useRef(null);
   const [settingsSection, setSettingsSection] = useState('profile');
   const [newCompPhone, setNewCompPhone] = useState('');
@@ -7337,7 +7339,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                       </div>
                                     ))}
                                   </div>
-                                  <div style={{ ...cardStyle, padding: '14px', marginBottom: 0 }}>
+                                  <div style={{ ...cardStyle, padding: '14px' }}>
                                     <div style={sectionTitle}>Fees & costs</div>
                                     {(co.type === 'Auction House'
                                       ? [['Legal fee', 'legalFee', 'e.g. £750 + VAT'], ['Survey fee', 'surveyFee', 'e.g. £350']]
@@ -7348,6 +7350,24 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                         <input value={co[field] || ''} onChange={e => updateCompanyField(field, e.target.value)} placeholder={ph} style={inputStyle} />
                                       </div>
                                     ))}
+                                  </div>
+                                  <div style={{ ...cardStyle, padding: '14px', marginBottom: 0 }}>
+                                    <div style={sectionTitle}>Custom fields</div>
+                                    {(co.customFields || []).map(cf => (
+                                      <div key={cf.id} style={{ marginBottom: '12px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '5px' }}>
+                                          <input value={cf.label} onChange={e => updateCompanyField('customFields', (co.customFields || []).map(x => x.id === cf.id ? { ...x, label: e.target.value } : x))} style={{ ...labelStyle, border: 'none', background: 'transparent', padding: 0, flex: 1, marginBottom: 0, outline: 'none', fontFamily: 'inherit' }} />
+                                          <button onClick={() => updateCompanyField('customFields', (co.customFields || []).filter(x => x.id !== cf.id))} title="Remove field" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '11px', lineHeight: 1, padding: '2px' }}>✕</button>
+                                        </div>
+                                        <input value={cf.value || ''} onChange={e => updateCompanyField('customFields', (co.customFields || []).map(x => x.id === cf.id ? { ...x, value: e.target.value } : x))} style={inputStyle} />
+                                      </div>
+                                    ))}
+                                    {(co.customFields || []).length === 0 && <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '10px' }}>Add any extra detail you want to track for this company.</div>}
+                                    <div style={{ display: 'flex', gap: '6px' }}>
+                                      <input placeholder="Field name" value={newCustomFieldLabel} onChange={e => setNewCustomFieldLabel(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
+                                      <input placeholder="Value" value={newCustomFieldValue} onChange={e => setNewCustomFieldValue(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
+                                    </div>
+                                    <button onClick={() => { if (!newCustomFieldLabel.trim()) return; updateCompanyField('customFields', [...(co.customFields || []), { id: Date.now(), label: newCustomFieldLabel.trim(), value: newCustomFieldValue }]); setNewCustomFieldLabel(''); setNewCustomFieldValue(''); }} style={{ width: '100%', marginTop: '8px', padding: '8px', border: '1px dashed #cbd5e1', borderRadius: '6px', backgroundColor: '#f8fafc', fontSize: '12px', color: '#475569', cursor: 'pointer' }}>+ Add field</button>
                                   </div>
                                 </div>
                                 {/* Centre: activity feed */}
