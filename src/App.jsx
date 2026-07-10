@@ -600,6 +600,8 @@ export default function App({ user = {}, onLogout }) {
   const [fetchingLotResult, setFetchingLotResult] = useState(false);
   const [propCanvasTab, setPropCanvasTab] = useState('overview');
   const [compSort, setCompSort] = useState('default'); // 'default' | 'asc' | 'desc'
+  const [bidAmountInput, setBidAmountInput] = useState('');
+  const [bidNoteInput, setBidNoteInput] = useState('');
   const [propSidebarCollapsed, setPropSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem('propSidebarCollapsed') === '1'; } catch (e) { return false; }
   });
@@ -1123,6 +1125,15 @@ export default function App({ user = {}, onLogout }) {
     };
     updated = withActivity(updated, 'stage', `Auction result recorded: ${resultLabel}`);
     runStageAutomation(currentViewProperty, status);
+    setCurrentViewProperty(updated);
+    setProperties(properties.map(p => p.id === currentViewProperty.id ? updated : p));
+  };
+
+  const addBid = (amount, note) => {
+    if (!currentViewProperty || !(amount > 0)) return;
+    const entry = { id: Date.now() + Math.random(), amount: Math.round(amount), at: new Date().toISOString(), note: (note || '').trim() };
+    let updated = { ...currentViewProperty, bidLog: [...(currentViewProperty.bidLog || []), entry] };
+    updated = withActivity(updated, 'bid', `Bid placed: £${entry.amount.toLocaleString()}${entry.note ? ` — ${entry.note}` : ''}`);
     setCurrentViewProperty(updated);
     setProperties(properties.map(p => p.id === currentViewProperty.id ? updated : p));
   };
@@ -2126,6 +2137,39 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
       if (remaining <= 0) break;
     }
     return Math.round(tax);
+  };
+
+  // Actual deal figures once hammerPrice is known. Costs not yet recorded fall
+  // back to report estimates; the report total's unattributable remainder
+  // (legal, holding, exit…) is carried as estOther. SDLT is recomputed from the
+  // hammer price only when the report modelled SDLT — otherwise it can't be
+  // separated from estOther and adding it would double-count.
+  const computeActuals = (p) => {
+    const an = p.analytics || {};
+    const hammer = parseFloat(p.hammerPrice) || 0;
+    if (!hammer) return null;
+    const pf = v => parseFloat(v) || 0;
+    const predPurchase = pf(an.targetBid) || pf(an.maxBid);
+    const refurbKey = p.refurbLevel || 'medium';
+    const predRefurb = pf(refurbKey === 'light' ? an.refurbLight : refurbKey === 'heavy' ? an.refurbHeavy : an.refurbMedium) || pf(an.worksTotal);
+    const predPremium = pf(an.buyersPremium);
+    const predSdlt = pf(an.sdlt);
+    const totalInvEst = pf(an.totalInvestment);
+    const estOther = Math.max(0, totalInvEst - predPurchase - predRefurb - predPremium - predSdlt);
+    const premium = pf(p.actualBuyersPremium) || predPremium;
+    const sdlt = predSdlt ? calcSDLT(hammer, true) : 0;
+    const refurb = pf(p.actualRefurbCost) || predRefurb;
+    const sale = pf(p.actualSalePrice) || pf(an.gdvBase);
+    const totalInv = hammer + premium + sdlt + refurb + estOther;
+    const netProfit = Math.round(sale - totalInv);
+    return {
+      hammer, premium, sdlt, refurb, sale, totalInv, netProfit, estOther,
+      margin: sale > 0 ? (netProfit / sale) * 100 : null,
+      roi: totalInv > 0 ? (netProfit / totalInv) * 100 : null,
+      saleIsEstimate: !pf(p.actualSalePrice),
+      refurbIsEstimate: !pf(p.actualRefurbCost),
+      premiumIsEstimate: !pf(p.actualBuyersPremium),
+    };
   };
 
   // Status badge colour
@@ -3327,7 +3371,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
             const surveyJobs = currentViewProperty.surveyJobs || [];
             const latestJob = surveyJobs[surveyJobs.length - 1];
             const actLog = currentViewProperty.activityLog || [];
-            const AICONS = { created: '🆕', stage: '🔀', note: '📝', document: '📄', survey: '📋', intelligence: '🔍' };
+            const AICONS = { created: '🆕', stage: '🔀', note: '📝', document: '📄', survey: '📋', intelligence: '🔍', bid: '🔨' };
             const propPostcode = currentViewProperty.postcode || extractPostcode(currentViewProperty.address || '') || extractPostcode(currentViewProperty.dealName || '');
             const intel = currentViewProperty.intelligence || {};
             const intelConflicts = currentViewProperty.intelligenceConflicts || [];
@@ -3429,13 +3473,14 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
 
                 {/* KPI strip — compact inline bar (label value, colour-coded) */}
                 <div style={{ borderBottom: '1px solid #1e293b', background: '#0b1120', flexShrink: 0, display: 'flex', alignItems: 'center', flexWrap: 'wrap', padding: '7px 13px' }}>
-                  {(() => { const kpis = [
+                  {(() => { const act = ['Won', 'Refurb', 'For Sale', 'Completed'].includes(st) ? computeActuals(currentViewProperty) : null;
+                  const kpis = [
                     { l: 'Guide', v: gp ? fmtNum(gp) : '—', vc: '#f1f5f9', editKey: 'guidePrice', src: gp ? 'Listing' : '' },
-                    { l: 'Our max bid', v: ourMaxBid ? fmtNum(ourMaxBid) : '—', vc: ourMaxBid ? '#4ade80' : '#f1f5f9', editKey: 'ourMaxBid', src: (currentViewProperty.ourMaxBid || currentViewProperty.maxBid) ? 'Manual' : '' },
+                    { l: 'Our max bid', v: ourMaxBid ? fmtNum(ourMaxBid) : '—', vc: ourMaxBid ? '#4ade80' : '#f1f5f9', editKey: 'ourMaxBid', src: (currentViewProperty.ourMaxBid || currentViewProperty.maxBid) ? 'Manual' : '', est: (ourMaxBid && reportMax) ? `${Math.round(ourMaxBid / reportMax * 100)}% of report` : null },
                     { l: 'Report max', v: reportMax ? fmtNum(reportMax) : '—', vc: reportMax ? '#93c5fd' : '#f1f5f9', src: reportMax ? 'Report' : '' },
-                    { l: 'Net profit', v: netProfit ? fmtNum(netProfit) : '—', vc: netProfit ? '#4ade80' : '#f1f5f9', src: an.netProfit ? 'Report' : '' },
-                    { l: 'Margin', v: margin != null ? `${margin.toFixed(1)}%` : '—', vc: margin >= 20 ? '#4ade80' : margin >= 10 ? '#fbbf24' : margin != null ? '#f87171' : '#f1f5f9', src: (an.profitMargin != null || an.margin != null) ? 'Report' : '' },
-                    { l: 'ROI', v: (an.roi != null && an.roi !== '') ? `${parseFloat(an.roi).toFixed(1)}%` : '—', vc: (an.roi != null && an.roi !== '') ? '#4ade80' : '#f1f5f9', src: (an.roi != null && an.roi !== '') ? 'Report' : '' },
+                    { l: 'Net profit', v: act ? fmtNum(act.netProfit) : (netProfit ? fmtNum(netProfit) : '—'), vc: act ? (act.netProfit >= 0 ? '#4ade80' : '#f87171') : (netProfit ? '#4ade80' : '#f1f5f9'), src: act ? 'Actual' : (an.netProfit ? 'Report' : ''), est: act && an.netProfit ? `est ${fmtNum(parseFloat(an.netProfit))}` : null },
+                    { l: 'Margin', v: act && act.margin != null ? `${act.margin.toFixed(1)}%` : margin != null ? `${margin.toFixed(1)}%` : '—', vc: (() => { const m = act && act.margin != null ? act.margin : margin; return m >= 20 ? '#4ade80' : m >= 10 ? '#fbbf24' : m != null ? '#f87171' : '#f1f5f9'; })(), src: act && act.margin != null ? 'Actual' : (an.profitMargin != null || an.margin != null) ? 'Report' : '', est: act && act.margin != null && margin != null ? `est ${margin.toFixed(1)}%` : null },
+                    { l: 'ROI', v: act && act.roi != null ? `${act.roi.toFixed(1)}%` : (an.roi != null && an.roi !== '') ? `${parseFloat(an.roi).toFixed(1)}%` : '—', vc: act && act.roi != null ? (act.roi >= 0 ? '#4ade80' : '#f87171') : (an.roi != null && an.roi !== '') ? '#4ade80' : '#f1f5f9', src: act && act.roi != null ? 'Actual' : (an.roi != null && an.roi !== '') ? 'Report' : '', est: act && act.roi != null && an.roi != null && an.roi !== '' ? `est ${parseFloat(an.roi).toFixed(1)}%` : null },
                   ]; return kpis.map((k, i) => (
                     <div key={k.l} style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '0 13px 0 0', marginRight: '13px', borderRight: i < kpis.length - 1 ? '1px solid #1e293b' : 'none' }}>
                       <span style={{ fontSize: '10px', color: '#475569', textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap' }}>{k.l}</span>
@@ -3447,9 +3492,12 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                           style={{ width: '78px', fontSize: '14px', fontWeight: '600', border: 'none', borderBottom: '1px solid #7C3AED', background: 'transparent', color: k.vc, outline: 'none', fontFamily: 'inherit', padding: '0' }}
                         />
                       ) : (
-                        <span style={{ fontSize: '14px', fontWeight: '600', color: k.vc, whiteSpace: 'nowrap' }}>{k.v}</span>
+                        <span style={{ display: 'inline-flex', flexDirection: 'column', lineHeight: 1.25 }}>
+                          <span style={{ fontSize: '14px', fontWeight: '600', color: k.vc, whiteSpace: 'nowrap' }}>{k.v}</span>
+                          {k.est && <span style={{ fontSize: '10px', color: '#64748b', whiteSpace: 'nowrap' }}>{k.est}</span>}
+                        </span>
                       )}
-                      {k.src && <span style={{ fontSize: '9px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.04em', padding: '1px 4px', borderRadius: '3px', background: k.src === 'Report' ? '#0c2a3d' : '#1e293b', color: k.src === 'Report' ? '#60a5fa' : '#64748b' }}>{k.src}</span>}
+                      {k.src && <span style={{ fontSize: '9px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.04em', padding: '1px 4px', borderRadius: '3px', background: k.src === 'Actual' ? '#052e16' : k.src === 'Report' ? '#0c2a3d' : '#1e293b', color: k.src === 'Actual' ? '#4ade80' : k.src === 'Report' ? '#60a5fa' : '#64748b' }}>{k.src}</span>}
                     </div>
                   )); })()}
                   <span style={{ flex: 1 }} />
@@ -3484,6 +3532,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     { k: 'tasks', l: 'Tasks', count: tasks.filter(t => t.linkedType === 'Property' && t.linkedId === currentViewProperty.id).length || null },
                     { k: 'notes', l: 'Notes', count: currentViewProperty.notesList?.length },
                     { k: 'timeline', l: 'Timeline', count: actLog.length > 0 ? actLog.length : null },
+                    { k: 'bids', l: 'Bid Log', count: currentViewProperty.bidLog?.length || null },
                   ].map(t => (
                     <button key={t.k} onClick={() => setPropCanvasTab(t.k)} style={{ padding: '9px 14px', fontSize: '12px', border: 'none', borderBottom: `2px solid ${propCanvasTab === t.k ? '#7C3AED' : 'transparent'}`, background: 'transparent', color: propCanvasTab === t.k ? '#f1f5f9' : '#64748b', fontWeight: propCanvasTab === t.k ? '600' : '400', cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: '5px' }}>
                       {t.l}
@@ -3881,7 +3930,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                             {rows.map((r, i) => {
                               const epcBg = EPC_COL[r.epcRating] || null;
                               const epcTxt = r.epcRating ? (['A','B','C'].includes(r.epcRating) ? '#fff' : '#000') : '#000';
-                              const ppsm = (r.floorArea && r.price) ? `£${Math.round(r.price / Number(r.floorArea)).toLocaleString()}/m²` : null;
+                              const compFa = parseFloat(r.floorArea) || 0;
+                              const ppsm = (compFa > 0 && r.price) ? `£${Math.round(r.price / compFa).toLocaleString()}/m²` : null;
                               const beds = compOverrides[r._key]?.bedrooms ?? r.bedrooms;
                               const bedsCtl = (
                                 <span key="beds" style={{ display: 'inline-flex', alignItems: 'center', gap: '2px', color: '#64748b' }}>
@@ -3901,7 +3951,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                       bedsCtl,
                                       r.epcRating ? <span style={{ padding: '0 4px', borderRadius: '3px', background: epcBg, color: epcTxt, fontWeight: '700', lineHeight: '14px' }}>EPC {r.epcRating}</span> : null,
                                       r.habitableRooms ? `${r.habitableRooms} rooms` : null,
-                                      r.floorArea ? `${r.floorArea}m²` : null,
+                                      compFa > 0 ? `${compFa}m²` : null,
                                       ppsm,
                                       r.tier ? <span style={{ color: '#7c3aed' }}>{r.tier}</span> : null,
                                       r.notes || null,
@@ -4239,8 +4289,9 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     );
                   })()}
 
-                  {/* Bid & lot outcome — persists after recording; covers no-bid lots too */}
-                  {propCanvasTab === 'overview' && ((daysLeft !== null && daysLeft <= 0) || getBidResult(currentViewProperty) || currentViewProperty.lotOutcome || currentViewProperty.lotSalePrice) && (() => {
+                  {/* Bid & lot outcome — persists after recording; covers no-bid lots too.
+                      Hidden when Lost: the post-bid review panel binds the same fields. */}
+                  {propCanvasTab === 'overview' && st !== 'Lost' && ((daysLeft !== null && daysLeft <= 0) || getBidResult(currentViewProperty) || currentViewProperty.lotOutcome || currentViewProperty.lotSalePrice) && (() => {
                     const inpStyle2 = { width: '100%', padding: '6px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', fontFamily: 'inherit', background: '#fff', outline: 'none', boxSizing: 'border-box' };
                     const lbl2 = { fontSize: '10px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' };
                     return (
@@ -4264,13 +4315,99 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                           </div>
                           <div>
                             <div style={lbl2}>Bids we placed</div>
-                            <input type="number" value={currentViewProperty.bidsPlaced || ''} onChange={e => updateFieldInView('bidsPlaced', parseInt(e.target.value) || null)} placeholder="0" style={inpStyle2} />
+                            {currentViewProperty.bidLog?.length > 0 ? (
+                              <div style={{ ...inpStyle2, display: 'flex', alignItems: 'center', gap: '6px', background: '#f8fafc' }}>
+                                <span>{currentViewProperty.bidLog.length}</span>
+                                <span style={{ fontSize: '10px', color: '#94a3b8' }}>from bid log</span>
+                                <button onClick={() => setPropCanvasTab('bids')} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: '#7C3AED', fontSize: '10px', fontWeight: '600', fontFamily: 'inherit', padding: 0 }}>view log</button>
+                              </div>
+                            ) : (
+                              <input type="number" value={currentViewProperty.bidsPlaced || ''} onChange={e => updateFieldInView('bidsPlaced', parseInt(e.target.value) || null)} placeholder="0" style={inpStyle2} />
+                            )}
                           </div>
                           <div>
                             <div style={lbl2}>Total bids at auction</div>
                             <input type="number" value={currentViewProperty.lotBidCount || ''} onChange={e => updateFieldInView('lotBidCount', parseInt(e.target.value) || null)} placeholder="—" style={inpStyle2} />
                           </div>
                         </div>
+                        {currentViewProperty.lotResultFetchedAt && <div style={{ marginTop: '8px', fontSize: '10px', color: '#94a3b8' }}>Auto-fetched {fmtAt(currentViewProperty.lotResultFetchedAt)} · manual edits preserved</div>}
+                      </div>
+                    </div>
+                    );
+                  })()}
+
+                  {/* Post-bid review — Lost deals: winning bid vs our max, lot outcome */}
+                  {propCanvasTab === 'overview' && st === 'Lost' && (() => {
+                    const inpStyle3 = { width: '100%', padding: '6px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', fontFamily: 'inherit', background: '#fff', outline: 'none', boxSizing: 'border-box' };
+                    const lbl3 = { fontSize: '10px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' };
+                    const result = getBidResult(currentViewProperty);
+                    const resultLabel = { won: 'Won', outbid: 'Lost — outbid', no_bid: 'No bid placed', withdrawn: 'Withdrawn' }[result] || 'Lost';
+                    const bidCount = currentViewProperty.bidLog?.length || currentViewProperty.bidsPlaced || 0;
+                    const ourHighest = (currentViewProperty.bidLog || []).reduce((m, b) => Math.max(m, b.amount || 0), 0);
+                    const winning = parseFloat(currentViewProperty.lotSalePrice) || parseFloat(currentViewProperty.outbidPrice) || 0;
+                    const delta = winning && ourMaxBid ? winning - ourMaxBid : null;
+                    const maxPct = (ourMaxBid && reportMax) ? Math.round(ourMaxBid / reportMax * 100) : null;
+                    return (
+                    <div style={{ margin: '14px 20px', border: '1px solid #e2e8f0', borderRadius: '10px', overflow: 'hidden', background: '#fff' }}>
+                      <div style={{ padding: '10px 14px', borderBottom: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                        <span style={{ fontSize: '14px' }}>🔍</span>
+                        <span style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a' }}>Post-bid review</span>
+                        <span style={{ fontSize: '10px', fontWeight: '600', padding: '2px 8px', borderRadius: '10px', background: '#fee2e2', color: '#991b1b' }}>{resultLabel}</span>
+                        <button onClick={handleFetchLotResult} disabled={fetchingLotResult} title="Scrape the lot/listing page for sold status, price and bid count" style={{ marginLeft: 'auto', fontSize: '11px', fontWeight: '600', padding: '5px 11px', borderRadius: '6px', border: '1px solid #ddd6fe', background: '#f5f3ff', color: '#7C3AED', cursor: fetchingLotResult ? 'wait' : 'pointer', fontFamily: 'inherit' }}>{fetchingLotResult ? '⏳ Fetching…' : '⤓ Fetch result'}</button>
+                      </div>
+                      <div style={{ padding: '12px 14px' }}>
+                        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4,1fr)', gap: '8px' }}>
+                          <div>
+                            <div style={lbl3}>Winning bid</div>
+                            <input type="number" value={currentViewProperty.lotSalePrice || ''} onChange={e => updateFieldInView('lotSalePrice', parseInt(e.target.value) || null)} placeholder="£" style={inpStyle3} />
+                          </div>
+                          <div>
+                            <div style={lbl3}>Our max bid</div>
+                            <input type="number" value={currentViewProperty.ourMaxBid || currentViewProperty.maxBid || ''} onChange={e => updateFieldInView('ourMaxBid', parseInt(e.target.value) || 0)} placeholder="£" style={inpStyle3} />
+                          </div>
+                          <div>
+                            <div style={lbl3}>Bids we placed</div>
+                            {currentViewProperty.bidLog?.length > 0 ? (
+                              <div style={{ ...inpStyle3, background: '#f8fafc' }}>{bidCount} <span style={{ fontSize: '10px', color: '#94a3b8' }}>from bid log</span></div>
+                            ) : (
+                              <input type="number" value={currentViewProperty.bidsPlaced || ''} onChange={e => updateFieldInView('bidsPlaced', parseInt(e.target.value) || null)} placeholder="0" style={inpStyle3} />
+                            )}
+                            {ourHighest > 0 && <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '3px' }}>our highest £{ourHighest.toLocaleString()}</div>}
+                          </div>
+                          <div>
+                            <div style={lbl3}>{result === 'no_bid' ? 'Sold vs our plan' : 'Delta'}</div>
+                            {result === 'no_bid' ? (
+                              <div style={{ fontSize: '12px', fontWeight: '600', color: '#64748b', padding: '7px 0' }}>{winning ? `Went for £${winning.toLocaleString()}` : '—'}{ourMaxBid ? ` vs planned max £${ourMaxBid.toLocaleString()}` : ''}</div>
+                            ) : (
+                              <div style={{ fontSize: '12px', fontWeight: '600', color: delta == null ? '#94a3b8' : delta > 0 ? '#dc2626' : '#d97706', padding: '7px 0' }}>{delta == null ? '—' : delta > 0 ? `Lost by £${delta.toLocaleString()}` : `Winner £${Math.abs(delta).toLocaleString()} under our max`}</div>
+                            )}
+                          </div>
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4,1fr)', gap: '8px', marginTop: '10px' }}>
+                          <div>
+                            <div style={lbl3}>Lot outcome</div>
+                            <select value={currentViewProperty.lotOutcome || ''} onChange={e => updateFieldInView('lotOutcome', e.target.value)} style={inpStyle3}>
+                              <option value="">—</option><option value="Sold">Sold</option><option value="Unsold">Unsold</option><option value="Withdrawn">Withdrawn</option>
+                            </select>
+                          </div>
+                          <div>
+                            <div style={lbl3}>Total bids at auction</div>
+                            <input type="number" value={currentViewProperty.lotBidCount || ''} onChange={e => updateFieldInView('lotBidCount', parseInt(e.target.value) || null)} placeholder="—" style={inpStyle3} />
+                          </div>
+                          <div>
+                            <div style={lbl3}>Report max</div>
+                            <div style={{ fontSize: '12px', color: '#475569', padding: '7px 0' }}>{reportMax ? `£${reportMax.toLocaleString()}` : '—'}</div>
+                          </div>
+                          <div>
+                            <div style={lbl3}>Our max vs report</div>
+                            <div style={{ fontSize: '12px', color: maxPct != null && maxPct > 100 ? '#dc2626' : '#475569', padding: '7px 0' }}>{maxPct != null ? `${maxPct}% of report max` : '—'}</div>
+                          </div>
+                        </div>
+                        {(walkBid || targetBid || stretchBid) && (
+                          <div style={{ marginTop: '10px', paddingTop: '8px', borderTop: '1px solid #f1f5f9', fontSize: '11px', color: '#94a3b8' }}>
+                            Strategy was: walk away {walkBid ? `£${walkBid.toLocaleString()}` : '—'} · target {targetBid ? `£${targetBid.toLocaleString()}` : '—'} · stretch {stretchBid ? `£${stretchBid.toLocaleString()}` : '—'}
+                          </div>
+                        )}
                         {currentViewProperty.lotResultFetchedAt && <div style={{ marginTop: '8px', fontSize: '10px', color: '#94a3b8' }}>Auto-fetched {fmtAt(currentViewProperty.lotResultFetchedAt)} · manual edits preserved</div>}
                       </div>
                     </div>
@@ -4286,12 +4423,11 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     const predProfit = parseFloat(an.netProfit) || 0;
                     const totalInv = parseFloat(an.totalInvestment) || 0;
                     const predPremium = parseFloat(an.buyersPremium) || 0;
-                    const actPurchase = currentViewProperty.hammerPrice || 0;
                     const actRefurb = currentViewProperty.actualRefurbCost || 0;
-                    const actPremium = currentViewProperty.actualBuyersPremium || 0;
                     const actSale = currentViewProperty.actualSalePrice || 0;
-                    const otherCosts = Math.max(0, totalInv - predPurchase - predRefurb - predPremium) + actPremium;
-                    const actProfit = actSale ? Math.round(actSale - actPurchase - actRefurb - otherCosts) : null;
+                    const act = computeActuals(currentViewProperty);
+                    const actProfit = act ? act.netProfit : null;
+                    const estChip = <span style={{ fontSize: '9px', fontWeight: '600', background: '#fef3c7', color: '#92400e', padding: '0 4px', borderRadius: '3px', marginLeft: '3px' }}>est</span>;
                     const outLabel = { fontSize: '10px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '.05em' };
                     const outInput = { width: '100%', fontSize: '18px', fontWeight: '700', color: '#0f172a', marginTop: '4px', border: 'none', borderBottom: '1px dashed #e2e8f0', background: 'transparent', outline: 'none', fontFamily: 'inherit', padding: '1px 0', boxSizing: 'border-box' };
                     const outPred = { fontSize: '11px', color: '#94a3b8', marginTop: '3px' };
@@ -4323,19 +4459,24 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                           <div style={outPred}>Predicted: {predProfit ? `£${predProfit.toLocaleString()}` : '—'}</div>
                         </div>
                       </div>
+                      {act && (
+                        <div style={{ padding: '9px 14px', borderTop: '1px solid #f1f5f9', fontSize: '11px', color: '#64748b' }}>
+                          Hammer £{act.hammer.toLocaleString()} · Premium £{Math.round(act.premium).toLocaleString()}{act.premiumIsEstimate && act.premium > 0 ? estChip : null}{act.sdlt > 0 ? <> · SDLT £{act.sdlt.toLocaleString()} (recalc)</> : null} · Refurb £{Math.round(act.refurb).toLocaleString()}{act.refurbIsEstimate && act.refurb > 0 ? estChip : null}{act.estOther > 0 ? <> · Other £{Math.round(act.estOther).toLocaleString()} (est)</> : null} · Sale £{Math.round(act.sale).toLocaleString()}{act.saleIsEstimate && act.sale > 0 ? estChip : null}
+                        </div>
+                      )}
                       {actProfit != null && predProfit ? (
                         <div style={{ padding: '10px 14px', borderTop: '1px solid #f1f5f9', fontSize: '11px', color: '#64748b' }}>
                           Variance: <b style={{ color: (actProfit - predProfit) >= 0 ? '#059669' : '#dc2626' }}>{(actProfit - predProfit) >= 0 ? '+' : '−'}£{Math.abs(actProfit - predProfit).toLocaleString()} profit</b> vs prediction{actRefurb && predRefurb && actRefurb > predRefurb ? ` · refurb ran £${(actRefurb - predRefurb).toLocaleString()} over budget` : ''}{actSale && predSale && actSale < predSale ? ` · sold £${(predSale - actSale).toLocaleString()} under base GDV` : ''}{actSale && predSale && actSale > predSale ? ` · sold £${(actSale - predSale).toLocaleString()} over base GDV` : ''}
                         </div>
                       ) : (
-                        <div style={{ padding: '10px 14px', borderTop: '1px solid #f1f5f9', fontSize: '11px', color: '#94a3b8' }}>Enter actual refurb cost and sale price to complete the outturn.</div>
+                        <div style={{ padding: '10px 14px', borderTop: '1px solid #f1f5f9', fontSize: '11px', color: '#94a3b8' }}>{actProfit == null ? 'Enter the purchase (hammer) price to compute the outturn — refurb and sale fall back to report estimates until entered.' : 'No report prediction to compare against.'}</div>
                       )}
                     </div>
                     );
                   })()}
 
-                  {/* Bid strategy cards */}
-                  {propCanvasTab === 'overview' && (walkBid || targetBid || stretchBid) ? (
+                  {/* Bid strategy cards — hidden once Lost; post-bid review carries the numbers */}
+                  {propCanvasTab === 'overview' && st !== 'Lost' && (walkBid || targetBid || stretchBid) ? (
                     <div style={{ padding: '14px 20px', borderBottom: '0.5px solid #e2e8f0' }}>
                       <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <span>Bid strategy</span>
@@ -4982,6 +5123,62 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                               </div>
                             );
                           })}
+                        </div>
+                      )}
+                    </div>
+                    );
+                  })()}
+
+                  {propCanvasTab === 'bids' && (() => {
+                    const bids = [...(currentViewProperty.bidLog || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
+                    const highest = bids.reduce((m, b) => Math.max(m, b.amount || 0), 0);
+                    const overLimit = highest > 0 && ourMaxBid > 0 && highest > ourMaxBid;
+                    const chipStyle = { background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '8px 14px', minWidth: isMobile ? 'calc(50% - 4px)' : '120px', boxSizing: 'border-box' };
+                    const chipLbl = { fontSize: '10px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '.05em' };
+                    return (
+                    <div style={{ padding: '14px 20px 20px', borderBottom: '0.5px solid #e2e8f0' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                        <div style={{ fontSize: '10px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8' }}>Bid Log</div>
+                        <div style={{ fontSize: '11px', color: '#94a3b8' }}>{bids.length} bid{bids.length !== 1 ? 's' : ''}</div>
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '12px' }}>
+                        <div style={chipStyle}>
+                          <div style={chipLbl}>Bids placed</div>
+                          <div style={{ fontSize: '16px', fontWeight: '600', color: '#0f172a' }}>{bids.length}{currentViewProperty.bidsPlaced && currentViewProperty.bidsPlaced !== bids.length ? <span style={{ fontSize: '10px', fontWeight: '400', color: '#94a3b8' }}> (manual: {currentViewProperty.bidsPlaced})</span> : null}</div>
+                        </div>
+                        <div style={chipStyle}>
+                          <div style={chipLbl}>Our highest bid</div>
+                          <div style={{ fontSize: '16px', fontWeight: '600', color: overLimit ? '#dc2626' : '#0f172a' }}>{highest ? `£${highest.toLocaleString()}` : '—'}</div>
+                        </div>
+                        <div style={chipStyle}>
+                          <div style={chipLbl}>Our max bid limit</div>
+                          <div style={{ fontSize: '16px', fontWeight: '600', color: '#0f172a' }}>{ourMaxBid ? `£${ourMaxBid.toLocaleString()}` : '—'}</div>
+                        </div>
+                      </div>
+                      {overLimit && (
+                        <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', padding: '8px 12px', fontSize: '12px', color: '#92400e', marginBottom: '12px' }}>⚠️ Highest logged bid exceeds our max bid limit</div>
+                      )}
+                      <form
+                        onSubmit={e => { e.preventDefault(); addBid(parseFloat(bidAmountInput), bidNoteInput); setBidAmountInput(''); setBidNoteInput(''); }}
+                        style={{ display: 'flex', gap: '8px', flexDirection: isMobile ? 'column' : 'row', marginBottom: '14px' }}
+                      >
+                        <input type="number" min="1" placeholder="Bid amount £" value={bidAmountInput} onChange={e => setBidAmountInput(e.target.value)} style={{ width: isMobile ? '100%' : '150px', padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' }} />
+                        <input placeholder="Note (optional)" value={bidNoteInput} onChange={e => setBidNoteInput(e.target.value)} style={{ flex: 1, padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' }} />
+                        <button type="submit" disabled={!(parseFloat(bidAmountInput) > 0)} style={{ padding: isMobile ? '12px' : '7px 16px', borderRadius: '6px', border: 'none', background: parseFloat(bidAmountInput) > 0 ? '#059669' : '#e2e8f0', color: parseFloat(bidAmountInput) > 0 ? '#fff' : '#94a3b8', fontSize: '12px', fontWeight: '600', cursor: parseFloat(bidAmountInput) > 0 ? 'pointer' : 'default', fontFamily: 'inherit' }}>Log bid</button>
+                      </form>
+                      {bids.length === 0 ? (
+                        <div style={{ textAlign: 'center', padding: '24px 0', color: '#94a3b8', fontSize: '12px', border: '1px dashed #e2e8f0', borderRadius: '8px' }}>No bids logged yet.<br /><span style={{ fontSize: '11px' }}>Log each bid as you place it during the auction.</span></div>
+                      ) : (
+                        <div style={{ border: '1px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden' }}>
+                          {bids.map((b, idx) => (
+                            <div key={b.id} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 12px', borderTop: idx > 0 ? '1px solid #f1f5f9' : 'none', background: b.amount === highest ? '#f0fdf4' : '#fff' }}>
+                              <span style={{ fontSize: '13px', fontWeight: '600', color: b.amount === highest ? '#059669' : '#0f172a', whiteSpace: 'nowrap' }}>£{(b.amount || 0).toLocaleString()}</span>
+                              {b.amount === highest && <span style={{ fontSize: '10px', fontWeight: '600', background: '#059669', color: '#fff', padding: '1px 6px', borderRadius: '3px', flexShrink: 0 }}>HIGH</span>}
+                              <span style={{ fontSize: '12px', color: '#64748b', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.note}</span>
+                              <span style={{ fontSize: '11px', color: '#94a3b8', whiteSpace: 'nowrap', flexShrink: 0 }}>{fmtAt(b.at)}</span>
+                              <button onClick={() => updateFieldInView('bidLog', (currentViewProperty.bidLog || []).filter(x => x.id !== b.id))} title="Delete bid" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '12px', padding: isMobile ? '10px' : '2px 6px', lineHeight: 1, fontFamily: 'inherit' }}>✕</button>
+                            </div>
+                          ))}
                         </div>
                       )}
                     </div>
@@ -6164,7 +6361,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                     {p.propertyType && <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '8px', backgroundColor: '#f1f5f9', color: '#475569', fontWeight: '500' }}>{p.propertyType}</span>}
                                   </div>
                                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                    <div style={{ fontSize: '11px', color: '#64748b' }}>Guide: <b style={{ color: '#0f172a' }}>£{(p.guidePrice || 0).toLocaleString()}</b>{p.maxBid > 0 ? <> · Max: <b style={{ color: '#059669' }}>£{p.maxBid.toLocaleString()}</b></> : ''}</div>
+                                    <div style={{ fontSize: '11px', color: '#64748b' }}>Guide: <b style={{ color: '#0f172a' }}>£{(p.guidePrice || 0).toLocaleString()}</b>{(() => { const fa = parseFloat(p.floorArea) || parseFloat(p.analytics?.floorArea) || 0; return (fa > 0 && p.guidePrice > 0) ? <> · £{Math.round(p.guidePrice / fa).toLocaleString()}/m²</> : null; })()}{p.maxBid > 0 ? <> · Max: <b style={{ color: '#059669' }}>£{p.maxBid.toLocaleString()}</b></> : ''}</div>
                                     {days !== null && <span style={{ fontSize: '11px', fontWeight: '700', padding: '2px 7px', borderRadius: '10px', backgroundColor: days <= 3 && days >= 0 ? '#fef2f2' : '#e0f2fe', color: days <= 3 && days >= 0 ? '#dc2626' : '#0369a1' }}>{days === 0 ? 'Today' : days < 0 ? 'Past' : `${days}d`}</span>}
                                   </div>
                                 </div>
@@ -6175,7 +6372,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                         </div>
                       ) : (
                       <div style={{ overflowX: 'auto' }} className="crm-table-wrap">
-                        <table style={{ width: '100%', minWidth: '700px', borderCollapse: 'collapse', fontSize: '13px', textAlign: 'left' }}>
+                        <table style={{ width: '100%', minWidth: '780px', borderCollapse: 'collapse', fontSize: '13px', textAlign: 'left' }}>
                           <thead>
                             <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
                               {bulkMode && <th style={{ padding: '12px 16px', width: '36px', textAlign: 'center' }}><input type="checkbox" checked={bulkSelectedIds.length === pipelineProperties.length && pipelineProperties.length > 0} onChange={e => setBulkSelectedIds(e.target.checked ? pipelineProperties.map(p => p.id) : [])} /></th>}
@@ -6184,6 +6381,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                               <th style={{ padding: '12px 16px' }}>Type</th>
                               <th style={{ padding: '12px 16px' }}>Platform</th>
                               <th style={{ padding: '12px 16px' }}>Guide</th>
+                              <th style={{ padding: '12px 16px' }}>Guide £/m²</th>
                               <th style={{ padding: '12px 16px' }}>Max bid</th>
                               <th style={{ padding: '12px 16px' }}>Auction date</th>
                               <th style={{ padding: '12px 16px' }}>Countdown</th>
@@ -6200,6 +6398,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                 <td style={{ padding: '12px 16px', color: '#475569', fontSize: '12px' }}>{p.propertyType || '—'}</td>
                                 <td style={{ padding: '12px 16px', color: '#475569', fontSize: '12px' }}>{p.sourcePlatform}</td>
                                 <td style={{ padding: '12px 16px', fontWeight: '600' }}>£{(p.guidePrice || 0).toLocaleString()}</td>
+                                <td style={{ padding: '12px 16px', color: '#475569', fontSize: '12px' }}>{(() => { const fa = parseFloat(p.floorArea) || parseFloat(p.analytics?.floorArea) || 0; return (fa > 0 && p.guidePrice > 0) ? `£${Math.round(p.guidePrice / fa).toLocaleString()}` : '—'; })()}</td>
                                 <td style={{ padding: '12px 16px', fontWeight: '600', color: '#059669' }}>{p.maxBid > 0 ? `£${p.maxBid?.toLocaleString()}` : '—'}</td>
                                 <td style={{ padding: '12px 16px', color: '#334155', fontSize: '12px' }}>{p.auctionDate}</td>
                                 <td style={{ padding: '12px 16px' }}><span style={{ padding: '3px 8px', borderRadius: '10px', fontSize: '11px', fontWeight: '600', backgroundColor: getCountdown(p.auctionDate) === 'Past' ? '#f1f5f9' : '#e0f2fe', color: getCountdown(p.auctionDate) === 'Past' ? '#94a3b8' : '#0369a1' }}>{getCountdown(p.auctionDate)}</span></td>
