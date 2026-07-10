@@ -560,7 +560,12 @@ export default function App({ user = {}, onLogout }) {
   const [newCardTypeAppliesTo, setNewCardTypeAppliesTo] = useState('both');
   const [newCardTypeFields, setNewCardTypeFields] = useState([]);
   const [editingCardTypeId, setEditingCardTypeId] = useState(null);
+  const [contactActivityTab, setContactActivityTab] = useState('activity');
+  const [contactActivityFilter, setContactActivityFilter] = useState('All');
+  const [contactRailTab, setContactRailTab] = useState('company');
+  const [contactRailPanel, setContactRailPanel] = useState(null);
   const companyNoteRef = useRef(null);
+  const contactNoteRef = useRef(null);
   const [settingsSection, setSettingsSection] = useState('profile');
   const [newCompPhone, setNewCompPhone] = useState('');
   const [newCompPremium, setNewCompPremium] = useState('');
@@ -5376,7 +5381,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 <h4 style={{ margin: '0 0 10px 0', fontSize: '11px', color: '#475569', textTransform: 'uppercase', fontWeight: '700' }}>Associated Firm Contacts</h4>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                   {contacts.filter(con => con.companyId === currentViewCompany.id).map(con => (
-                    <div key={con.id} onClick={() => setCurrentViewContact(con)} style={{ padding: '8px 12px', backgroundColor: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', fontWeight: '600', color: '#0284c7' }}>
+                    <div key={con.id} onClick={() => { setCurrentViewContact(con); setContactActivityTab('activity'); setContactActivityFilter('All'); setContactRailTab('company'); setContactRailPanel(null); setRailSearch(''); }} style={{ padding: '8px 12px', backgroundColor: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', cursor: 'pointer', fontWeight: '600', color: '#0284c7' }}>
                       {con.name} ({con.jobTitle})
                     </div>
                   ))}
@@ -7663,7 +7668,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
               {/* ==================== TAB: CONTACTS (Option A) ==================== */}
               {activeTab === 'contacts' && (
                 <div style={{ display: 'flex', gap: '0', minHeight: 0, flex: '1 1 0', overflow: 'hidden', backgroundColor: '#ffffff', borderRadius: isMobile ? '8px' : '12px', border: '1px solid #e2e8f0' }}>
-                  {/* Left: table + search */}
+                  {/* Full-width list / new form / record view */}
+                  {!currentViewContact ? (
                   <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
                     {/* Toolbar */}
                     <div style={{ padding: '10px 14px', borderBottom: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', gap: '6px' }}>
@@ -7758,7 +7764,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                             const linkedCo = companies.find(c => c.id === con.companyId);
                             const initials = con.name.split(' ').map(n => n[0]).join('').slice(0,2).toUpperCase();
                             return (
-                              <div key={con.id} onClick={() => setCurrentViewContact(con)} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0', marginBottom: '8px', background: '#fff', cursor: 'pointer' }}>
+                              <div key={con.id} onClick={() => { setCurrentViewContact(con); setContactActivityTab('activity'); setContactActivityFilter('All'); setContactRailTab('company'); setContactRailPanel(null); setRailSearch(''); }} style={{ display: 'flex', alignItems: 'center', gap: '12px', padding: '12px', borderRadius: '8px', border: '1px solid #e2e8f0', marginBottom: '8px', background: '#fff', cursor: 'pointer' }}>
                                 <div style={{ width: '36px', height: '36px', borderRadius: '50%', backgroundColor: '#e0f2fe', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: '700', color: '#0369a1', flexShrink: 0 }}>{initials}</div>
                                 <div style={{ flex: 1, minWidth: 0 }}>
                                   <div style={{ fontWeight: '600', color: '#0f172a', fontSize: '13px', marginBottom: '2px' }}>{con.name}</div>
@@ -7791,7 +7797,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                             const linkedCo = companies.find(c => c.id === con.companyId);
                             const initials = con.name.split(' ').map(n => n[0]).join('').slice(0,2).toUpperCase();
                             return (
-                              <tr key={con.id} onClick={() => setCurrentViewContact(con)} style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', backgroundColor: currentViewContact?.id === con.id ? '#f0fdf4' : '#ffffff' }}>
+                              <tr key={con.id} onClick={() => { setCurrentViewContact(con); setContactActivityTab('activity'); setContactActivityFilter('All'); setContactRailTab('company'); setContactRailPanel(null); setRailSearch(''); }} style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer', backgroundColor: currentViewContact?.id === con.id ? '#f0fdf4' : '#ffffff' }}>
                                 <td style={{ padding: '11px 14px' }}>
                                   <div style={{ display: 'flex', alignItems: 'center', gap: '9px' }}>
                                     <div style={{ width: '28px', height: '28px', borderRadius: '50%', backgroundColor: '#e0f2fe', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '10px', fontWeight: '700', color: '#0369a1', flexShrink: 0 }}>{initials}</div>
@@ -7816,100 +7822,11 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     </div>
                   </div>
 
-                  {/* Right panel — fully editable */}
-                  {currentViewContact && !currentViewContact._new && (
-                    <div style={{ width: isMobile ? '100%' : '320px', borderLeft: isMobile ? 'none' : '1px solid #e2e8f0', borderTop: isMobile ? '1px solid #e2e8f0' : 'none', display: 'flex', flexDirection: 'column', overflow: 'hidden', flexShrink: 0 }}>
-                      {/* Header */}
-                      <div style={{ padding: '14px 16px', borderBottom: '1px solid #e2e8f0', backgroundColor: '#fff', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                          <div style={{ width: '36px', height: '36px', borderRadius: '50%', backgroundColor: '#e0f2fe', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: '700', color: '#0369a1', flexShrink: 0 }}>{currentViewContact.name.split(' ').map(n=>n[0]).join('').slice(0,2).toUpperCase()}</div>
-                          <div>
-                            <div style={{ fontSize: '13px', fontWeight: '600', color: '#0f172a' }}>{currentViewContact.name}</div>
-                            <div style={{ fontSize: '11px', color: '#64748b' }}>{currentViewContact.jobTitle || 'No title'}</div>
-                          </div>
-                        </div>
-                        <div style={{ display: 'flex', gap: '6px' }}>
-                          <button onClick={() => { if(window.confirm(`Delete ${currentViewContact.name}?`)) { setContacts(contacts.filter(c => c.id !== currentViewContact.id)); setCurrentViewContact(null); }}} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#fca5a5', padding: '2px' }}><Trash2 size={13} /></button>
-                          <button onClick={() => setCurrentViewContact(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', padding: '2px' }}><X size={14} /></button>
-                        </div>
-                      </div>
-                      <div style={{ flex: 1, overflowY: 'auto', padding: '14px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                        {/* Editable fields */}
-                        {[
-                          ['Full name', 'name', 'text', 'Full name'],
-                          ['Job title', 'jobTitle', 'text', 'e.g. Director'],
-                          ['Email', 'email', 'email', 'Email address'],
-                          ['Mobile', 'phone', 'tel', 'Mobile number'],
-                          ['Office phone', 'officePhone', 'tel', 'Office / landline'],
-                          ['LinkedIn', 'linkedin', 'url', 'linkedin.com/in/...'],
-                        ].map(([label, field, type, ph]) => (
-                          <div key={field}>
-                            <label style={{ display: 'block', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '3px' }}>{label}</label>
-                            <input type={type} value={currentViewContact[field] || ''} onChange={e => updateContactField(field, e.target.value)} placeholder={ph} style={{ width: '100%', padding: '7px 9px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', boxSizing: 'border-box' }} />
-                          </div>
-                        ))}
-                        <div>
-                          <label style={{ display: 'block', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '3px' }}>Company</label>
-                          <select value={currentViewContact.companyId || ''} onChange={e => updateContactField('companyId', parseInt(e.target.value) || null)} style={{ width: '100%', padding: '7px 9px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', backgroundColor: '#fff' }}>
-                            <option value="">None</option>
-                            {companies.map(c => <option key={c.id} value={c.id}>{c.name} ({c.type})</option>)}
-                          </select>
-                        </div>
-                        <div>
-                          <label style={{ display: 'block', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '3px' }}>Role</label>
-                          <select value={currentViewContact.role || ''} onChange={e => updateContactField('role', e.target.value)} style={{ width: '100%', padding: '7px 9px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', backgroundColor: '#fff' }}>
-                            <option value="">Select role…</option>
-                            <option value="Surveyor">Surveyor</option>
-                            <option value="Agent">Agent</option>
-                            <option value="Solicitor">Solicitor</option>
-                            <option value="Broker">Broker</option>
-                            <option value="Contractor">Contractor</option>
-                            <option value="Investor">Investor</option>
-                            <option value="Other">Other</option>
-                          </select>
-                        </div>
-                        <div>
-                          <label style={{ display: 'block', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '3px' }}>How we met</label>
-                          <input value={currentViewContact.origin || ''} onChange={e => updateContactField('origin', e.target.value)} placeholder="e.g. Auction, Referral, LinkedIn" style={{ width: '100%', padding: '7px 9px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', boxSizing: 'border-box' }} />
-                        </div>
 
-                        {/* Notes */}
-                        <div style={{ borderTop: '1px solid #f1f5f9', paddingTop: '10px' }}>
-                          <div style={{ fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '8px' }}>Activity notes</div>
-                          {globalNotes.filter(n => n.targetType === 'Contact' && n.targetId === currentViewContact.id).sort((a, b) => b.date.localeCompare(a.date)).map(n => (
-                            <div key={n.id} style={{ padding: '8px 10px', backgroundColor: NOTE_TYPE_BG[n.type] || '#f8fafc', border: '1px solid ' + (NOTE_TYPE_COLORS[n.type] ? NOTE_TYPE_COLORS[n.type] + '33' : '#e2e8f0'), borderRadius: '6px', marginBottom: '6px', position: 'relative' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '3px' }}>
-                                <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', backgroundColor: NOTE_TYPE_COLORS[n.type] || '#94a3b8', color: '#fff', fontWeight: '600' }}>{n.type}</span>
-                                <span style={{ fontSize: '10px', color: '#94a3b8' }}>{n.date} · {n.author}</span>
-                              </div>
-                              <div style={{ fontSize: '12px', color: NOTE_TYPE_TEXT[n.type] || '#0f172a' }}>{n.text}</div>
-                              <button onClick={() => setGlobalNotes(globalNotes.filter(x => x.id !== n.id))} style={{ position: 'absolute', top: '6px', right: '6px', background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '12px', lineHeight: 1 }}>✕</button>
-                            </div>
-                          ))}
-                          {globalNotes.filter(n => n.targetType === 'Contact' && n.targetId === currentViewContact.id).length === 0 && <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '8px' }}>No notes yet</div>}
-                          <form onSubmit={e => handleAddUnifiedNote(e, 'Contact', currentViewContact.id)} style={{ marginTop: '8px' }}>
-                            <textarea value={noteText} onChange={e => setNoteText(e.target.value)} placeholder="Add a note…" rows={3} style={{ width: '100%', padding: '8px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', boxSizing: 'border-box', resize: 'vertical' }} />
-                            <div style={{ display: 'flex', gap: '6px', marginTop: '6px' }}>
-                              <select value={noteType} onChange={e => setNoteType(e.target.value)} style={{ flex: 1, padding: '6px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', backgroundColor: '#fff' }}>
-                                <option value="Call">📞 Call</option>
-                                <option value="Meeting">🤝 Meeting</option>
-                                <option value="Email">✉️ Email</option>
-                                <option value="Review">📋 Review</option>
-                                <option value="Task">✅ Task</option>
-                                <option value="Flag">🚩 Flag</option>
-                              </select>
-                              <button type="submit" style={{ padding: '6px 12px', backgroundColor: '#0f172a', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: '600', cursor: 'pointer' }}>Add</button>
-                            </div>
-                          </form>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  {/* New contact form panel */}
-                  {currentViewContact?._new && (
-                    <div style={{ width: '300px', borderLeft: '1px solid #e2e8f0', padding: '20px', overflowY: 'auto', flexShrink: 0 }}>
-                      <div style={{ fontSize: '14px', fontWeight: '600', color: '#0f172a', marginBottom: '16px' }}>New contact</div>
-                      <form onSubmit={(e) => { handleAddContact(e); setCurrentViewContact(null); }} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  ) : currentViewContact._new ? (
+                    <div style={{ flex: 1, padding: '24px', overflowY: 'auto' }}>
+                      <div style={{ fontSize: '15px', fontWeight: '600', color: '#0f172a', marginBottom: '20px' }}>New contact</div>
+                      <form onSubmit={(e) => { handleAddContact(e); setCurrentViewContact(null); }} style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxWidth: '480px' }}>
                         {[['Name *', newConName, setNewConName, 'text', 'Full name'], ['Email', newConEmail, setNewConEmail, 'email', 'Email address'], ['Mobile', newConPhone, setNewConPhone, 'tel', 'Mobile number'], ['Job title', newConTitle, setNewConTitle, 'text', 'e.g. Director']].map(([label, val, setter, type, ph]) => (
                           <div key={label}><label style={{ fontSize: '11px', fontWeight: '600', color: '#64748b', display: 'block', marginBottom: '3px' }}>{label}</label><input type={type} placeholder={ph} value={val} onChange={e => setter(e.target.value)} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', boxSizing: 'border-box' }} /></div>
                         ))}
@@ -7941,6 +7858,365 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                           <button type="button" onClick={() => setCurrentViewContact(null)} style={{ flex: 1, padding: '9px', backgroundColor: '#fff', color: '#475569', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', cursor: 'pointer' }}>Cancel</button>
                         </div>
                       </form>
+                    </div>
+                  ) : (
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                      {(() => {
+                        const con = contacts.find(c => c.id === currentViewContact.id) || currentViewContact;
+                        const linkedCo = companies.find(c => c.id === con.companyId);
+                        const contactNotes = globalNotes.filter(n => (n.targetType || '').toLowerCase() === 'contact' && n.targetId === con.id).sort((a, b) => b.date.localeCompare(a.date));
+                        const visibleNotes = contactActivityFilter === 'All' ? contactNotes : contactNotes.filter(n => n.type === contactActivityFilter);
+                        const contactQuotes = refurbQuotes.filter(q => String(q.contactId) === String(con.id));
+                        const directProps = properties.filter(p => (con.linkedPropertyIds || []).includes(p.id));
+                        const viaCompanyProps = linkedCo ? properties.filter(p => !(con.linkedPropertyIds || []).includes(p.id) && (p.sourcePlatform === linkedCo.name || (p.linkedCompanyIds || []).includes(linkedCo.id))) : [];
+                        const initials = (con.name || '?').split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase();
+                        const today = new Date().toISOString().split('T')[0];
+                        const labelStyle = { display: 'block', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '5px' };
+                        const inputStyle = { width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box', backgroundColor: '#fff' };
+                        const cardStyle = { backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '14px', marginBottom: '12px' };
+                        const sectionTitle = { fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: '600', marginBottom: '12px' };
+                        const quickActionStyle = { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '3px', minHeight: '44px', padding: '7px 4px', border: '1px solid #e2e8f0', borderRadius: '8px', backgroundColor: '#f8fafc', fontSize: '11px', fontWeight: '600', color: '#475569', cursor: 'pointer', textDecoration: 'none' };
+                        const RAIL_META = {
+                          company: { label: 'Company', Icon: Briefcase, count: linkedCo ? 1 : 0 },
+                          properties: { label: 'Properties', Icon: MapPin, count: directProps.length + viaCompanyProps.length },
+                          quotes: { label: 'Quotes', Icon: FileText, count: contactQuotes.length },
+                          add: { label: 'Custom cards', Icon: Plus, count: 0 },
+                        };
+                        const contactCardTypes = customCardTypes.filter(t => t.appliesTo !== 'company');
+                        contactCardTypes.forEach(t => { RAIL_META[`card_${t.id}`] = { label: t.name, Icon: CARD_ICONS[t.icon] || Layers, count: (con.customCards || []).filter(cc => cc.cardTypeId === t.id).length, cardType: t }; });
+                        const railKeys = ['company', 'properties', 'quotes', ...contactCardTypes.map(t => `card_${t.id}`), 'add'];
+                        const activeRail = RAIL_META[contactRailTab] ? contactRailTab : 'company';
+                        const openContactTaskDrawer = () => {
+                          setDraftTask({
+                            id: null, title: '', dueDate: '', priority: 'Medium',
+                            status: 'not_started', linkedType: 'Contact', linkedId: con.id, linkedName: con.name,
+                            notes: '', assignee: user.name || 'Ashley',
+                            createdDate: today, createdBy: user.name || 'Ashley',
+                            waitingOn: '', expectedResponseDate: '', subtasks: [], comments: [], reminders: [],
+                            activityLog: [{ id: Date.now(), type: 'created', detail: 'Task created', user: user.name || 'You', at: new Date().toISOString() }],
+                          });
+                          setDrawerMode('create');
+                          setShowTaskDrawer(true);
+                        };
+                        return (
+                          <>
+                            <div style={{ padding: isMobile ? '12px 14px' : '14px 20px', borderBottom: '1px solid #e2e8f0', backgroundColor: '#fff', flexShrink: 0 }}>
+                              <button onClick={() => { setCurrentViewContact(null); setContactRailPanel(null); }} style={{ display: 'flex', alignItems: 'center', gap: '5px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px', color: '#64748b', padding: '0 0 10px 0', fontFamily: 'inherit' }}>
+                                <ArrowLeft size={13} /> All contacts
+                              </button>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
+                                  <div style={{ width: '44px', height: '44px', borderRadius: '50%', backgroundColor: '#e0f2fe', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '15px', fontWeight: '700', color: '#0369a1', flexShrink: 0 }}>{initials}</div>
+                                  <div style={{ minWidth: 0 }}>
+                                    <div style={{ fontSize: '16px', fontWeight: '600', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{con.name}</div>
+                                    <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginTop: '2px', flexWrap: 'wrap' }}>
+                                      {con.role && <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '4px', backgroundColor: '#f0fdf4', color: '#065f46', fontWeight: '600' }}>{con.role}</span>}
+                                      {con.jobTitle && con.jobTitle !== '--' && <span style={{ fontSize: '11px', color: '#64748b' }}>{con.jobTitle}</span>}
+                                      {linkedCo && <span style={{ fontSize: '11px', color: '#0369a1', cursor: 'pointer' }} onClick={() => { setActiveTab('companies'); setCurrentViewCompany(linkedCo); setCompanyDetailTab('overview'); setCompanyActivityTab('activity'); setCompanyRailTab((DEFAULT_RAIL_TABS[linkedCo.type] || DEFAULT_RAIL_TABS._default)[0]); setCompanyRailPanel(null); }}>{linkedCo.name}</span>}
+                                      {con.email && <span style={{ fontSize: '11px', color: '#64748b' }}>{con.email}</span>}
+                                    </div>
+                                  </div>
+                                </div>
+                                <button onClick={() => { if(window.confirm(`Delete ${con.name}?`)) { setContacts(contacts.filter(c => c.id !== con.id)); setCurrentViewContact(null); }}} style={{ padding: '6px 12px', border: '1px solid #fca5a5', borderRadius: '6px', backgroundColor: '#fef2f2', fontSize: '12px', color: '#dc2626', cursor: 'pointer', flexShrink: 0 }}>Delete</button>
+                              </div>
+                            </div>
+                            <div style={{ flex: 1, display: 'flex', flexDirection: isMobile ? 'column' : 'row', overflow: isMobile ? 'auto' : 'hidden', minHeight: 0, backgroundColor: '#f8fafc' }}>
+                              <div style={{ width: isMobile ? '100%' : '26%', minWidth: isMobile ? 0 : '250px', borderRight: isMobile ? 'none' : '1px solid #e2e8f0', overflowY: isMobile ? 'visible' : 'auto', padding: '14px', backgroundColor: '#fff', flexShrink: 0 }}>
+                                <div style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
+                                  <button onClick={() => { setContactActivityTab('activity'); setTimeout(() => contactNoteRef.current?.focus(), 50); }} style={quickActionStyle}><MessageSquare size={15} />Note</button>
+                                  <button onClick={openContactTaskDrawer} style={quickActionStyle}><ClipboardList size={15} />Task</button>
+                                  {con.phone && con.phone !== '--' ? <a href={`tel:${con.phone}`} style={quickActionStyle}><Phone size={15} />Call</a> : <button disabled style={{ ...quickActionStyle, opacity: 0.4, cursor: 'default' }}><Phone size={15} />Call</button>}
+                                  {con.email ? <a href={`mailto:${con.email}`} style={quickActionStyle}><Mail size={15} />Email</a> : <button disabled style={{ ...quickActionStyle, opacity: 0.4, cursor: 'default' }}><Mail size={15} />Email</button>}
+                                </div>
+                                <div style={cardStyle}>
+                                  <div style={sectionTitle}>About this contact</div>
+                                  {[
+                                    ['Full name', 'name', 'text', 'Full name'],
+                                    ['Job title', 'jobTitle', 'text', 'e.g. Director'],
+                                    ['Email', 'email', 'email', 'Email address'],
+                                    ['Mobile', 'phone', 'tel', 'Mobile number'],
+                                    ['Office phone', 'officePhone', 'tel', 'Office / landline'],
+                                    ['LinkedIn', 'linkedin', 'url', 'linkedin.com/in/...'],
+                                  ].map(([label, field, type, ph]) => (
+                                    <div key={field} style={{ marginBottom: '12px' }}>
+                                      <label style={labelStyle}>{label}</label>
+                                      <input type={type} value={con[field] || ''} onChange={e => updateContactField(field, e.target.value)} placeholder={ph} style={inputStyle} />
+                                    </div>
+                                  ))}
+                                  <div style={{ marginBottom: '12px' }}>
+                                    <label style={labelStyle}>Company</label>
+                                    <select value={con.companyId || ''} onChange={e => updateContactField('companyId', parseInt(e.target.value) || null)} style={inputStyle}>
+                                      <option value="">None</option>
+                                      {companies.map(c => <option key={c.id} value={c.id}>{c.name} ({c.type})</option>)}
+                                    </select>
+                                  </div>
+                                  <div style={{ marginBottom: '12px' }}>
+                                    <label style={labelStyle}>Role</label>
+                                    <select value={con.role || ''} onChange={e => updateContactField('role', e.target.value)} style={inputStyle}>
+                                      <option value="">Select role…</option>
+                                      <option value="Surveyor">Surveyor</option>
+                                      <option value="Agent">Agent</option>
+                                      <option value="Solicitor">Solicitor</option>
+                                      <option value="Broker">Broker</option>
+                                      <option value="Contractor">Contractor</option>
+                                      <option value="Investor">Investor</option>
+                                      <option value="Other">Other</option>
+                                    </select>
+                                  </div>
+                                  <div style={{ marginBottom: '2px' }}>
+                                    <label style={labelStyle}>How we met</label>
+                                    <input value={con.origin || ''} onChange={e => updateContactField('origin', e.target.value)} placeholder="e.g. Auction, Referral, LinkedIn" style={inputStyle} />
+                                  </div>
+                                </div>
+                                <div style={{ ...cardStyle, marginBottom: 0 }}>
+                                  <div style={sectionTitle}>Custom fields</div>
+                                  {(con.customFields || []).map(cf => (
+                                    <div key={cf.id} style={{ marginBottom: '12px' }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '5px' }}>
+                                        <input value={cf.label} onChange={e => updateContactField('customFields', (con.customFields || []).map(x => x.id === cf.id ? { ...x, label: e.target.value } : x))} style={{ ...labelStyle, border: 'none', background: 'transparent', padding: 0, flex: 1, marginBottom: 0, outline: 'none', fontFamily: 'inherit' }} />
+                                        <button onClick={() => updateContactField('customFields', (con.customFields || []).filter(x => x.id !== cf.id))} title="Remove field" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '11px', lineHeight: 1, padding: '2px' }}>✕</button>
+                                      </div>
+                                      <input value={cf.value || ''} onChange={e => updateContactField('customFields', (con.customFields || []).map(x => x.id === cf.id ? { ...x, value: e.target.value } : x))} style={inputStyle} />
+                                    </div>
+                                  ))}
+                                  {(con.customFields || []).length === 0 && <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '10px' }}>Add any extra detail you want to track for this contact.</div>}
+                                  <div style={{ display: 'flex', gap: '6px' }}>
+                                    <input placeholder="Field name" value={newCustomFieldLabel} onChange={e => setNewCustomFieldLabel(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
+                                    <input placeholder="Value" value={newCustomFieldValue} onChange={e => setNewCustomFieldValue(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
+                                  </div>
+                                  <button onClick={() => { if (!newCustomFieldLabel.trim()) return; updateContactField('customFields', [...(con.customFields || []), { id: Date.now(), label: newCustomFieldLabel.trim(), value: newCustomFieldValue }]); setNewCustomFieldLabel(''); setNewCustomFieldValue(''); }} style={{ width: '100%', marginTop: '8px', padding: '8px', border: '1px dashed #cbd5e1', borderRadius: '6px', backgroundColor: '#f8fafc', fontSize: '12px', color: '#475569', cursor: 'pointer' }}>+ Add field</button>
+                                </div>
+                              </div>
+                              <div style={{ flex: 1, minWidth: 0, overflowY: isMobile ? 'visible' : 'auto', padding: '14px' }}>
+                                <div style={{ display: 'flex', gap: '16px', borderBottom: '1px solid #e2e8f0', marginBottom: '12px' }}>
+                                  {[['activity', 'Activity'], ['overview', 'Overview']].map(([key, label]) => (
+                                    <button key={key} onClick={() => setContactActivityTab(key)} style={{ padding: '4px 0 8px', fontSize: '12px', fontWeight: '500', background: 'none', border: 'none', cursor: 'pointer', color: contactActivityTab === key ? '#059669' : '#94a3b8', borderBottom: contactActivityTab === key ? '2px solid #059669' : '2px solid transparent', marginBottom: '-1px' }}>{label}</button>
+                                  ))}
+                                </div>
+                                {contactActivityTab === 'activity' && (
+                                  <>
+                                    <form onSubmit={e => handleAddUnifiedNote(e, 'Contact', con.id)} style={{ ...cardStyle, padding: '12px' }}>
+                                      <textarea ref={contactNoteRef} value={noteText} onChange={e => setNoteText(e.target.value)} placeholder="Log a call, meeting, email or note…" rows={3} style={{ width: '100%', padding: '8px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit' }} />
+                                      <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
+                                        <select value={noteType} onChange={e => setNoteType(e.target.value)} style={{ flex: 1, maxWidth: '160px', padding: '6px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', backgroundColor: '#fff' }}>
+                                          <option value="Call">📞 Call</option>
+                                          <option value="Meeting">🤝 Meeting</option>
+                                          <option value="Email">✉️ Email</option>
+                                          <option value="Review">📋 Review</option>
+                                          <option value="Task">✅ Task</option>
+                                          <option value="Flag">🚩 Flag</option>
+                                        </select>
+                                        <button type="submit" style={{ padding: '6px 16px', backgroundColor: '#0f172a', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: '600', cursor: 'pointer', marginLeft: 'auto' }}>Log</button>
+                                      </div>
+                                    </form>
+                                    <div style={{ display: 'flex', gap: '5px', marginBottom: '12px', flexWrap: 'wrap' }}>
+                                      {['All', ...new Set(contactNotes.map(n => n.type))].map(t => (
+                                        <button key={t} onClick={() => setContactActivityFilter(t)} style={{ padding: '3px 10px', borderRadius: '20px', border: '1px solid ' + (contactActivityFilter === t ? '#059669' : '#e2e8f0'), backgroundColor: contactActivityFilter === t ? '#f0fdf4' : '#fff', color: contactActivityFilter === t ? '#059669' : '#64748b', fontSize: '11px', cursor: 'pointer' }}>{t}</button>
+                                      ))}
+                                    </div>
+                                    {visibleNotes.map(n => (
+                                      <div key={n.id} style={{ padding: '10px 12px', backgroundColor: NOTE_TYPE_BG[n.type] || '#fff', border: '1px solid ' + (NOTE_TYPE_COLORS[n.type] ? NOTE_TYPE_COLORS[n.type] + '33' : '#e2e8f0'), borderRadius: '8px', marginBottom: '8px', position: 'relative' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '3px' }}>
+                                          <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', backgroundColor: NOTE_TYPE_COLORS[n.type] || '#94a3b8', color: '#fff', fontWeight: '600' }}>{n.type}</span>
+                                          <span style={{ fontSize: '10px', color: '#94a3b8' }}>{n.date} · {n.author}</span>
+                                        </div>
+                                        <div style={{ fontSize: '13px', color: NOTE_TYPE_TEXT[n.type] || '#0f172a' }}>{n.text}</div>
+                                        <button onClick={() => setGlobalNotes(globalNotes.filter(x => x.id !== n.id))} style={{ position: 'absolute', top: '8px', right: '8px', background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '12px', lineHeight: 1 }}>✕</button>
+                                      </div>
+                                    ))}
+                                    {visibleNotes.length === 0 && <div style={{ padding: '24px', textAlign: 'center', color: '#94a3b8', fontSize: '13px' }}>{contactNotes.length === 0 ? 'No activity yet — log the first note above.' : 'No notes of this type.'}</div>}
+                                  </>
+                                )}
+                                {contactActivityTab === 'overview' && (
+                                  <div style={cardStyle}>
+                                    <div style={sectionTitle}>At a glance</div>
+                                    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(3, 1fr)', gap: '10px' }}>
+                                      {[['Company', linkedCo?.name || '—'], ['Role', con.role || '—'], ['Origin', con.origin || '—'], ['Properties', directProps.length + viaCompanyProps.length], ['Quotes', contactQuotes.length], ['Notes', contactNotes.length]].map(([label, value]) => (
+                                        <div key={label} style={{ backgroundColor: '#f8fafc', borderRadius: '8px', padding: '10px' }}>
+                                          <div style={{ fontSize: '10px', color: '#94a3b8', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.05em' }}>{label}</div>
+                                          <div style={{ fontSize: '14px', fontWeight: '600', color: '#0f172a', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                              <div style={{ width: isMobile ? '100%' : '32%', minWidth: isMobile ? 0 : '280px', borderLeft: isMobile ? 'none' : '1px solid #e2e8f0', borderTop: isMobile ? '1px solid #e2e8f0' : 'none', display: 'flex', flexDirection: isMobile ? 'column' : 'row', flexShrink: 0, overflow: 'hidden' }}>
+                                <div style={{ width: isMobile ? '100%' : '44px', display: 'flex', flexDirection: isMobile ? 'row' : 'column', alignItems: 'center', gap: '6px', padding: isMobile ? '8px 12px' : '12px 0', backgroundColor: '#f1f5f9', borderRight: isMobile ? 'none' : '1px solid #e2e8f0', borderBottom: isMobile ? '1px solid #e2e8f0' : 'none', flexShrink: 0, boxSizing: 'border-box' }}>
+                                  {railKeys.map(key => {
+                                    const m = RAIL_META[key];
+                                    const RailIcon = m.Icon;
+                                    return (
+                                      <button key={key} onClick={() => { setContactRailTab(key); setContactRailPanel(null); setRailSearch(''); }} title={m.label} style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', width: isMobile ? 'auto' : '32px', height: isMobile ? '44px' : '32px', minHeight: isMobile ? '44px' : '32px', padding: isMobile ? '0 14px' : 0, border: 'none', borderRadius: '8px', cursor: 'pointer', backgroundColor: activeRail === key ? '#059669' : 'transparent', color: activeRail === key ? '#fff' : '#64748b' }}>
+                                        <RailIcon size={16} style={{ flexShrink: 0 }} />
+                                        {isMobile && <span style={{ fontSize: '12px', fontWeight: '600' }}>{m.label}</span>}
+                                        {m.count > 0 && <span style={{ position: 'absolute', top: isMobile ? '4px' : '-4px', right: isMobile ? '2px' : '-4px', background: activeRail === key ? '#0f172a' : '#94a3b8', color: '#fff', borderRadius: '8px', fontSize: '9px', fontWeight: '700', padding: '0 4px', lineHeight: '13px' }}>{m.count}</span>}
+                                      </button>
+                                    );
+                                  })}
+                                </div>
+                                <div style={{ flex: 1, minWidth: 0, overflowY: isMobile ? 'visible' : 'auto', padding: '12px' }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                                    <span style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a' }}>{RAIL_META[activeRail].label}{!['add', 'company'].includes(activeRail) ? ` (${RAIL_META[activeRail].count})` : ''}</span>
+                                    {!['add', 'company'].includes(activeRail) && <button onClick={() => { setContactRailPanel(activeRail); setRailForm({}); setRailSearch(''); setCustomCardForm({}); }} title={`Add or link ${RAIL_META[activeRail].label.toLowerCase()}`} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '26px', height: '26px', minHeight: '26px', borderRadius: '6px', border: '1px solid #d1fae5', backgroundColor: '#f0fdf4', color: '#059669', cursor: 'pointer' }}><Plus size={14} /></button>}
+                                  </div>
+                                  {activeRail === 'company' && (
+                                    linkedCo ? (
+                                      <div style={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '11px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '9px', cursor: 'pointer' }} onClick={() => { setActiveTab('companies'); setCurrentViewCompany(linkedCo); setCompanyDetailTab('overview'); setCompanyActivityTab('activity'); setCompanyRailTab((DEFAULT_RAIL_TABS[linkedCo.type] || DEFAULT_RAIL_TABS._default)[0]); setCompanyRailPanel(null); }}>
+                                          <div style={{ width: '30px', height: '30px', borderRadius: '8px', backgroundColor: '#e0f2fe', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: '700', color: '#0369a1', flexShrink: 0 }}>{(linkedCo.name || '?')[0]}</div>
+                                          <div style={{ minWidth: 0 }}>
+                                            <div style={{ fontSize: '12px', fontWeight: '600', color: '#0284c7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{linkedCo.name}</div>
+                                            <div style={{ fontSize: '11px', color: '#94a3b8' }}>{linkedCo.type}{linkedCo.city && linkedCo.city !== '--' ? ` · ${linkedCo.city}` : ''}</div>
+                                          </div>
+                                        </div>
+                                        <button onClick={() => updateContactField('companyId', null)} style={{ marginTop: '8px', background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '10px', fontWeight: '600', padding: 0 }}>Unlink from company</button>
+                                      </div>
+                                    ) : (
+                                      <div>
+                                        <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '8px' }}>No company linked yet.</div>
+                                        <select value="" onChange={e => { const cid = parseInt(e.target.value); if (cid) updateContactField('companyId', cid); }} style={inputStyle}>
+                                          <option value="">Link a company…</option>
+                                          {companies.map(c => <option key={c.id} value={c.id}>{c.name} ({c.type})</option>)}
+                                        </select>
+                                      </div>
+                                    )
+                                  )}
+                                  {activeRail === 'properties' && (<>
+                                    {directProps.map(p => (
+                                      <div key={p.id} style={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '9px 11px', marginBottom: '7px' }}>
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                                          <div style={{ fontSize: '12px', fontWeight: '600', color: '#0284c7', cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }} onClick={() => { setActiveTab('pipeline'); setCurrentViewProperty(p); }}>{p.address}</div>
+                                          <button onClick={() => updateContactField('linkedPropertyIds', (con.linkedPropertyIds || []).filter(id => id !== p.id))} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '10px', fontWeight: '600', flexShrink: 0 }}>Unlink</button>
+                                        </div>
+                                        <div style={{ display: 'flex', gap: '5px', marginTop: '4px', alignItems: 'center', flexWrap: 'wrap' }}>
+                                          <span style={{ fontSize: '9px', padding: '1px 5px', borderRadius: '8px', fontWeight: '600', backgroundColor: getStatusStyle(p.status || 'Sourced').bg, color: getStatusStyle(p.status || 'Sourced').color }}>{p.status || 'Sourced'}</span>
+                                          {p.guidePrice != null && <span style={{ fontSize: '10px', color: '#64748b', fontWeight: '600' }}>£{p.guidePrice?.toLocaleString()}</span>}
+                                        </div>
+                                      </div>
+                                    ))}
+                                    {viaCompanyProps.map(p => (
+                                      <div key={p.id} style={{ backgroundColor: '#fff', border: '1px dashed #e2e8f0', borderRadius: '8px', padding: '9px 11px', marginBottom: '7px' }}>
+                                        <div style={{ fontSize: '12px', fontWeight: '600', color: '#0284c7', cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} onClick={() => { setActiveTab('pipeline'); setCurrentViewProperty(p); }}>{p.address}</div>
+                                        <div style={{ display: 'flex', gap: '5px', marginTop: '4px', alignItems: 'center', flexWrap: 'wrap' }}>
+                                          <span style={{ fontSize: '9px', padding: '1px 5px', borderRadius: '8px', fontWeight: '600', backgroundColor: '#f1f5f9', color: '#475569' }}>Via {linkedCo?.name}</span>
+                                          <span style={{ fontSize: '9px', padding: '1px 5px', borderRadius: '8px', fontWeight: '600', backgroundColor: getStatusStyle(p.status || 'Sourced').bg, color: getStatusStyle(p.status || 'Sourced').color }}>{p.status || 'Sourced'}</span>
+                                        </div>
+                                      </div>
+                                    ))}
+                                    {directProps.length === 0 && viaCompanyProps.length === 0 && <div style={{ padding: '18px 8px', textAlign: 'center', color: '#94a3b8', fontSize: '12px' }}>No properties linked — use + to link one from the pipeline.</div>}
+                                  </>)}
+                                  {activeRail === 'quotes' && (<>
+                                    {contactQuotes.map(q => (
+                                      <div key={q.id} style={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '9px 11px', marginBottom: '7px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                                        <div style={{ minWidth: 0, cursor: 'pointer', flex: 1 }} onClick={() => { setCurrentViewContact(null); setContactRailPanel(null); setActiveTab('refurb'); }}>
+                                          <div style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{q.tradeCategory || 'Quote'}{q.quoteRef ? ` · ${q.quoteRef}` : ''}</div>
+                                          <div style={{ fontSize: '11px', color: '#94a3b8' }}>{q.totalAmount ? `£${parseFloat(q.totalAmount).toLocaleString()}` : '—'} · {q.status || 'received'}</div>
+                                        </div>
+                                        <button onClick={() => setRefurbQuotes(prev => prev.map(x => x.id === q.id ? { ...x, contactId: null } : x))} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '10px', fontWeight: '600', flexShrink: 0 }}>Unlink</button>
+                                      </div>
+                                    ))}
+                                    {contactQuotes.length === 0 && <div style={{ padding: '18px 8px', textAlign: 'center', color: '#94a3b8', fontSize: '12px' }}>No quotes for this contact — use + to create or link one.</div>}
+                                  </>)}
+                                  {activeRail.startsWith('card_') && RAIL_META[activeRail].cardType && (() => {
+                                    const ct = RAIL_META[activeRail].cardType;
+                                    const cards = (con.customCards || []).filter(cc => cc.cardTypeId === ct.id);
+                                    return (<>
+                                      {cards.map(cc => (
+                                        <div key={cc.id} style={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '9px 26px 9px 11px', marginBottom: '7px', position: 'relative' }}>
+                                          {(ct.fields || []).length > 0 ? (ct.fields || []).map(f => (
+                                            <div key={f.id} style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', marginBottom: '3px' }}>
+                                              <span style={{ fontSize: '10px', color: '#94a3b8', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.04em', flexShrink: 0 }}>{f.label}</span>
+                                              <span style={{ fontSize: '11px', color: '#0f172a', textAlign: 'right', minWidth: 0, overflowWrap: 'anywhere' }}>{cc.values?.[f.id] || '—'}</span>
+                                            </div>
+                                          )) : Object.entries(cc.values || {}).map(([k, v]) => (
+                                            <div key={k} style={{ fontSize: '11px', color: '#0f172a', marginBottom: '3px' }}>{String(v)}</div>
+                                          ))}
+                                          {cc.createdDate && <div style={{ fontSize: '9px', color: '#cbd5e1', marginTop: '4px' }}>{cc.createdDate}</div>}
+                                          <button onClick={() => updateContactField('customCards', (con.customCards || []).filter(x => x.id !== cc.id))} style={{ position: 'absolute', top: '6px', right: '6px', background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '11px', lineHeight: 1, padding: '2px' }}>✕</button>
+                                        </div>
+                                      ))}
+                                      {cards.length === 0 && <div style={{ padding: '18px 8px', textAlign: 'center', color: '#94a3b8', fontSize: '12px' }}>No {ct.name} cards yet — use + to add one.</div>}
+                                    </>);
+                                  })()}
+                                  {activeRail === 'add' && (
+                                    <div style={{ fontSize: '12px', color: '#64748b', lineHeight: 1.6 }}>
+                                      <p style={{ margin: '0 0 12px' }}>Create your own card types — like Survey Quote or Insurance Policy — with the exact fields you need. They'll appear here as extra tabs.</p>
+                                      <button onClick={() => { setCurrentViewContact(null); setContactRailPanel(null); setActiveTab('settings'); setSettingsSection('cards'); }} style={{ width: '100%', padding: '10px', border: '1px dashed #cbd5e1', borderRadius: '8px', backgroundColor: '#fff', fontSize: '12px', fontWeight: '600', color: '#059669', cursor: 'pointer' }}>+ Manage card types in Settings</button>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                            {contactRailPanel && (
+                              <>
+                                <div onClick={() => setContactRailPanel(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.35)', zIndex: 390 }} />
+                                <div style={{ position: 'fixed', right: 0, top: 0, bottom: 0, width: isMobile ? '100%' : '400px', backgroundColor: '#fff', zIndex: 400, boxShadow: '-8px 0 24px rgba(0,0,0,0.15)', display: 'flex', flexDirection: 'column' }}>
+                                  <div style={{ padding: '14px 16px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#0f172a' }}>
+                                    <span style={{ fontSize: '13px', fontWeight: '600', color: '#fff' }}>{contactRailPanel === 'properties' ? 'Link a property' : contactRailPanel === 'quotes' ? 'Add or link a quote' : `Add ${RAIL_META[contactRailPanel]?.cardType?.name || 'card'}`}</span>
+                                    <button onClick={() => setContactRailPanel(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', display: 'flex', padding: '4px' }}><X size={16} /></button>
+                                  </div>
+                                  <div style={{ flex: 1, overflowY: 'auto', padding: '16px' }}>
+                                    {contactRailPanel === 'properties' && (<>
+                                      <div style={sectionTitle}>Link a property from the pipeline</div>
+                                      <input placeholder="Search by address or postcode…" value={railSearch} onChange={e => setRailSearch(e.target.value)} style={{ ...inputStyle, marginBottom: '8px' }} />
+                                      <div>
+                                        {properties.filter(p => !(con.linkedPropertyIds || []).includes(p.id) && (!railSearch || (p.address || '').toLowerCase().includes(railSearch.toLowerCase()) || (p.postcode || '').toLowerCase().includes(railSearch.toLowerCase()))).slice(0, 30).map(p => (
+                                          <div key={p.id} onClick={() => updateContactField('linkedPropertyIds', [...(con.linkedPropertyIds || []), p.id])} style={{ padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', marginBottom: '5px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                                            <div style={{ minWidth: 0 }}>
+                                              <div style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.address}</div>
+                                              <div style={{ fontSize: '10px', color: '#94a3b8' }}>{p.status || 'Sourced'}{p.guidePrice ? ` · £${p.guidePrice.toLocaleString()}` : ''}</div>
+                                            </div>
+                                            <Link2 size={13} style={{ color: '#059669', flexShrink: 0 }} />
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </>)}
+                                    {contactRailPanel === 'quotes' && (<>
+                                      <button onClick={() => { setEditingQuoteId(null); setQuoteForm({ ...EMPTY_QUOTE_FORM, contactId: String(con.id), companyId: con.companyId ? String(con.companyId) : '', quoteDate: today }); setQuoteModalTab('details'); setShowQuoteModal(true); setContactRailPanel(null); }} style={{ width: '100%', padding: '10px', backgroundColor: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '13px', fontWeight: '600', cursor: 'pointer', marginBottom: '16px' }}>+ New quote for {con.name}</button>
+                                      <div style={sectionTitle}>Or link an existing quote</div>
+                                      <input placeholder="Search quotes…" value={railSearch} onChange={e => setRailSearch(e.target.value)} style={{ ...inputStyle, marginBottom: '8px' }} />
+                                      <div>
+                                        {refurbQuotes.filter(q => String(q.contactId) !== String(con.id) && (!railSearch || (q.tradeCategory || '').toLowerCase().includes(railSearch.toLowerCase()) || (q.quoteRef || '').toLowerCase().includes(railSearch.toLowerCase()))).slice(0, 30).map(q => (
+                                          <div key={q.id} onClick={() => { setRefurbQuotes(prev => prev.map(x => x.id === q.id ? { ...x, contactId: con.id } : x)); setContactRailPanel(null); }} style={{ padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', marginBottom: '5px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                                            <div style={{ minWidth: 0 }}>
+                                              <div style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a' }}>{q.tradeCategory || 'Quote'}{q.quoteRef ? ` · ${q.quoteRef}` : ''}</div>
+                                              <div style={{ fontSize: '10px', color: '#94a3b8' }}>{q.totalAmount ? `£${parseFloat(q.totalAmount).toLocaleString()}` : '—'} · {q.status || 'received'}</div>
+                                            </div>
+                                            <Link2 size={13} style={{ color: '#059669', flexShrink: 0 }} />
+                                          </div>
+                                        ))}
+                                      </div>
+                                    </>)}
+                                    {contactRailPanel && contactRailPanel.startsWith('card_') && (() => {
+                                      const ct = RAIL_META[contactRailPanel]?.cardType;
+                                      if (!ct) return null;
+                                      return (<>
+                                        <div style={sectionTitle}>New {ct.name}</div>
+                                        {(ct.fields || []).map(f => (
+                                          <div key={f.id} style={{ marginBottom: '10px' }}>
+                                            <label style={labelStyle}>{f.label}</label>
+                                            {f.type === 'select' ? (
+                                              <select value={customCardForm[f.id] || ''} onChange={e => setCustomCardForm({ ...customCardForm, [f.id]: e.target.value })} style={inputStyle}>
+                                                <option value="">— Select —</option>
+                                                {(f.options || []).map(o => <option key={o} value={o}>{o}</option>)}
+                                              </select>
+                                            ) : (
+                                              <input type={f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : 'text'} value={customCardForm[f.id] || ''} onChange={e => setCustomCardForm({ ...customCardForm, [f.id]: e.target.value })} style={inputStyle} />
+                                            )}
+                                          </div>
+                                        ))}
+                                        {(ct.fields || []).length === 0 && <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '10px' }}>This card type has no fields yet — add some in Settings → Custom Cards.</div>}
+                                        <button onClick={() => { updateContactField('customCards', [...(con.customCards || []), { id: Date.now(), cardTypeId: ct.id, values: customCardForm, createdDate: today }]); setCustomCardForm({}); setContactRailPanel(null); }} style={{ width: '100%', padding: '10px', backgroundColor: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '13px', fontWeight: '600', cursor: 'pointer' }}>Add {ct.name}</button>
+                                      </>);
+                                    })()}
+                                  </div>
+                                </div>
+                              </>
+                            )}
+                          </>
+                        );
+                      })()}
                     </div>
                   )}
                 </div>
