@@ -4101,8 +4101,23 @@ async function handleApiRoutes(request, env, url) {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
 
-      const { postcode, address, listingUrl, properties } = await request.json();
-      if (!Array.isArray(properties) || !properties.length) return corsResponse({ success: true, matches: [] });
+      const body = await request.json();
+      const { postcode, address, listingUrl } = body;
+      let properties = body.properties;
+      // The SPA sends its in-memory property list; external callers (the Chrome
+      // extension) don't hold one, so load it server-side the same way
+      // GET /api/crm-data does — D1 primary, KV merge fallback.
+      if (!Array.isArray(properties)) {
+        try {
+          await ensureCrmMigratedToD1(env);
+          properties = (await readCrmFromD1(env)).properties || [];
+        } catch (err) {
+          const userIds = (await env.SCRAPER_KV.get('crm:user-ids', 'json')) || [];
+          const datasets = await Promise.all(userIds.map(id => env.SCRAPER_KV.get(`crm:user:${id}`, 'json')));
+          properties = mergeUserData(datasets.filter(Boolean)).properties || [];
+        }
+      }
+      if (!properties.length) return corsResponse({ success: true, matches: [] });
 
       const pc = (postcode || '').replace(/\s+/g, '').toUpperCase();
       const matches = [];
@@ -4348,6 +4363,52 @@ async function handleApiRoutes(request, env, url) {
       }
 
       return corsResponse({ success: true, property });
+    }
+
+    // POST /api/ingest/:entity — generic single-record upsert for external
+    // callers (the Chrome extension). Identical mechanism to
+    // /api/properties/ingest above, generalised to any capturable entity.
+    // `entity` is allow-listed to the KV blob keys the extension may write.
+    if (url.pathname.startsWith('/api/ingest/') && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+
+      const entity = url.pathname.slice('/api/ingest/'.length);
+      const INGEST_ALLOWED = ['properties', 'contacts', 'companies', 'surveyors', 'globalNotes', 'tasks'];
+      if (!INGEST_ALLOWED.includes(entity)) return corsResponse({ success: false, message: 'Unsupported entity' }, 400);
+
+      const allowed = await checkRateLimit(env, `ingest:${session.userId}`, 20);
+      if (!allowed) return corsResponse({ success: false, message: 'Too many requests — please slow down' }, 429);
+
+      const record = await request.json();
+      if (record?.id == null) return corsResponse({ success: false, message: 'record.id is required' }, 400);
+
+      const userId = session.userId;
+      const savedAt = new Date().toISOString();
+
+      const def = D1_ENTITY_TABLES[entity];
+      const extra = def.cols(record);
+      const extraNames = Object.keys(extra);
+      await env.CRM_DB.prepare(
+        `INSERT OR REPLACE INTO ${def.table} (id, user_id, updated_at, deleted, data${extraNames.map(c => ', ' + c).join('')}) ` +
+        `VALUES (?, ?, ?, ?, ?${', ?'.repeat(extraNames.length)})`
+      ).bind(String(record.id), userId, savedAt, record.deleted ? 1 : 0, JSON.stringify(record), ...extraNames.map(c => extra[c])).run();
+
+      const existingBlob = (await env.SCRAPER_KV.get(`crm:user:${userId}`, 'json')) || {};
+      const existingRecords = Array.isArray(existingBlob[entity]) ? existingBlob[entity] : [];
+      const idx = existingRecords.findIndex(r => r?.id === record.id);
+      const updatedRecords = idx >= 0
+        ? existingRecords.map((r, i) => i === idx ? record : r)
+        : [...existingRecords, record];
+      await env.SCRAPER_KV.put(`crm:user:${userId}`, JSON.stringify({ ...existingBlob, [entity]: updatedRecords, savedAt }));
+
+      const userIds = (await env.SCRAPER_KV.get('crm:user-ids', 'json')) || [];
+      if (!userIds.includes(userId)) {
+        userIds.push(userId);
+        await env.SCRAPER_KV.put('crm:user-ids', JSON.stringify(userIds));
+      }
+
+      return corsResponse({ success: true, entity, record });
     }
 
     // GET /api/admin/d1-parity — compare KV-merged data vs D1 reads per entity
