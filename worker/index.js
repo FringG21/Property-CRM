@@ -541,7 +541,7 @@ function extractPropertyDetails(html, pageUrl) {
 // CRM DATA HELPERS
 // ============================================================
 
-const CRM_KEYS = ['properties', 'companies', 'contacts', 'surveyors', 'watchlist', 'scrapedAuctions', 'globalNotes', 'tasks', 'refurbQuotes', 'specItems', 'specTemplates', 'specAllowances', 'taskTemplates', 'catalogTrades', 'catalogProducts', 'roomTemplates'];
+const CRM_KEYS = ['properties', 'companies', 'contacts', 'surveyors', 'watchlist', 'scrapedAuctions', 'globalNotes', 'tasks', 'refurbQuotes', 'specItems', 'specTemplates', 'specAllowances', 'taskTemplates', 'catalogTrades', 'catalogProducts', 'roomTemplates', 'customCardTypes'];
 
 function mergeUserData(datasets) {
   const merged = {};
@@ -624,6 +624,7 @@ const D1_ENTITY_TABLES = {
   catalogTrades: { table: 'catalog_trades', cols: r => ({ trade: r.trade ?? null, job_type: r.jobType ?? null }) },
   catalogProducts: { table: 'catalog_products', cols: r => ({ category: r.category ?? null, supplier: r.supplier ?? null }) },
   roomTemplates: { table: 'catalog_room_templates', cols: () => ({}) },
+  customCardTypes: { table: 'custom_card_types', cols: () => ({}) },
 };
 
 // Replace a user's rows for every entity key present in the blob. Keys absent

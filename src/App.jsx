@@ -216,6 +216,9 @@ const COMPANY_TYPE_FIELDS = {
   'Other':           { title: 'Service details', fields: [{ l: 'Service offered', f: 'serviceOffered', ph: "e.g. block manager, financial advisor" }, { l: 'Fee / rate', f: 'feeRate', ph: "e.g. £150/hr or fixed fee" }] },
 };
 
+// Icon presets for custom card types (keys are stored on the card type record)
+const CARD_ICONS = { layers: Layers, users: Users, home: Home, file: FileText, pound: DollarSign, clipboard: ClipboardList, star: Star, link: Link2, phone: Phone, mail: Mail };
+
 // Company type → default order of association panels on the record-view rail.
 // Every built-in panel stays reachable; type only drives ordering + first-open.
 const DEFAULT_RAIL_TABS = {
@@ -551,6 +554,12 @@ export default function App({ user = {}, onLogout }) {
   const [railForm, setRailForm] = useState({});
   const [newCustomFieldLabel, setNewCustomFieldLabel] = useState('');
   const [newCustomFieldValue, setNewCustomFieldValue] = useState('');
+  const [customCardForm, setCustomCardForm] = useState({});
+  const [newCardTypeName, setNewCardTypeName] = useState('');
+  const [newCardTypeIcon, setNewCardTypeIcon] = useState('layers');
+  const [newCardTypeAppliesTo, setNewCardTypeAppliesTo] = useState('both');
+  const [newCardTypeFields, setNewCardTypeFields] = useState([]);
+  const [editingCardTypeId, setEditingCardTypeId] = useState(null);
   const companyNoteRef = useRef(null);
   const [settingsSection, setSettingsSection] = useState('profile');
   const [newCompPhone, setNewCompPhone] = useState('');
@@ -2388,6 +2397,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
   // REFURB COST & QUOTE BUILDER STATE
   // ==========================================
   const [refurbQuotes, setRefurbQuotes] = useState([]);
+  const [customCardTypes, setCustomCardTypes] = useState([]);
   const [rfSubTab, setRfSubTab] = useState('dashboard');
   // Quote modal
   const [showQuoteModal, setShowQuoteModal] = useState(false);
@@ -2488,6 +2498,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
           if (d.taskTemplates?.length) setTaskTemplates(d.taskTemplates);
           if (d.catalogTrades?.length) setCatalogTrades(d.catalogTrades);
           if (d.catalogProducts?.length) setCatalogProducts(d.catalogProducts);
+          if (d.customCardTypes?.length) setCustomCardTypes(d.customCardTypes);
         }
       })
       .catch(() => {})
@@ -2503,13 +2514,13 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
       fetch('/api/crm-data', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ properties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes, specItems, specTemplates, specAllowances, taskTemplates, catalogTrades, catalogProducts }),
+        body: JSON.stringify({ properties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes, specItems, specTemplates, specAllowances, taskTemplates, catalogTrades, catalogProducts, customCardTypes }),
       })
         .then(() => { setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); })
         .catch(() => setSaveStatus('idle'));
     }, 2000);
     return () => clearTimeout(timer);
-  }, [properties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes, specItems, specTemplates, specAllowances, taskTemplates, catalogTrades, catalogProducts, dataLoaded]);
+  }, [properties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks, refurbQuotes, specItems, specTemplates, specAllowances, taskTemplates, catalogTrades, catalogProducts, customCardTypes, dataLoaded]);
 
   // Load notification preferences from server on mount
   useEffect(() => {
@@ -7239,7 +7250,11 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                             contacts: { label: 'Contacts', Icon: Contact, count: linkedContacts.length },
                             properties: { label: 'Properties', Icon: MapPin, count: linkedProps.length },
                             quotes: { label: 'Quotes', Icon: Briefcase, count: companyQuotes.length },
+                            add: { label: 'Custom cards', Icon: Plus, count: 0 },
                           };
+                          const companyCardTypes = customCardTypes.filter(t => t.appliesTo !== 'contact');
+                          companyCardTypes.forEach(t => { RAIL_META[`card_${t.id}`] = { label: t.name, Icon: CARD_ICONS[t.icon] || Layers, count: (co.customCards || []).filter(cc => cc.cardTypeId === t.id).length, cardType: t }; });
+                          const railKeys = [...railOrder, ...companyCardTypes.map(t => `card_${t.id}`), 'add'];
                           const activeRail = RAIL_META[companyRailTab] ? companyRailTab : railOrder[0];
                           const today = new Date().toISOString().split('T')[0];
                           const labelStyle = { display: 'block', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '5px' };
@@ -7452,7 +7467,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                 {/* Right: association rail */}
                                 <div style={{ width: isMobile ? '100%' : '32%', minWidth: isMobile ? 0 : '280px', borderLeft: isMobile ? 'none' : '1px solid #e2e8f0', borderTop: isMobile ? '1px solid #e2e8f0' : 'none', display: 'flex', flexDirection: isMobile ? 'column' : 'row', flexShrink: 0, overflow: 'hidden' }}>
                                   <div style={{ width: isMobile ? '100%' : '44px', display: 'flex', flexDirection: isMobile ? 'row' : 'column', alignItems: 'center', gap: '6px', padding: isMobile ? '8px 12px' : '12px 0', backgroundColor: '#f1f5f9', borderRight: isMobile ? 'none' : '1px solid #e2e8f0', borderBottom: isMobile ? '1px solid #e2e8f0' : 'none', flexShrink: 0, boxSizing: 'border-box' }}>
-                                    {railOrder.map(key => {
+                                    {railKeys.map(key => {
                                       const m = RAIL_META[key];
                                       const RailIcon = m.Icon;
                                       return (
@@ -7466,8 +7481,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                   </div>
                                   <div style={{ flex: 1, minWidth: 0, overflowY: isMobile ? 'visible' : 'auto', padding: '12px' }}>
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-                                      <span style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a' }}>{RAIL_META[activeRail].label} ({RAIL_META[activeRail].count})</span>
-                                      <button onClick={() => { setCompanyRailPanel(activeRail); setRailForm({}); setRailSearch(''); }} title={`Add or link ${RAIL_META[activeRail].label.toLowerCase()}`} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '26px', height: '26px', minHeight: '26px', borderRadius: '6px', border: '1px solid #d1fae5', backgroundColor: '#f0fdf4', color: '#059669', cursor: 'pointer' }}><Plus size={14} /></button>
+                                      <span style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a' }}>{RAIL_META[activeRail].label}{activeRail !== 'add' ? ` (${RAIL_META[activeRail].count})` : ''}</span>
+                                      {activeRail !== 'add' && <button onClick={() => { setCompanyRailPanel(activeRail); setRailForm({}); setRailSearch(''); setCustomCardForm({}); }} title={`Add or link ${RAIL_META[activeRail].label.toLowerCase()}`} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '26px', height: '26px', minHeight: '26px', borderRadius: '6px', border: '1px solid #d1fae5', backgroundColor: '#f0fdf4', color: '#059669', cursor: 'pointer' }}><Plus size={14} /></button>}
                                     </div>
                                     {activeRail === 'contacts' && (<>
                                       {linkedContacts.map(con => (
@@ -7513,6 +7528,33 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                       ))}
                                       {companyQuotes.length === 0 && <div style={{ padding: '18px 8px', textAlign: 'center', color: '#94a3b8', fontSize: '12px' }}>No quotes for this company — use + to create or link one.</div>}
                                     </>)}
+                                    {activeRail.startsWith('card_') && RAIL_META[activeRail].cardType && (() => {
+                                      const ct = RAIL_META[activeRail].cardType;
+                                      const cards = (co.customCards || []).filter(cc => cc.cardTypeId === ct.id);
+                                      return (<>
+                                        {cards.map(cc => (
+                                          <div key={cc.id} style={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '9px 26px 9px 11px', marginBottom: '7px', position: 'relative' }}>
+                                            {(ct.fields || []).length > 0 ? (ct.fields || []).map(f => (
+                                              <div key={f.id} style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', marginBottom: '3px' }}>
+                                                <span style={{ fontSize: '10px', color: '#94a3b8', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.04em', flexShrink: 0 }}>{f.label}</span>
+                                                <span style={{ fontSize: '11px', color: '#0f172a', textAlign: 'right', minWidth: 0, overflowWrap: 'anywhere' }}>{cc.values?.[f.id] || '—'}</span>
+                                              </div>
+                                            )) : Object.entries(cc.values || {}).map(([k, v]) => (
+                                              <div key={k} style={{ fontSize: '11px', color: '#0f172a', marginBottom: '3px' }}>{String(v)}</div>
+                                            ))}
+                                            {cc.createdDate && <div style={{ fontSize: '9px', color: '#cbd5e1', marginTop: '4px' }}>{cc.createdDate}</div>}
+                                            <button onClick={() => updateCompanyField('customCards', (co.customCards || []).filter(x => x.id !== cc.id))} style={{ position: 'absolute', top: '6px', right: '6px', background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '11px', lineHeight: 1, padding: '2px' }}>✕</button>
+                                          </div>
+                                        ))}
+                                        {cards.length === 0 && <div style={{ padding: '18px 8px', textAlign: 'center', color: '#94a3b8', fontSize: '12px' }}>No {ct.name} cards yet — use + to add one.</div>}
+                                      </>);
+                                    })()}
+                                    {activeRail === 'add' && (
+                                      <div style={{ fontSize: '12px', color: '#64748b', lineHeight: 1.6 }}>
+                                        <p style={{ margin: '0 0 12px' }}>Create your own card types — like Survey Quote or Insurance Policy — with the exact fields you need. They'll appear here as extra tabs.</p>
+                                        <button onClick={() => { setCurrentViewCompany(null); setCompanyRailPanel(null); setActiveTab('settings'); setSettingsSection('cards'); }} style={{ width: '100%', padding: '10px', border: '1px dashed #cbd5e1', borderRadius: '8px', backgroundColor: '#fff', fontSize: '12px', fontWeight: '600', color: '#059669', cursor: 'pointer' }}>+ Manage card types in Settings</button>
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
                               </div>
@@ -7522,7 +7564,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                   <div onClick={() => setCompanyRailPanel(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.35)', zIndex: 390 }} />
                                   <div style={{ position: 'fixed', right: 0, top: 0, bottom: 0, width: isMobile ? '100%' : '400px', backgroundColor: '#fff', zIndex: 400, boxShadow: '-8px 0 24px rgba(0,0,0,0.15)', display: 'flex', flexDirection: 'column' }}>
                                     <div style={{ padding: '14px 16px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#0f172a' }}>
-                                      <span style={{ fontSize: '13px', fontWeight: '600', color: '#fff' }}>{companyRailPanel === 'contacts' ? 'Add or link a contact' : companyRailPanel === 'properties' ? 'Link a property' : 'Add or link a quote'}</span>
+                                      <span style={{ fontSize: '13px', fontWeight: '600', color: '#fff' }}>{companyRailPanel === 'contacts' ? 'Add or link a contact' : companyRailPanel === 'properties' ? 'Link a property' : companyRailPanel === 'quotes' ? 'Add or link a quote' : `Add ${RAIL_META[companyRailPanel]?.cardType?.name || 'card'}`}</span>
                                       <button onClick={() => setCompanyRailPanel(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', display: 'flex', padding: '4px' }}><X size={16} /></button>
                                     </div>
                                     <div style={{ flex: 1, overflowY: 'auto', padding: '16px' }}>
@@ -7583,6 +7625,28 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                           ))}
                                         </div>
                                       </>)}
+                                      {companyRailPanel && companyRailPanel.startsWith('card_') && (() => {
+                                        const ct = RAIL_META[companyRailPanel]?.cardType;
+                                        if (!ct) return null;
+                                        return (<>
+                                          <div style={sectionTitle}>New {ct.name}</div>
+                                          {(ct.fields || []).map(f => (
+                                            <div key={f.id} style={{ marginBottom: '10px' }}>
+                                              <label style={labelStyle}>{f.label}</label>
+                                              {f.type === 'select' ? (
+                                                <select value={customCardForm[f.id] || ''} onChange={e => setCustomCardForm({ ...customCardForm, [f.id]: e.target.value })} style={inputStyle}>
+                                                  <option value="">— Select —</option>
+                                                  {(f.options || []).map(o => <option key={o} value={o}>{o}</option>)}
+                                                </select>
+                                              ) : (
+                                                <input type={f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : 'text'} value={customCardForm[f.id] || ''} onChange={e => setCustomCardForm({ ...customCardForm, [f.id]: e.target.value })} style={inputStyle} />
+                                              )}
+                                            </div>
+                                          ))}
+                                          {(ct.fields || []).length === 0 && <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '10px' }}>This card type has no fields yet — add some in Settings → Custom Cards.</div>}
+                                          <button onClick={() => { updateCompanyField('customCards', [...(co.customCards || []), { id: Date.now(), cardTypeId: ct.id, values: customCardForm, createdDate: today }]); setCustomCardForm({}); setCompanyRailPanel(null); }} style={{ width: '100%', padding: '10px', backgroundColor: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '13px', fontWeight: '600', cursor: 'pointer' }}>Add {ct.name}</button>
+                                        </>);
+                                      })()}
                                     </div>
                                   </div>
                                 </>
@@ -10047,7 +10111,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 <div style={{ display: 'flex', gap: '0', flexDirection: isMobile ? 'column' : 'row', minHeight: 0, flex: '1 1 0', overflow: isMobile ? 'auto' : 'hidden', backgroundColor: '#ffffff', borderRadius: isMobile ? '8px' : '12px', border: '1px solid #e2e8f0' }}>
                   {/* Left nav */}
                   <div style={{ width: isMobile ? '100%' : '200px', borderRight: isMobile ? 'none' : '1px solid #e2e8f0', borderBottom: isMobile ? '1px solid #e2e8f0' : 'none', padding: '12px', display: 'flex', flexDirection: isMobile ? 'row' : 'column', flexWrap: isMobile ? 'wrap' : 'nowrap', gap: '4px', flexShrink: 0 }}>
-                    {[['profile', 'Profile'], ['appearance', 'Appearance'], ['notifications', 'Notifications'], ['users', 'Users & Permissions'], ['api', 'API Keys'], ['integrations', 'Integrations'], ['data', 'Data Management']].map(([key, label]) => (
+                    {[['profile', 'Profile'], ['appearance', 'Appearance'], ['notifications', 'Notifications'], ['users', 'Users & Permissions'], ['api', 'API Keys'], ['integrations', 'Integrations'], ['cards', 'Custom Cards'], ['data', 'Data Management']].map(([key, label]) => (
                       <button key={key} onClick={() => setSettingsSection(key)} style={{ padding: '9px 12px', textAlign: 'left', borderRadius: '6px', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: '500', backgroundColor: settingsSection === key ? '#f0fdf4' : 'transparent', color: settingsSection === key ? '#059669' : '#64748b', borderLeft: settingsSection === key ? '2px solid #059669' : '2px solid transparent' }}>{label}</button>
                     ))}
                   </div>
@@ -10565,6 +10629,91 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                         <p style={{ margin: '12px 0 0 0', fontSize: '11px', color: '#94a3b8' }}>Export downloads all properties, companies, contacts and notes as JSON. Clear pipeline is irreversible.</p>
                       </div>
                     )}
+
+                    {settingsSection === 'cards' && (() => {
+                      const resetCardTypeForm = () => { setNewCardTypeName(''); setNewCardTypeIcon('layers'); setNewCardTypeAppliesTo('both'); setNewCardTypeFields([]); setEditingCardTypeId(null); };
+                      const saveCardType = () => {
+                        if (!newCardTypeName.trim()) return;
+                        const cleanFields = newCardTypeFields.filter(f => (f.label || '').trim()).map(f => ({ ...f, label: f.label.trim() }));
+                        if (editingCardTypeId) {
+                          setCustomCardTypes(prev => prev.map(t => t.id === editingCardTypeId ? { ...t, name: newCardTypeName.trim(), icon: newCardTypeIcon, appliesTo: newCardTypeAppliesTo, fields: cleanFields } : t));
+                        } else {
+                          setCustomCardTypes(prev => [...prev, { id: Date.now(), name: newCardTypeName.trim(), icon: newCardTypeIcon, appliesTo: newCardTypeAppliesTo, fields: cleanFields, createdDate: new Date().toISOString().split('T')[0] }]);
+                        }
+                        resetCardTypeForm();
+                      };
+                      const instanceCount = (typeId) => [...companies, ...contacts].reduce((s, r) => s + ((r.customCards || []).filter(cc => cc.cardTypeId === typeId).length), 0);
+                      const inputSt = { width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box', backgroundColor: '#fff' };
+                      const labelSt = { display: 'block', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '5px' };
+                      return (
+                        <div>
+                          <div style={{ fontSize: '15px', fontWeight: '600', color: '#0f172a', marginBottom: '6px' }}>Custom Cards</div>
+                          <p style={{ margin: '0 0 20px', fontSize: '12px', color: '#64748b' }}>Define your own association card types (e.g. Survey Quote, Insurance Policy). They appear on company and contact records, and the add-form is generated from the fields you define here.</p>
+                          {customCardTypes.length > 0 && (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '20px' }}>
+                              {customCardTypes.map(t => {
+                                const TIcon = CARD_ICONS[t.icon] || Layers;
+                                return (
+                                  <div key={t.id} style={{ display: 'flex', alignItems: 'center', gap: '10px', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '10px 12px', backgroundColor: '#fff' }}>
+                                    <TIcon size={16} style={{ color: '#059669', flexShrink: 0 }} />
+                                    <div style={{ flex: 1, minWidth: 0 }}>
+                                      <div style={{ fontSize: '13px', fontWeight: '600', color: '#0f172a' }}>{t.name}</div>
+                                      <div style={{ fontSize: '11px', color: '#94a3b8' }}>{t.appliesTo === 'both' ? 'Companies & contacts' : t.appliesTo === 'company' ? 'Companies only' : 'Contacts only'} · {(t.fields || []).length} field{(t.fields || []).length !== 1 ? 's' : ''} · {instanceCount(t.id)} card{instanceCount(t.id) !== 1 ? 's' : ''}</div>
+                                    </div>
+                                    <button onClick={() => { setEditingCardTypeId(t.id); setNewCardTypeName(t.name); setNewCardTypeIcon(t.icon || 'layers'); setNewCardTypeAppliesTo(t.appliesTo || 'both'); setNewCardTypeFields(t.fields || []); }} style={{ padding: '5px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', backgroundColor: '#fff', fontSize: '11px', color: '#475569', cursor: 'pointer', flexShrink: 0 }}>Edit</button>
+                                    <button onClick={() => { if (window.confirm(`Delete card type "${t.name}"? Existing cards keep their data but show as plain label/value pairs.`)) { setCustomCardTypes(prev => prev.filter(x => x.id !== t.id)); if (editingCardTypeId === t.id) resetCardTypeForm(); } }} style={{ padding: '5px 10px', border: '1px solid #fca5a5', borderRadius: '6px', backgroundColor: '#fef2f2', fontSize: '11px', color: '#dc2626', cursor: 'pointer', flexShrink: 0 }}>Delete</button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                          <div style={{ border: '1px solid #e2e8f0', borderRadius: '10px', padding: '16px', backgroundColor: '#f8fafc', maxWidth: '520px' }}>
+                            <div style={{ fontSize: '13px', fontWeight: '600', color: '#0f172a', marginBottom: '14px' }}>{editingCardTypeId ? 'Edit card type' : 'New card type'}</div>
+                            <div style={{ marginBottom: '12px' }}>
+                              <label style={labelSt}>Name *</label>
+                              <input value={newCardTypeName} onChange={e => setNewCardTypeName(e.target.value)} placeholder="e.g. Survey Quote" style={inputSt} />
+                            </div>
+                            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '10px', marginBottom: '12px' }}>
+                              <div>
+                                <label style={labelSt}>Icon</label>
+                                <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                                  {Object.entries(CARD_ICONS).map(([key, IconC]) => (
+                                    <button key={key} onClick={() => setNewCardTypeIcon(key)} title={key} style={{ width: '30px', height: '30px', minHeight: '30px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '6px', border: '1px solid ' + (newCardTypeIcon === key ? '#059669' : '#e2e8f0'), backgroundColor: newCardTypeIcon === key ? '#f0fdf4' : '#fff', color: newCardTypeIcon === key ? '#059669' : '#64748b', cursor: 'pointer' }}><IconC size={14} /></button>
+                                  ))}
+                                </div>
+                              </div>
+                              <div>
+                                <label style={labelSt}>Applies to</label>
+                                <select value={newCardTypeAppliesTo} onChange={e => setNewCardTypeAppliesTo(e.target.value)} style={inputSt}>
+                                  <option value="both">Companies & contacts</option>
+                                  <option value="company">Companies only</option>
+                                  <option value="contact">Contacts only</option>
+                                </select>
+                              </div>
+                            </div>
+                            <label style={labelSt}>Fields</label>
+                            {newCardTypeFields.map((f, i) => (
+                              <div key={f.id} style={{ display: 'flex', gap: '6px', marginBottom: '6px', alignItems: 'center' }}>
+                                <input value={f.label} onChange={e => setNewCardTypeFields(newCardTypeFields.map((x, xi) => xi === i ? { ...x, label: e.target.value } : x))} placeholder="Field label" style={{ ...inputSt, flex: 2 }} />
+                                <select value={f.type} onChange={e => setNewCardTypeFields(newCardTypeFields.map((x, xi) => xi === i ? { ...x, type: e.target.value } : x))} style={{ ...inputSt, flex: 1 }}>
+                                  <option value="text">Text</option>
+                                  <option value="number">Number</option>
+                                  <option value="date">Date</option>
+                                  <option value="select">Dropdown</option>
+                                </select>
+                                {f.type === 'select' && <input value={(f.options || []).join(', ')} onChange={e => setNewCardTypeFields(newCardTypeFields.map((x, xi) => xi === i ? { ...x, options: e.target.value.split(',').map(o => o.trim()).filter(Boolean) } : x))} placeholder="Options, comma-separated" style={{ ...inputSt, flex: 2 }} />}
+                                <button onClick={() => setNewCardTypeFields(newCardTypeFields.filter((_, xi) => xi !== i))} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', flexShrink: 0, padding: '4px' }}>✕</button>
+                              </div>
+                            ))}
+                            <button onClick={() => setNewCardTypeFields([...newCardTypeFields, { id: Date.now(), label: '', type: 'text', options: [] }])} style={{ width: '100%', padding: '8px', border: '1px dashed #cbd5e1', borderRadius: '6px', backgroundColor: '#fff', fontSize: '12px', color: '#475569', cursor: 'pointer', marginBottom: '12px' }}>+ Add field</button>
+                            <div style={{ display: 'flex', gap: '8px' }}>
+                              <button onClick={saveCardType} style={{ padding: '10px 20px', backgroundColor: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '13px', fontWeight: '600', cursor: 'pointer' }}>{editingCardTypeId ? 'Save changes' : 'Create card type'}</button>
+                              {(editingCardTypeId || newCardTypeName) && <button onClick={resetCardTypeForm} style={{ padding: '10px 20px', backgroundColor: '#fff', color: '#475569', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', cursor: 'pointer' }}>Cancel</button>}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
 
                     </div>
                   </div>
