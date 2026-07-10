@@ -5569,7 +5569,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
               <div style={{ position: 'relative', flex: 1, maxWidth: '280px', margin: '0 20px' }}>
                 <Search size={13} style={{ position: 'absolute', top: '9px', left: '9px', color: '#94a3b8', pointerEvents: 'none' }} />
                 <input
-                  placeholder="Search properties, companies, contacts…"
+                  placeholder="Search everything — records, tasks, notes, settings…"
                   value={globalSearch}
                   onChange={e => { setGlobalSearch(e.target.value); setShowSearchResults(e.target.value.length > 0); }}
                   onBlur={() => setTimeout(() => setShowSearchResults(false), 200)}
@@ -5577,10 +5577,29 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 />
                 {showSearchResults && (() => {
                   const q = globalSearch.toLowerCase();
+                  const gHas = (s) => (s || '').toLowerCase().includes(q);
                   const propResults = properties.filter(p => (p.address || '').toLowerCase().includes(q) || (p.dealName || '').toLowerCase().includes(q)).slice(0, 5);
                   const coResults = companies.filter(c => c.name.toLowerCase().includes(q)).slice(0, 3);
                   const conResults = contacts.filter(c => c.name.toLowerCase().includes(q)).slice(0, 3);
-                  const hasResults = propResults.length + coResults.length + conResults.length > 0;
+                  const taskResults = tasks.filter(t => gHas(t.title)).slice(0, 3);
+                  const quoteResults = refurbQuotes.filter(qt => gHas(qt.tradeCategory) || gHas(qt.quoteRef) || gHas(qt.scopeOfWorks)).slice(0, 3);
+                  const noteResults = globalNotes.filter(n => gHas(n.text)).slice(0, 3);
+                  const settingResults = SETTINGS_SEARCH_INDEX.filter(s => gHas(s.label) || gHas(s.keywords)).slice(0, 4);
+                  const gOpenNote = (n) => {
+                    const tt = (n.targetType || '').toLowerCase();
+                    setGlobalSearch(''); setShowSearchResults(false);
+                    if (tt === 'company') { const c = companies.find(x => x.id === n.targetId); if (c) { setActiveTab('companies'); setCurrentViewCompany(c); } return; }
+                    if (tt === 'contact') { const c = contacts.find(x => x.id === n.targetId); if (c) { setActiveTab('contacts'); setCurrentViewContact(c); } return; }
+                    if (tt === 'property') { const p = properties.find(x => x.id === n.targetId); if (p) { setActiveTab('pipeline'); setCurrentViewProperty(p); } }
+                  };
+                  const gOpenSetting = (s) => {
+                    setActiveTab('settings'); setSettingsSection(s.section);
+                    setCurrentViewProperty(null); setCurrentViewCompany(null); setCurrentViewContact(null);
+                    setGlobalSearch(''); setShowSearchResults(false);
+                  };
+                  const hasResults = propResults.length + coResults.length + conResults.length + taskResults.length + quoteResults.length + noteResults.length + settingResults.length > 0;
+                  const sectionHeadStyle = { padding: '5px 14px', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em', borderTop: '1px solid #f1f5f9', borderBottom: '1px solid #f1f5f9', backgroundColor: '#f8fafc' };
+                  const rowStyle = { padding: '8px 14px', cursor: 'pointer', fontSize: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' };
                   return (
                     <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 200, marginTop: '4px', maxHeight: '320px', overflowY: 'auto' }}>
                       {!hasResults && <div style={{ padding: '12px 14px', fontSize: '12px', color: '#94a3b8' }}>No results</div>}
@@ -5603,6 +5622,34 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                         <div key={c.id} onMouseDown={() => { setActiveTab('contacts'); setCurrentViewContact(c); setGlobalSearch(''); setShowSearchResults(false); }} style={{ padding: '8px 14px', cursor: 'pointer', fontSize: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }} onMouseEnter={e => e.currentTarget.style.backgroundColor = '#f8fafc'} onMouseLeave={e => e.currentTarget.style.backgroundColor = ''}>
                           <span style={{ fontWeight: '500', color: '#0f172a' }}>{c.name}</span>
                           <span style={{ fontSize: '10px', color: '#94a3b8' }}>{c.jobTitle || c.role || '—'}</span>
+                        </div>
+                      ))}
+                      {taskResults.length > 0 && <div style={sectionHeadStyle}>Tasks</div>}
+                      {taskResults.map(t => (
+                        <div key={t.id} onMouseDown={() => { setActiveTab('tasks'); setGlobalSearch(''); setShowSearchResults(false); }} style={rowStyle} onMouseEnter={e => e.currentTarget.style.backgroundColor = '#f8fafc'} onMouseLeave={e => e.currentTarget.style.backgroundColor = ''}>
+                          <span style={{ fontWeight: '500', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</span>
+                          <span style={{ fontSize: '10px', color: '#94a3b8', flexShrink: 0 }}>{t.status === 'done' ? 'Done' : t.dueDate ? `Due ${t.dueDate}` : '—'}</span>
+                        </div>
+                      ))}
+                      {quoteResults.length > 0 && <div style={sectionHeadStyle}>Quotes</div>}
+                      {quoteResults.map(qt => (
+                        <div key={qt.id} onMouseDown={() => { setActiveTab('refurb'); setGlobalSearch(''); setShowSearchResults(false); }} style={rowStyle} onMouseEnter={e => e.currentTarget.style.backgroundColor = '#f8fafc'} onMouseLeave={e => e.currentTarget.style.backgroundColor = ''}>
+                          <span style={{ fontWeight: '500', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{qt.tradeCategory || 'Quote'}{qt.quoteRef ? ` · ${qt.quoteRef}` : ''}</span>
+                          <span style={{ fontSize: '10px', color: '#94a3b8', flexShrink: 0 }}>{qt.totalAmount ? `£${parseFloat(qt.totalAmount).toLocaleString()}` : '—'}</span>
+                        </div>
+                      ))}
+                      {noteResults.length > 0 && <div style={sectionHeadStyle}>Notes</div>}
+                      {noteResults.map(n => (
+                        <div key={n.id} onMouseDown={() => gOpenNote(n)} style={rowStyle} onMouseEnter={e => e.currentTarget.style.backgroundColor = '#f8fafc'} onMouseLeave={e => e.currentTarget.style.backgroundColor = ''}>
+                          <span style={{ fontWeight: '500', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{(n.text || '').length > 40 ? n.text.slice(0, 40) + '…' : n.text}</span>
+                          <span style={{ fontSize: '10px', color: '#94a3b8', flexShrink: 0 }}>{n.date}</span>
+                        </div>
+                      ))}
+                      {settingResults.length > 0 && <div style={sectionHeadStyle}>Settings</div>}
+                      {settingResults.map(s => (
+                        <div key={s.section + s.label} onMouseDown={() => gOpenSetting(s)} style={rowStyle} onMouseEnter={e => e.currentTarget.style.backgroundColor = '#f8fafc'} onMouseLeave={e => e.currentTarget.style.backgroundColor = ''}>
+                          <span style={{ fontWeight: '500', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.label}</span>
+                          <span style={{ fontSize: '10px', color: '#94a3b8', flexShrink: 0 }}>⚙️</span>
                         </div>
                       ))}
                     </div>
