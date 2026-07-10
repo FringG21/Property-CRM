@@ -3669,7 +3669,18 @@ async function handleApiRoutes(request, env, url) {
           await env.SCRAPER_KV.delete(`tg:link:${code}`);
           await sendTelegram(env, chatId, '✅ Connected to A&A Partners CRM. Task reminders will arrive here.');
         } else {
-          await sendTelegram(env, chatId, '⚠️ That code is invalid or has expired. Generate a fresh one in the CRM under Settings → Integrations → Telegram.');
+          // Only warn chats that are already linked (expired re-link attempts).
+          // Unknown chats get silence so the bot looks dormant to strangers.
+          let isLinked = false;
+          try {
+            const linked = await env.SCRAPER_KV.list({ prefix: 'tg:chat:' });
+            for (const k of linked.keys) {
+              if ((await env.SCRAPER_KV.get(k.name)) === String(chatId)) { isLinked = true; break; }
+            }
+          } catch (e) {}
+          if (isLinked) {
+            await sendTelegram(env, chatId, '⚠️ That code is invalid or has expired. Generate a fresh one in the CRM under Settings → Integrations → Telegram.');
+          }
         }
       }
       return corsResponse({ ok: true });
