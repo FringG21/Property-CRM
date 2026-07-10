@@ -203,6 +203,30 @@ const TRADE_INFO_NEEDED = {
   'Structural Engineer':['Drawing/sketch of proposed works','Current wall/beam details','Photos of structural issue','Building control submission required','Engineer cert needed'],
 };
 
+// Type-specific company fields shown in the record view's About column
+const COMPANY_TYPE_FIELDS = {
+  'Auction House':   { title: 'Auction fees & structure', fields: [{ l: "Buyer's premium", f: 'buyersPremium', ph: "e.g. 4% + VAT" }, { l: 'Admin fee', f: 'adminFee', ph: "e.g. £1,500 + VAT" }, { l: 'Deposit required', f: 'depositPct', ph: "e.g. 10%" }, { l: 'Auction format', f: 'auctionType', ph: "Room / Online / Timed / Hybrid" }, { l: 'Catalogue URL', f: 'catalogueUrl', ph: "e.g. allsop.co.uk/catalogue" }] },
+  'Solicitor':       { title: 'Legal & conveyancing', fields: [{ l: 'Conveyancing fee', f: 'conveyancingFee', ph: "e.g. £1,200 + VAT" }, { l: 'Avg. completion (weeks)', f: 'avgCompletionWeeks', ph: "e.g. 8–12 weeks" }, { l: 'Specialisms', f: 'specialisms', ph: "e.g. residential, lease extension" }, { l: 'Regulated by', f: 'regulatedBy', ph: "e.g. SRA, CILEx" }] },
+  'Surveyor':        { title: 'Survey services', fields: [{ l: 'Survey types offered', f: 'surveyTypes', ph: "e.g. RICS Level 2, Full Structural" }, { l: 'Typical turnaround (days)', f: 'turnaroundDays', ph: "e.g. 5–7 working days" }, { l: 'Fee range', f: 'feeRange', ph: "e.g. £350–£750" }, { l: 'RICS number', f: 'ricsNumber', ph: "e.g. 01234567" }] },
+  'Builder':         { title: 'Trade & contractor', fields: [{ l: 'Specialisms / trades', f: 'tradeSpecialisms', ph: "e.g. roofing, electrical, general build" }, { l: 'Day rate', f: 'dayRate', ph: "e.g. £250/day" }, { l: 'Typical lead time', f: 'leadTime', ph: "e.g. 2–3 weeks" }, { l: 'Labour type', f: 'labourType', ph: "Supply & fit / Labour only" }] },
+  'Estate Agent':    { title: 'Agency fees & coverage', fields: [{ l: 'Sales fee', f: 'salesFee', ph: "e.g. 1.5% + VAT" }, { l: 'Lettings management fee', f: 'managementFee', ph: "e.g. 10% + VAT" }, { l: 'Areas covered', f: 'areasCovered', ph: "e.g. Sheffield S1–S10" }, { l: 'Specialisms', f: 'specialisms', ph: "e.g. HMO, residential, commercial" }] },
+  'Mortgage Broker': { title: 'Mortgage & finance', fields: [{ l: 'Market access', f: 'marketAccess', ph: "Whole of market / Tied" }, { l: 'Broker fee', f: 'brokerFee', ph: "e.g. £499 or 0.5% of loan" }, { l: 'Specialisms', f: 'specialisms', ph: "e.g. BTL, bridging, development" }, { l: 'Max LTV covered', f: 'maxLtv', ph: "e.g. 85% LTV" }] },
+  'Letting Agent':   { title: 'Letting fees & services', fields: [{ l: 'Management fee', f: 'managementFee', ph: "e.g. 10% + VAT" }, { l: 'Tenant find fee', f: 'tenantFindFee', ph: "e.g. £500 + VAT" }, { l: 'Areas covered', f: 'areasCovered', ph: "e.g. Sheffield S1–S10" }, { l: 'HMO licensed', f: 'hmoLicensed', ph: "Yes / No" }] },
+  'Architect':       { title: 'Design & planning', fields: [{ l: 'Fee structure', f: 'feeStructure', ph: "e.g. 8–12% of build / fixed fee" }, { l: 'Specialisms', f: 'specialisms', ph: "e.g. conversion, new build, heritage" }, { l: 'RIBA member', f: 'ribaMember', ph: "Yes / No + member no." }, { l: 'Planning success rate', f: 'planningSuccessRate', ph: "e.g. 95%" }] },
+  'Other':           { title: 'Service details', fields: [{ l: 'Service offered', f: 'serviceOffered', ph: "e.g. block manager, financial advisor" }, { l: 'Fee / rate', f: 'feeRate', ph: "e.g. £150/hr or fixed fee" }] },
+};
+
+// Company type → default order of association panels on the record-view rail.
+// Every built-in panel stays reachable; type only drives ordering + first-open.
+const DEFAULT_RAIL_TABS = {
+  'Auction House': ['properties', 'contacts', 'quotes'],
+  'Builder': ['quotes', 'properties', 'contacts'],
+  'Trade / Contractor': ['quotes', 'properties', 'contacts'],
+  'Solicitor': ['properties', 'contacts', 'quotes'],
+  'Surveyor': ['properties', 'quotes', 'contacts'],
+  _default: ['contacts', 'properties', 'quotes'],
+};
+
 // Empty quote form template
 const EMPTY_QUOTE_FORM = {
   propertyId:'', tradeCategory:'', companyId:'', contactId:'',
@@ -519,6 +543,13 @@ export default function App({ user = {}, onLogout }) {
   const [pipelineView, setPipelineView] = useState('kanban');
   const [propSidebarOpen, setPropSidebarOpen] = useState(false);
   const [companyDetailTab, setCompanyDetailTab] = useState('overview');
+  const [companyActivityTab, setCompanyActivityTab] = useState('activity');
+  const [companyActivityFilter, setCompanyActivityFilter] = useState('All');
+  const [companyRailTab, setCompanyRailTab] = useState('contacts');
+  const [companyRailPanel, setCompanyRailPanel] = useState(null);
+  const [railSearch, setRailSearch] = useState('');
+  const [railForm, setRailForm] = useState({});
+  const companyNoteRef = useRef(null);
   const [settingsSection, setSettingsSection] = useState('profile');
   const [newCompPhone, setNewCompPhone] = useState('');
   const [newCompPremium, setNewCompPremium] = useState('');
@@ -7101,7 +7132,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                             const lastNote = globalNotes.filter(n => n.targetType === 'Company' && n.targetId === c.id).sort((a, b) => b.date.localeCompare(a.date))[0]?.date || '';
                             const isRecent = lastNote && Math.floor((new Date() - new Date(lastNote)) / 86400000) <= 7;
                             return (
-                              <div key={c.id} onClick={() => { setCurrentViewCompany(c); setCompanyDetailTab('overview'); }} style={{ padding: '12px', cursor: 'pointer', borderBottom: '1px solid #f1f5f9', backgroundColor: '#ffffff' }}>
+                              <div key={c.id} onClick={() => { setCurrentViewCompany(c); setCompanyDetailTab('overview'); setCompanyActivityTab('activity'); setCompanyActivityFilter('All'); setCompanyRailTab((DEFAULT_RAIL_TABS[c.type] || DEFAULT_RAIL_TABS._default)[0]); setCompanyRailPanel(null); setRailSearch(''); }} style={{ padding: '12px', cursor: 'pointer', borderBottom: '1px solid #f1f5f9', backgroundColor: '#ffffff' }}>
                                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px' }}>
                                   <div style={{ fontSize: '14px', fontWeight: '600', color: '#0f172a', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</div>
                                   {c.tier && <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', backgroundColor: c.tier === 'Gold' ? '#fef3c7' : c.tier === 'Silver' ? '#f1f5f9' : '#fdf6ec', color: c.tier === 'Gold' ? '#92400e' : c.tier === 'Silver' ? '#475569' : '#9a3412', fontWeight: '600', flexShrink: 0 }}>{c.tier}</span>}
@@ -7135,7 +7166,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                 const lastNote = globalNotes.filter(n => n.targetType === 'Company' && n.targetId === c.id).sort((a, b) => b.date.localeCompare(a.date))[0]?.date || '';
                                 const isRecent = lastNote && Math.floor((new Date() - new Date(lastNote)) / 86400000) <= 7;
                                 return (
-                                  <tr key={c.id} onClick={() => { setCurrentViewCompany(c); setCompanyDetailTab('overview'); }} style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer' }} onMouseEnter={e => e.currentTarget.style.backgroundColor = '#f8fafc'} onMouseLeave={e => e.currentTarget.style.backgroundColor = ''}>
+                                  <tr key={c.id} onClick={() => { setCurrentViewCompany(c); setCompanyDetailTab('overview'); setCompanyActivityTab('activity'); setCompanyActivityFilter('All'); setCompanyRailTab((DEFAULT_RAIL_TABS[c.type] || DEFAULT_RAIL_TABS._default)[0]); setCompanyRailPanel(null); setRailSearch(''); }} style={{ borderBottom: '1px solid #f1f5f9', cursor: 'pointer' }} onMouseEnter={e => e.currentTarget.style.backgroundColor = '#f8fafc'} onMouseLeave={e => e.currentTarget.style.backgroundColor = ''}>
                                     <td style={{ padding: '10px 14px' }}>
                                       <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                                         <div style={{ width: '28px', height: '28px', borderRadius: '8px', backgroundColor: tc.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: '700', color: tc.color, flexShrink: 0 }}>{(c.name || '?')[0]}</div>
@@ -7194,224 +7225,351 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       </div>
                     ) : (
                       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                        {/* Company header */}
-                        <div style={{ padding: '16px 20px', borderBottom: '1px solid #e2e8f0', backgroundColor: '#fff' }}>
-                          <button onClick={() => setCurrentViewCompany(null)} style={{ display: 'flex', alignItems: 'center', gap: '5px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px', color: '#64748b', padding: '0 0 10px 0', fontFamily: 'inherit' }}>
-                            <ArrowLeft size={13} /> All companies
-                          </button>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                              <div style={{ width: '40px', height: '40px', borderRadius: '10px', backgroundColor: typeColour(currentViewCompany.type).bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px', fontWeight: '700', color: typeColour(currentViewCompany.type).color, flexShrink: 0 }}>{currentViewCompany.name[0]}</div>
-                              <div>
-                                <div style={{ fontSize: '15px', fontWeight: '600', color: '#0f172a' }}>{currentViewCompany.name}</div>
-                                <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginTop: '2px' }}>
-                                  <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '4px', backgroundColor: typeColour(currentViewCompany.type).bg, color: typeColour(currentViewCompany.type).color, fontWeight: '600' }}>{currentViewCompany.type}</span>
-                                  {currentViewCompany.phone && <span style={{ fontSize: '11px', color: '#64748b' }}>{currentViewCompany.phone}</span>}
-                                  {currentViewCompany.website && currentViewCompany.website !== '--' && <a href={`https://${currentViewCompany.website.replace(/^https?:\/\//, '')}`} target="_blank" rel="noopener noreferrer" style={{ fontSize: '11px', color: '#0369a1', textDecoration: 'none' }}>{currentViewCompany.website}</a>}
+                        {(() => {
+                          const co = companies.find(c => c.id === currentViewCompany.id) || currentViewCompany;
+                          const tc = typeColour(co.type);
+                          const typeFields = COMPANY_TYPE_FIELDS[co.type] || COMPANY_TYPE_FIELDS['Other'];
+                          const companyNotes = globalNotes.filter(n => (n.targetType || '').toLowerCase() === 'company' && n.targetId === co.id).sort((a, b) => b.date.localeCompare(a.date));
+                          const visibleNotes = companyActivityFilter === 'All' ? companyNotes : companyNotes.filter(n => n.type === companyActivityFilter);
+                          const companyQuotes = refurbQuotes.filter(q => String(q.companyId) === String(co.id));
+                          const railOrder = DEFAULT_RAIL_TABS[co.type] || DEFAULT_RAIL_TABS._default;
+                          const RAIL_META = {
+                            contacts: { label: 'Contacts', Icon: Contact, count: linkedContacts.length },
+                            properties: { label: 'Properties', Icon: MapPin, count: linkedProps.length },
+                            quotes: { label: 'Quotes', Icon: Briefcase, count: companyQuotes.length },
+                          };
+                          const activeRail = RAIL_META[companyRailTab] ? companyRailTab : railOrder[0];
+                          const today = new Date().toISOString().split('T')[0];
+                          const labelStyle = { display: 'block', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '5px' };
+                          const inputStyle = { width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box', backgroundColor: '#fff' };
+                          const cardStyle = { backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '16px', marginBottom: '12px' };
+                          const sectionTitle = { fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: '600', marginBottom: '12px' };
+                          const Field = ({ label, field, type = 'text', placeholder = '' }) => (
+                            <div style={{ marginBottom: '12px' }}>
+                              <label style={labelStyle}>{label}</label>
+                              <input type={type} value={co[field] || ''} onChange={e => updateCompanyField(field, e.target.value)} placeholder={placeholder || label} style={inputStyle} />
+                            </div>
+                          );
+                          const quickActionStyle = { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '3px', minHeight: '44px', padding: '7px 4px', border: '1px solid #e2e8f0', borderRadius: '8px', backgroundColor: '#f8fafc', fontSize: '11px', fontWeight: '600', color: '#475569', cursor: 'pointer', textDecoration: 'none' };
+                          const openCompanyTaskDrawer = () => {
+                            setDraftTask({
+                              id: null, title: '', dueDate: '', priority: 'Medium',
+                              status: 'not_started', linkedType: 'Company', linkedId: co.id, linkedName: co.name,
+                              notes: '', assignee: user.name || 'Ashley',
+                              createdDate: today, createdBy: user.name || 'Ashley',
+                              waitingOn: '', expectedResponseDate: '', subtasks: [], comments: [], reminders: [],
+                              activityLog: [{ id: Date.now(), type: 'created', detail: 'Task created', user: user.name || 'You', at: new Date().toISOString() }],
+                            });
+                            setDrawerMode('create');
+                            setShowTaskDrawer(true);
+                          };
+                          return (
+                            <>
+                              {/* Record header */}
+                              <div style={{ padding: isMobile ? '12px 14px' : '14px 20px', borderBottom: '1px solid #e2e8f0', backgroundColor: '#fff', flexShrink: 0 }}>
+                                <button onClick={() => { setCurrentViewCompany(null); setCompanyRailPanel(null); }} style={{ display: 'flex', alignItems: 'center', gap: '5px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px', color: '#64748b', padding: '0 0 10px 0', fontFamily: 'inherit' }}>
+                                  <ArrowLeft size={13} /> All companies
+                                </button>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
+                                    <div style={{ width: '44px', height: '44px', borderRadius: '10px', backgroundColor: tc.bg, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '17px', fontWeight: '700', color: tc.color, flexShrink: 0 }}>{(co.name || '?')[0]}</div>
+                                    <div style={{ minWidth: 0 }}>
+                                      <div style={{ fontSize: '16px', fontWeight: '600', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{co.name}</div>
+                                      <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginTop: '2px', flexWrap: 'wrap' }}>
+                                        <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '4px', backgroundColor: tc.bg, color: tc.color, fontWeight: '600' }}>{co.type}</span>
+                                        {co.tier && <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '4px', backgroundColor: co.tier === 'Gold' ? '#fef3c7' : co.tier === 'Silver' ? '#f1f5f9' : '#fdf6ec', color: co.tier === 'Gold' ? '#92400e' : co.tier === 'Silver' ? '#475569' : '#9a3412', fontWeight: '600' }}>{co.tier}</span>}
+                                        {co.phone && <span style={{ fontSize: '11px', color: '#64748b' }}>{co.phone}</span>}
+                                        {co.website && co.website !== '--' && <a href={`https://${co.website.replace(/^https?:\/\//, '')}`} target="_blank" rel="noopener noreferrer" style={{ fontSize: '11px', color: '#0369a1', textDecoration: 'none' }}>{co.website}</a>}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <button onClick={() => { if(window.confirm(`Delete ${co.name}?`)) { setCompanies(companies.filter(c => c.id !== co.id)); setCurrentViewCompany(null); }}} style={{ padding: '6px 12px', border: '1px solid #fca5a5', borderRadius: '6px', backgroundColor: '#fef2f2', fontSize: '12px', color: '#dc2626', cursor: 'pointer', flexShrink: 0 }}>Delete</button>
                                 </div>
                               </div>
-                            </div>
-                            <div style={{ display: 'flex', gap: '6px' }}>
-                              <button onClick={() => { if(window.confirm(`Delete ${currentViewCompany.name}?`)) { setCompanies(companies.filter(c => c.id !== currentViewCompany.id)); setCurrentViewCompany(null); }}} style={{ padding: '6px 12px', border: '1px solid #fca5a5', borderRadius: '6px', backgroundColor: '#fef2f2', fontSize: '12px', color: '#dc2626', cursor: 'pointer' }}>Delete</button>
-                            </div>
-                          </div>
-                          {/* Tabs */}
-                          <div style={{ display: 'flex', gap: '16px', marginTop: '14px' }}>
-                            {['overview','contacts','properties','costs'].map(tab => (
-                              <button key={tab} onClick={() => setCompanyDetailTab(tab)} style={{ padding: '5px 0', fontSize: '12px', fontWeight: '500', background: 'none', border: 'none', cursor: 'pointer', color: companyDetailTab === tab ? '#059669' : '#94a3b8', borderBottom: companyDetailTab === tab ? '2px solid #059669' : '2px solid transparent', textTransform: 'capitalize' }}>{tab}{tab === 'contacts' ? ` (${linkedContacts.length})` : tab === 'properties' ? ` (${linkedProps.length})` : ''}</button>
-                            ))}
-                          </div>
-                        </div>
-                        {/* Tab content */}
-                        <div style={{ flex: 1, overflowY: 'auto', padding: '20px', backgroundColor: '#f8fafc' }}>
-                          {companyDetailTab === 'overview' && (() => {
-                            const Field = ({ label, field, type = 'text', placeholder = '' }) => (
-                              <div style={{ marginBottom: '14px' }}>
-                                <label style={{ display: 'block', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '5px' }}>{label}</label>
-                                <input type={type} value={currentViewCompany[field] || ''} onChange={e => updateCompanyField(field, e.target.value)} placeholder={placeholder || label} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box', backgroundColor: '#fff' }} />
-                              </div>
-                            );
-                            return (
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                              {settingsIntegrations.companiesHouse && (
-                                <div style={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '18px' }}>
-                                  <div style={{ fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: '600', marginBottom: '12px' }}>Search Companies House</div>
-                                  <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
-                                    <input type="text" value={chQuery} onChange={e => setChQuery(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); searchCompaniesHouse(); } }} placeholder="Company name or number…" style={{ flex: 1, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', boxSizing: 'border-box' }} />
-                                    <button onClick={searchCompaniesHouse} style={{ padding: '8px 16px', backgroundColor: '#0f172a', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '12px', fontWeight: '600', cursor: 'pointer', whiteSpace: 'nowrap' }}>{chLoading ? '…' : 'Search'}</button>
+                              {/* Three-column body: profile | activity | association rail */}
+                              <div style={{ flex: 1, display: 'flex', flexDirection: isMobile ? 'column' : 'row', overflow: isMobile ? 'auto' : 'hidden', minHeight: 0, backgroundColor: '#f8fafc' }}>
+                                {/* Left: editable profile */}
+                                <div style={{ width: isMobile ? '100%' : '26%', minWidth: isMobile ? 0 : '250px', borderRight: isMobile ? 'none' : '1px solid #e2e8f0', overflowY: isMobile ? 'visible' : 'auto', padding: '14px', backgroundColor: '#fff', flexShrink: 0 }}>
+                                  <div style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
+                                    <button onClick={() => { setCompanyActivityTab('activity'); setTimeout(() => companyNoteRef.current?.focus(), 50); }} style={quickActionStyle}><MessageSquare size={15} />Note</button>
+                                    <button onClick={openCompanyTaskDrawer} style={quickActionStyle}><ClipboardList size={15} />Task</button>
+                                    {co.phone ? <a href={`tel:${co.phone}`} style={quickActionStyle}><Phone size={15} />Call</a> : <button disabled style={{ ...quickActionStyle, opacity: 0.4, cursor: 'default' }}><Phone size={15} />Call</button>}
                                   </div>
-                                  {chResults !== null && (
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                      {chResults.length === 0 ? <div style={{ fontSize: '12px', color: '#94a3b8' }}>No results found.</div> : chResults.map(item => (
-                                        <div key={item.company_number} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
-                                          <div>
-                                            <div style={{ fontSize: '12px', fontWeight: '700', color: '#0f172a' }}>{item.title}</div>
-                                            <div style={{ fontSize: '10px', color: '#64748b', marginTop: '2px' }}>{item.company_number} · {item.company_status} · {item.address_snippet}</div>
+                                  <div style={{ ...cardStyle, padding: '14px' }}>
+                                    <div style={sectionTitle}>About this company</div>
+                                    <Field label="Company name" field="name" placeholder="e.g. Allsop LLP" />
+                                    <div style={{ marginBottom: '12px' }}>
+                                      <label style={labelStyle}>Type</label>
+                                      <select value={co.type || ''} onChange={e => updateCompanyField('type', e.target.value)} style={inputStyle}>
+                                        {['Auction House','Solicitor','Surveyor','Builder','Estate Agent','Mortgage Broker','Letting Agent','Architect','Trade / Contractor','Other'].map(t => <option key={t} value={t}>{t}</option>)}
+                                      </select>
+                                    </div>
+                                    <div style={{ marginBottom: '12px' }}>
+                                      <label style={labelStyle}>Tier / relationship</label>
+                                      <select value={co.tier || ''} onChange={e => updateCompanyField('tier', e.target.value)} style={inputStyle}>
+                                        <option value="">— None —</option>
+                                        <option value="Gold">Gold</option>
+                                        <option value="Silver">Silver</option>
+                                        <option value="Bronze">Bronze</option>
+                                      </select>
+                                    </div>
+                                    <Field label="Phone" field="phone" type="tel" placeholder="e.g. 0114 276 0151" />
+                                    <Field label="Website" field="website" placeholder="e.g. www.allsop.co.uk" />
+                                    <Field label="City / Location" field="city" placeholder="e.g. Sheffield" />
+                                    <Field label="Address" field="address" placeholder="Street address" />
+                                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '2px' }}>
+                                      <div>
+                                        <label style={labelStyle}>Opens</label>
+                                        <input type="time" value={co.opensAt || ''} onChange={e => updateCompanyField('opensAt', e.target.value)} style={inputStyle} />
+                                      </div>
+                                      <div>
+                                        <label style={labelStyle}>Closes</label>
+                                        <input type="time" value={co.closesAt || ''} onChange={e => updateCompanyField('closesAt', e.target.value)} style={inputStyle} />
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <div style={{ ...cardStyle, padding: '14px' }}>
+                                    <div style={sectionTitle}>{typeFields.title}</div>
+                                    {typeFields.fields.map(({ l, f, ph }) => (
+                                      <div key={f} style={{ marginBottom: '12px' }}>
+                                        <label style={labelStyle}>{l}</label>
+                                        <input value={co[f] || ''} onChange={e => updateCompanyField(f, e.target.value)} placeholder={ph} style={inputStyle} />
+                                      </div>
+                                    ))}
+                                  </div>
+                                  <div style={{ ...cardStyle, padding: '14px', marginBottom: 0 }}>
+                                    <div style={sectionTitle}>Fees & costs</div>
+                                    {(co.type === 'Auction House'
+                                      ? [['Legal fee', 'legalFee', 'e.g. £750 + VAT'], ['Survey fee', 'surveyFee', 'e.g. £350']]
+                                      : [["Buyer's premium", 'buyersPremium', 'e.g. 4% + VAT'], ['Admin fee', 'adminFee', 'e.g. £1,500 + VAT'], ['Legal fee', 'legalFee', 'e.g. £750 + VAT'], ['Survey fee', 'surveyFee', 'e.g. £350']]
+                                    ).map(([label, field, ph]) => (
+                                      <div key={field} style={{ marginBottom: '12px' }}>
+                                        <label style={labelStyle}>{label}</label>
+                                        <input value={co[field] || ''} onChange={e => updateCompanyField(field, e.target.value)} placeholder={ph} style={inputStyle} />
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                                {/* Centre: activity feed */}
+                                <div style={{ flex: 1, minWidth: 0, overflowY: isMobile ? 'visible' : 'auto', padding: '14px' }}>
+                                  <div style={{ display: 'flex', gap: '16px', borderBottom: '1px solid #e2e8f0', marginBottom: '12px' }}>
+                                    {[['activity', 'Activity'], ['overview', 'Overview']].map(([key, label]) => (
+                                      <button key={key} onClick={() => setCompanyActivityTab(key)} style={{ padding: '4px 0 8px', fontSize: '12px', fontWeight: '500', background: 'none', border: 'none', cursor: 'pointer', color: companyActivityTab === key ? '#059669' : '#94a3b8', borderBottom: companyActivityTab === key ? '2px solid #059669' : '2px solid transparent', marginBottom: '-1px' }}>{label}</button>
+                                    ))}
+                                  </div>
+                                  {companyActivityTab === 'activity' && (
+                                    <>
+                                      <form onSubmit={e => handleAddUnifiedNote(e, 'Company', co.id)} style={{ ...cardStyle, padding: '12px' }}>
+                                        <textarea ref={companyNoteRef} value={noteText} onChange={e => setNoteText(e.target.value)} placeholder="Log a call, meeting, email or note…" rows={3} style={{ width: '100%', padding: '8px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit' }} />
+                                        <div style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
+                                          <select value={noteType} onChange={e => setNoteType(e.target.value)} style={{ flex: 1, maxWidth: '160px', padding: '6px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', backgroundColor: '#fff' }}>
+                                            <option value="Call">📞 Call</option>
+                                            <option value="Meeting">🤝 Meeting</option>
+                                            <option value="Email">✉️ Email</option>
+                                            <option value="Review">📋 Review</option>
+                                            <option value="Task">✅ Task</option>
+                                            <option value="Flag">🚩 Flag</option>
+                                          </select>
+                                          <button type="submit" style={{ padding: '6px 16px', backgroundColor: '#0f172a', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: '600', cursor: 'pointer', marginLeft: 'auto' }}>Log</button>
+                                        </div>
+                                      </form>
+                                      <div style={{ display: 'flex', gap: '5px', marginBottom: '12px', flexWrap: 'wrap' }}>
+                                        {['All', ...new Set(companyNotes.map(n => n.type))].map(t => (
+                                          <button key={t} onClick={() => setCompanyActivityFilter(t)} style={{ padding: '3px 10px', borderRadius: '20px', border: '1px solid ' + (companyActivityFilter === t ? '#059669' : '#e2e8f0'), backgroundColor: companyActivityFilter === t ? '#f0fdf4' : '#fff', color: companyActivityFilter === t ? '#059669' : '#64748b', fontSize: '11px', cursor: 'pointer' }}>{t}</button>
+                                        ))}
+                                      </div>
+                                      {visibleNotes.map(n => (
+                                        <div key={n.id} style={{ padding: '10px 12px', backgroundColor: NOTE_TYPE_BG[n.type] || '#fff', border: '1px solid ' + (NOTE_TYPE_COLORS[n.type] ? NOTE_TYPE_COLORS[n.type] + '33' : '#e2e8f0'), borderRadius: '8px', marginBottom: '8px', position: 'relative' }}>
+                                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '3px' }}>
+                                            <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', backgroundColor: NOTE_TYPE_COLORS[n.type] || '#94a3b8', color: '#fff', fontWeight: '600' }}>{n.type}</span>
+                                            <span style={{ fontSize: '10px', color: '#94a3b8' }}>{n.date} · {n.author}</span>
                                           </div>
-                                          <button onClick={() => { updateCompanyField('name', item.title); updateCompanyField('address', item.address?.address_line_1 || item.address_snippet || ''); updateCompanyField('city', item.address?.locality || ''); setChResults(null); setChQuery(''); }} style={{ padding: '5px 10px', backgroundColor: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: '600', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0, marginLeft: '10px' }}>Import</button>
+                                          <div style={{ fontSize: '13px', color: NOTE_TYPE_TEXT[n.type] || '#0f172a' }}>{n.text}</div>
+                                          <button onClick={() => setGlobalNotes(globalNotes.filter(x => x.id !== n.id))} style={{ position: 'absolute', top: '8px', right: '8px', background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '12px', lineHeight: 1 }}>✕</button>
                                         </div>
                                       ))}
-                                    </div>
+                                      {visibleNotes.length === 0 && <div style={{ padding: '24px', textAlign: 'center', color: '#94a3b8', fontSize: '13px' }}>{companyNotes.length === 0 ? 'No activity yet — log the first note above.' : 'No notes of this type.'}</div>}
+                                    </>
+                                  )}
+                                  {companyActivityTab === 'overview' && (
+                                    <>
+                                      {settingsIntegrations.companiesHouse && (
+                                        <div style={cardStyle}>
+                                          <div style={sectionTitle}>Search Companies House</div>
+                                          <div style={{ display: 'flex', gap: '8px', marginBottom: '10px' }}>
+                                            <input type="text" value={chQuery} onChange={e => setChQuery(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); searchCompaniesHouse(); } }} placeholder="Company name or number…" style={{ flex: 1, padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', boxSizing: 'border-box' }} />
+                                            <button onClick={searchCompaniesHouse} style={{ padding: '8px 16px', backgroundColor: '#0f172a', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '12px', fontWeight: '600', cursor: 'pointer', whiteSpace: 'nowrap' }}>{chLoading ? '…' : 'Search'}</button>
+                                          </div>
+                                          {chResults !== null && (
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                              {chResults.length === 0 ? <div style={{ fontSize: '12px', color: '#94a3b8' }}>No results found.</div> : chResults.map(item => (
+                                                <div key={item.company_number} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', backgroundColor: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                                                  <div>
+                                                    <div style={{ fontSize: '12px', fontWeight: '700', color: '#0f172a' }}>{item.title}</div>
+                                                    <div style={{ fontSize: '10px', color: '#64748b', marginTop: '2px' }}>{item.company_number} · {item.company_status} · {item.address_snippet}</div>
+                                                  </div>
+                                                  <button onClick={() => { updateCompanyField('name', item.title); updateCompanyField('address', item.address?.address_line_1 || item.address_snippet || ''); updateCompanyField('city', item.address?.locality || ''); setChResults(null); setChQuery(''); }} style={{ padding: '5px 10px', backgroundColor: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: '600', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0, marginLeft: '10px' }}>Import</button>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      )}
+                                      <div style={cardStyle}>
+                                        <div style={sectionTitle}>At a glance</div>
+                                        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(3, 1fr)', gap: '10px' }}>
+                                          {[['Contacts', linkedContacts.length], ['Properties', linkedProps.length], ['Quotes', companyQuotes.length], ['Notes', companyNotes.length], ['Added', co.createdDate || '—'], ['Owner', co.owner || '—']].map(([label, value]) => (
+                                            <div key={label} style={{ backgroundColor: '#f8fafc', borderRadius: '8px', padding: '10px' }}>
+                                              <div style={{ fontSize: '10px', color: '#94a3b8', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.05em' }}>{label}</div>
+                                              <div style={{ fontSize: '14px', fontWeight: '600', color: '#0f172a', marginTop: '2px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</div>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </div>
+                                    </>
                                   )}
                                 </div>
-                              )}
-                              {(() => {
-                                const TYPE_FIELDS = {
-                                  'Auction House':   { title: 'Auction fees & structure', fields: [{ l: "Buyer's premium", f: 'buyersPremium', ph: "e.g. 4% + VAT" }, { l: 'Admin fee', f: 'adminFee', ph: "e.g. £1,500 + VAT" }, { l: 'Deposit required', f: 'depositPct', ph: "e.g. 10%" }, { l: 'Auction format', f: 'auctionType', ph: "Room / Online / Timed / Hybrid" }, { l: 'Catalogue URL', f: 'catalogueUrl', ph: "e.g. allsop.co.uk/catalogue" }] },
-                                  'Solicitor':       { title: 'Legal & conveyancing', fields: [{ l: 'Conveyancing fee', f: 'conveyancingFee', ph: "e.g. £1,200 + VAT" }, { l: 'Avg. completion (weeks)', f: 'avgCompletionWeeks', ph: "e.g. 8–12 weeks" }, { l: 'Specialisms', f: 'specialisms', ph: "e.g. residential, lease extension" }, { l: 'Regulated by', f: 'regulatedBy', ph: "e.g. SRA, CILEx" }] },
-                                  'Surveyor':        { title: 'Survey services', fields: [{ l: 'Survey types offered', f: 'surveyTypes', ph: "e.g. RICS Level 2, Full Structural" }, { l: 'Typical turnaround (days)', f: 'turnaroundDays', ph: "e.g. 5–7 working days" }, { l: 'Fee range', f: 'feeRange', ph: "e.g. £350–£750" }, { l: 'RICS number', f: 'ricsNumber', ph: "e.g. 01234567" }] },
-                                  'Builder':         { title: 'Trade & contractor', fields: [{ l: 'Specialisms / trades', f: 'tradeSpecialisms', ph: "e.g. roofing, electrical, general build" }, { l: 'Day rate', f: 'dayRate', ph: "e.g. £250/day" }, { l: 'Typical lead time', f: 'leadTime', ph: "e.g. 2–3 weeks" }, { l: 'Labour type', f: 'labourType', ph: "Supply & fit / Labour only" }] },
-                                  'Estate Agent':    { title: 'Agency fees & coverage', fields: [{ l: 'Sales fee', f: 'salesFee', ph: "e.g. 1.5% + VAT" }, { l: 'Lettings management fee', f: 'managementFee', ph: "e.g. 10% + VAT" }, { l: 'Areas covered', f: 'areasCovered', ph: "e.g. Sheffield S1–S10" }, { l: 'Specialisms', f: 'specialisms', ph: "e.g. HMO, residential, commercial" }] },
-                                  'Mortgage Broker': { title: 'Mortgage & finance', fields: [{ l: 'Market access', f: 'marketAccess', ph: "Whole of market / Tied" }, { l: 'Broker fee', f: 'brokerFee', ph: "e.g. £499 or 0.5% of loan" }, { l: 'Specialisms', f: 'specialisms', ph: "e.g. BTL, bridging, development" }, { l: 'Max LTV covered', f: 'maxLtv', ph: "e.g. 85% LTV" }] },
-                                  'Letting Agent':   { title: 'Letting fees & services', fields: [{ l: 'Management fee', f: 'managementFee', ph: "e.g. 10% + VAT" }, { l: 'Tenant find fee', f: 'tenantFindFee', ph: "e.g. £500 + VAT" }, { l: 'Areas covered', f: 'areasCovered', ph: "e.g. Sheffield S1–S10" }, { l: 'HMO licensed', f: 'hmoLicensed', ph: "Yes / No" }] },
-                                  'Architect':       { title: 'Design & planning', fields: [{ l: 'Fee structure', f: 'feeStructure', ph: "e.g. 8–12% of build / fixed fee" }, { l: 'Specialisms', f: 'specialisms', ph: "e.g. conversion, new build, heritage" }, { l: 'RIBA member', f: 'ribaMember', ph: "Yes / No + member no." }, { l: 'Planning success rate', f: 'planningSuccessRate', ph: "e.g. 95%" }] },
-                                  'Other':           { title: 'Service details', fields: [{ l: 'Service offered', f: 'serviceOffered', ph: "e.g. block manager, financial advisor" }, { l: 'Fee / rate', f: 'feeRate', ph: "e.g. £150/hr or fixed fee" }] },
-                                };
-                                const typeFields = TYPE_FIELDS[currentViewCompany.type] || TYPE_FIELDS['Other'];
-                                return (
-                                  <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '14px' }}>
-                                    <div style={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '18px' }}>
-                                      <div style={{ fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: '600', marginBottom: '14px' }}>Company details</div>
-                                      <Field label="Company name" field="name" placeholder="e.g. Allsop LLP" />
-                                      <div style={{ marginBottom: '14px' }}>
-                                        <label style={{ display: 'block', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '5px' }}>Type</label>
-                                        <select value={currentViewCompany.type || ''} onChange={e => updateCompanyField('type', e.target.value)} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', backgroundColor: '#fff' }}>
-                                          {['Auction House','Solicitor','Surveyor','Builder','Estate Agent','Mortgage Broker','Letting Agent','Architect','Trade / Contractor','Other'].map(t => <option key={t} value={t}>{t}</option>)}
-                                        </select>
-                                      </div>
-                                      <div style={{ marginBottom: '14px' }}>
-                                        <label style={{ display: 'block', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '5px' }}>Tier / relationship</label>
-                                        <select value={currentViewCompany.tier || ''} onChange={e => updateCompanyField('tier', e.target.value)} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', backgroundColor: '#fff' }}>
-                                          <option value="">— None —</option>
-                                          <option value="Gold">Gold</option>
-                                          <option value="Silver">Silver</option>
-                                          <option value="Bronze">Bronze</option>
-                                        </select>
-                                      </div>
-                                      <Field label="Phone" field="phone" type="tel" placeholder="e.g. 0114 276 0151" />
-                                      <Field label="Website" field="website" placeholder="e.g. www.allsop.co.uk" />
-                                      <Field label="City / Location" field="city" placeholder="e.g. Sheffield" />
-                                      <Field label="Address" field="address" placeholder="Street address" />
-                                      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '14px' }}>
-                                        <div>
-                                          <label style={{ display: 'block', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '5px' }}>Opens</label>
-                                          <input type="time" value={currentViewCompany.opensAt || ''} onChange={e => updateCompanyField('opensAt', e.target.value)} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box', backgroundColor: '#fff' }} />
-                                        </div>
-                                        <div>
-                                          <label style={{ display: 'block', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '5px' }}>Closes</label>
-                                          <input type="time" value={currentViewCompany.closesAt || ''} onChange={e => updateCompanyField('closesAt', e.target.value)} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box', backgroundColor: '#fff' }} />
-                                        </div>
-                                      </div>
-                                    </div>
-                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-                                      <div style={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '18px' }}>
-                                        <div style={{ fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: '600', marginBottom: '14px' }}>{typeFields.title}</div>
-                                        {typeFields.fields.map(({ l, f, ph }) => (
-                                          <div key={f} style={{ marginBottom: '14px' }}>
-                                            <label style={{ display: 'block', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', marginBottom: '5px' }}>{l}</label>
-                                            <input value={currentViewCompany[f] || ''} onChange={e => updateCompanyField(f, e.target.value)} placeholder={ph} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box', backgroundColor: '#fff' }} />
-                                          </div>
-                                        ))}
-                                      </div>
-                                      <div style={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '18px' }}>
-                                        <div style={{ fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.06em', fontWeight: '600', marginBottom: '12px' }}>Activity notes</div>
-                                        {globalNotes.filter(n => n.targetType === 'Company' && n.targetId === currentViewCompany.id).sort((a, b) => b.date.localeCompare(a.date)).map(n => (
-                                          <div key={n.id} style={{ padding: '8px 10px', backgroundColor: NOTE_TYPE_BG[n.type] || '#f8fafc', border: '1px solid ' + (NOTE_TYPE_COLORS[n.type] ? NOTE_TYPE_COLORS[n.type] + '33' : '#e2e8f0'), borderRadius: '6px', marginBottom: '6px', position: 'relative' }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '3px' }}>
-                                              <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', backgroundColor: NOTE_TYPE_COLORS[n.type] || '#94a3b8', color: '#fff', fontWeight: '600' }}>{n.type}</span>
-                                              <span style={{ fontSize: '10px', color: '#94a3b8' }}>{n.date} · {n.author}</span>
-                                            </div>
-                                            <div style={{ fontSize: '12px', color: NOTE_TYPE_TEXT[n.type] || '#0f172a' }}>{n.text}</div>
-                                            <button onClick={() => setGlobalNotes(globalNotes.filter(x => x.id !== n.id))} style={{ position: 'absolute', top: '6px', right: '6px', background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '12px', lineHeight: 1 }}>✕</button>
-                                          </div>
-                                        ))}
-                                        {globalNotes.filter(n => n.targetType === 'Company' && n.targetId === currentViewCompany.id).length === 0 && <div style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '8px' }}>No activity notes yet</div>}
-                                        <form onSubmit={e => handleAddUnifiedNote(e, 'Company', currentViewCompany.id)} style={{ marginTop: '8px' }}>
-                                          <textarea value={noteText} onChange={e => setNoteText(e.target.value)} placeholder="Log a call, meeting, email or note…" rows={3} style={{ width: '100%', padding: '8px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', boxSizing: 'border-box', resize: 'vertical' }} />
-                                          <div style={{ display: 'flex', gap: '6px', marginTop: '6px' }}>
-                                            <select value={noteType} onChange={e => setNoteType(e.target.value)} style={{ flex: 1, padding: '6px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', backgroundColor: '#fff' }}>
-                                              <option value="Call">📞 Call</option>
-                                              <option value="Meeting">🤝 Meeting</option>
-                                              <option value="Email">✉️ Email</option>
-                                              <option value="Review">📋 Review</option>
-                                              <option value="Task">✅ Task</option>
-                                              <option value="Flag">🚩 Flag</option>
-                                            </select>
-                                            <button type="submit" style={{ padding: '6px 14px', backgroundColor: '#0f172a', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: '600', cursor: 'pointer' }}>Log</button>
-                                          </div>
-                                        </form>
-                                      </div>
-                                    </div>
-                                  </div>
-                                );
-                              })()}
-                              </div>
-                            );
-                          })()}
-                          {companyDetailTab === 'contacts' && (
-                            <div style={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', overflow: 'hidden' }}>
-                              <div style={{ padding: '10px 14px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                <span style={{ fontSize: '12px', fontWeight: '600', color: '#64748b' }}>{linkedContacts.length} contact{linkedContacts.length !== 1 ? 's' : ''}</span>
-                                <button onClick={() => { setNewConCompanyId(String(currentViewCompany.id)); setActiveTab('contacts'); setCurrentViewContact({ _new: true }); }} style={{ padding: '5px 12px', backgroundColor: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: '600', cursor: 'pointer' }}>+ Add contact</button>
-                              </div>
-                              {linkedContacts.length === 0 ? <div style={{ padding: '32px', textAlign: 'center', color: '#94a3b8', fontSize: '13px' }}>No contacts linked to this company</div> : (
-                                <div style={{ overflowX: 'auto' }} className="crm-table-wrap">
-                                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', minWidth: '520px' }}>
-                                  <thead><tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}><th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: '600', color: '#64748b', fontSize: '10px', textTransform: 'uppercase' }}>Name</th><th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: '600', color: '#64748b', fontSize: '10px', textTransform: 'uppercase' }}>Job Title</th><th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: '600', color: '#64748b', fontSize: '10px', textTransform: 'uppercase' }}>Email</th><th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: '600', color: '#64748b', fontSize: '10px', textTransform: 'uppercase' }}>Phone</th></tr></thead>
-                                  <tbody>{linkedContacts.map(c => <tr key={c.id} style={{ borderBottom: '1px solid #f1f5f9' }}><td style={{ padding: '10px 14px', fontWeight: '600', color: '#0f172a' }}>{c.name}</td><td style={{ padding: '10px 14px', color: '#64748b' }}>{c.jobTitle}</td><td style={{ padding: '10px 14px', color: '#475569' }}>{c.email}</td><td style={{ padding: '10px 14px', color: '#475569' }}>{c.phone !== '--' ? c.phone : '—'}</td></tr>)}</tbody>
-                                </table>
-                                </div>
-                              )}
-                            </div>
-                          )}
-                          {companyDetailTab === 'properties' && (
-                            <div>
-                              {/* Link a property */}
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '12px', flexWrap: 'wrap' }}>
-                                <span style={{ fontSize: '12px', color: '#64748b', fontWeight: '600' }}>Link a property:</span>
-                                <select value="" onChange={e => { const pid = parseInt(e.target.value); if (pid) togglePropertyCompanyLink(pid, currentViewCompany.id, true); }} style={{ padding: '7px 10px', borderRadius: '6px', border: '1px solid #e2e8f0', fontSize: '12px', backgroundColor: '#fff', minWidth: isMobile ? '140px' : '220px' }}>
-                                  <option value="">Select a property…</option>
-                                  {unlinkedProps.map(p => <option key={p.id} value={p.id}>{p.address}</option>)}
-                                </select>
-                                {unlinkedProps.length === 0 && <span style={{ fontSize: '11px', color: '#94a3b8' }}>All properties already linked</span>}
-                              </div>
-                              <div style={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', overflow: 'hidden' }}>
-                                {linkedProps.length === 0 ? <div style={{ padding: '32px', textAlign: 'center', color: '#94a3b8', fontSize: '13px' }}>No properties linked to this company yet — use the picker above or add it as the source platform.</div> : (
-                                  <div style={{ overflowX: 'auto' }} className="crm-table-wrap">
-                                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px', minWidth: '620px' }}>
-                                    <thead><tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}><th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: '600', color: '#64748b', fontSize: '10px', textTransform: 'uppercase' }}>Address</th><th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: '600', color: '#64748b', fontSize: '10px', textTransform: 'uppercase' }}>Link</th><th style={{ padding: '10px 14px', textAlign: 'left', fontWeight: '600', color: '#64748b', fontSize: '10px', textTransform: 'uppercase' }}>Status</th><th style={{ padding: '10px 14px', textAlign: 'right', fontWeight: '600', color: '#64748b', fontSize: '10px', textTransform: 'uppercase' }}>Guide</th><th style={{ padding: '10px 14px', textAlign: 'center', fontWeight: '600', color: '#64748b', fontSize: '10px', textTransform: 'uppercase' }}>Auction date</th><th style={{ padding: '10px 14px' }}></th></tr></thead>
-                                    <tbody>{linkedProps.map(p => {
-                                      const isManual = (p.linkedCompanyIds || []).includes(currentViewCompany.id);
-                                      const isPlatform = p.sourcePlatform === currentViewCompany.name;
+                                {/* Right: association rail */}
+                                <div style={{ width: isMobile ? '100%' : '32%', minWidth: isMobile ? 0 : '280px', borderLeft: isMobile ? 'none' : '1px solid #e2e8f0', borderTop: isMobile ? '1px solid #e2e8f0' : 'none', display: 'flex', flexDirection: isMobile ? 'column' : 'row', flexShrink: 0, overflow: 'hidden' }}>
+                                  <div style={{ width: isMobile ? '100%' : '44px', display: 'flex', flexDirection: isMobile ? 'row' : 'column', alignItems: 'center', gap: '6px', padding: isMobile ? '8px 12px' : '12px 0', backgroundColor: '#f1f5f9', borderRight: isMobile ? 'none' : '1px solid #e2e8f0', borderBottom: isMobile ? '1px solid #e2e8f0' : 'none', flexShrink: 0, boxSizing: 'border-box' }}>
+                                    {railOrder.map(key => {
+                                      const m = RAIL_META[key];
+                                      const RailIcon = m.Icon;
                                       return (
-                                        <tr key={p.id} style={{ borderBottom: '1px solid #f1f5f9' }}>
-                                          <td style={{ padding: '10px 14px', fontWeight: '600', color: '#0284c7', cursor: 'pointer' }} onClick={() => { setActiveTab('pipeline'); setCurrentViewProperty(p); }}>{p.address}</td>
-                                          <td style={{ padding: '10px 14px' }}>{isPlatform ? <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '8px', fontWeight: '600', backgroundColor: '#dcfce7', color: '#166534' }}>Source platform</span> : <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '8px', fontWeight: '600', backgroundColor: '#ede9fe', color: '#6d28d9' }}>Linked</span>}</td>
-                                          <td style={{ padding: '10px 14px' }}><span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '8px', fontWeight: '600', backgroundColor: getStatusStyle(p.status || 'Sourced').bg, color: getStatusStyle(p.status || 'Sourced').color }}>{p.status || 'Sourced'}</span></td>
-                                          <td style={{ padding: '10px 14px', textAlign: 'right', fontWeight: '600' }}>£{p.guidePrice?.toLocaleString()}</td>
-                                          <td style={{ padding: '10px 14px', textAlign: 'center', color: '#64748b' }}>{p.auctionDate}</td>
-                                          <td style={{ padding: '10px 14px', textAlign: 'center' }}>{isManual && <button onClick={() => togglePropertyCompanyLink(p.id, currentViewCompany.id, false)} title="Unlink" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '11px', fontWeight: '600' }}>Unlink</button>}</td>
-                                        </tr>
+                                        <button key={key} onClick={() => { setCompanyRailTab(key); setCompanyRailPanel(null); setRailSearch(''); }} title={m.label} style={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', width: isMobile ? 'auto' : '32px', height: isMobile ? '44px' : '32px', minHeight: isMobile ? '44px' : '32px', padding: isMobile ? '0 14px' : 0, border: 'none', borderRadius: '8px', cursor: 'pointer', backgroundColor: activeRail === key ? '#059669' : 'transparent', color: activeRail === key ? '#fff' : '#64748b' }}>
+                                          <RailIcon size={16} style={{ flexShrink: 0 }} />
+                                          {isMobile && <span style={{ fontSize: '12px', fontWeight: '600' }}>{m.label}</span>}
+                                          {m.count > 0 && <span style={{ position: 'absolute', top: isMobile ? '4px' : '-4px', right: isMobile ? '2px' : '-4px', background: activeRail === key ? '#0f172a' : '#94a3b8', color: '#fff', borderRadius: '8px', fontSize: '9px', fontWeight: '700', padding: '0 4px', lineHeight: '13px' }}>{m.count}</span>}
+                                        </button>
                                       );
-                                    })}</tbody>
-                                  </table>
+                                    })}
                                   </div>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                          {companyDetailTab === 'costs' && (
-                            <div style={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '20px', maxWidth: '480px' }}>
-                              <div style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a', marginBottom: '16px' }}>Auction fees & costs</div>
-                              {[["Buyer's premium", 'buyersPremium', "e.g. 4% + VAT"], ['Admin fee', 'adminFee', "e.g. £1,500 + VAT"], ['Legal fee', 'legalFee', "e.g. £750 + VAT"], ['Survey fee', 'surveyFee', "e.g. £350"]].map(([label, field, ph]) => (
-                                <div key={field} style={{ marginBottom: '12px' }}>
-                                  <label style={{ display: 'block', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', marginBottom: '4px' }}>{label}</label>
-                                  <input value={currentViewCompany[field] || ''} onChange={e => updateCompanyField(field, e.target.value)} placeholder={ph} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', boxSizing: 'border-box' }} />
+                                  <div style={{ flex: 1, minWidth: 0, overflowY: isMobile ? 'visible' : 'auto', padding: '12px' }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                                      <span style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a' }}>{RAIL_META[activeRail].label} ({RAIL_META[activeRail].count})</span>
+                                      <button onClick={() => { setCompanyRailPanel(activeRail); setRailForm({}); setRailSearch(''); }} title={`Add or link ${RAIL_META[activeRail].label.toLowerCase()}`} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '26px', height: '26px', minHeight: '26px', borderRadius: '6px', border: '1px solid #d1fae5', backgroundColor: '#f0fdf4', color: '#059669', cursor: 'pointer' }}><Plus size={14} /></button>
+                                    </div>
+                                    {activeRail === 'contacts' && (<>
+                                      {linkedContacts.map(con => (
+                                        <div key={con.id} style={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '9px 11px', marginBottom: '7px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                                          <div style={{ minWidth: 0, cursor: 'pointer', flex: 1 }} onClick={() => { setActiveTab('contacts'); setCurrentViewContact(con); }}>
+                                            <div style={{ fontSize: '12px', fontWeight: '600', color: '#0284c7', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{con.name}</div>
+                                            <div style={{ fontSize: '11px', color: '#94a3b8' }}>{con.jobTitle || con.role || '—'}</div>
+                                          </div>
+                                          <button onClick={() => setContacts(prev => prev.map(x => x.id === con.id ? { ...x, companyId: null } : x))} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '10px', fontWeight: '600', flexShrink: 0 }}>Unlink</button>
+                                        </div>
+                                      ))}
+                                      {linkedContacts.length === 0 && <div style={{ padding: '18px 8px', textAlign: 'center', color: '#94a3b8', fontSize: '12px' }}>No contacts linked — use + to add or link one.</div>}
+                                    </>)}
+                                    {activeRail === 'properties' && (<>
+                                      {linkedProps.map(p => {
+                                        const isManual = (p.linkedCompanyIds || []).includes(co.id);
+                                        const isPlatform = p.sourcePlatform === co.name;
+                                        return (
+                                          <div key={p.id} style={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '9px 11px', marginBottom: '7px' }}>
+                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                                              <div style={{ fontSize: '12px', fontWeight: '600', color: '#0284c7', cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }} onClick={() => { setActiveTab('pipeline'); setCurrentViewProperty(p); }}>{p.address}</div>
+                                              {isManual && <button onClick={() => togglePropertyCompanyLink(p.id, co.id, false)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '10px', fontWeight: '600', flexShrink: 0 }}>Unlink</button>}
+                                            </div>
+                                            <div style={{ display: 'flex', gap: '5px', marginTop: '4px', alignItems: 'center', flexWrap: 'wrap' }}>
+                                              {isPlatform ? <span style={{ fontSize: '9px', padding: '1px 5px', borderRadius: '8px', fontWeight: '600', backgroundColor: '#dcfce7', color: '#166534' }}>Source platform</span> : <span style={{ fontSize: '9px', padding: '1px 5px', borderRadius: '8px', fontWeight: '600', backgroundColor: '#ede9fe', color: '#6d28d9' }}>Linked</span>}
+                                              <span style={{ fontSize: '9px', padding: '1px 5px', borderRadius: '8px', fontWeight: '600', backgroundColor: getStatusStyle(p.status || 'Sourced').bg, color: getStatusStyle(p.status || 'Sourced').color }}>{p.status || 'Sourced'}</span>
+                                              {p.guidePrice != null && <span style={{ fontSize: '10px', color: '#64748b', fontWeight: '600' }}>£{p.guidePrice?.toLocaleString()}</span>}
+                                            </div>
+                                          </div>
+                                        );
+                                      })}
+                                      {linkedProps.length === 0 && <div style={{ padding: '18px 8px', textAlign: 'center', color: '#94a3b8', fontSize: '12px' }}>No properties linked — use + to link one from the pipeline.</div>}
+                                    </>)}
+                                    {activeRail === 'quotes' && (<>
+                                      {companyQuotes.map(q => (
+                                        <div key={q.id} style={{ backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '9px 11px', marginBottom: '7px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                                          <div style={{ minWidth: 0, cursor: 'pointer', flex: 1 }} onClick={() => { setCurrentViewCompany(null); setCompanyRailPanel(null); setActiveTab('refurb'); }}>
+                                            <div style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{q.tradeCategory || 'Quote'}{q.quoteRef ? ` · ${q.quoteRef}` : ''}</div>
+                                            <div style={{ fontSize: '11px', color: '#94a3b8' }}>{q.totalAmount ? `£${parseFloat(q.totalAmount).toLocaleString()}` : '—'} · {q.status || 'received'}</div>
+                                          </div>
+                                          <button onClick={() => setRefurbQuotes(prev => prev.map(x => x.id === q.id ? { ...x, companyId: null } : x))} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '10px', fontWeight: '600', flexShrink: 0 }}>Unlink</button>
+                                        </div>
+                                      ))}
+                                      {companyQuotes.length === 0 && <div style={{ padding: '18px 8px', textAlign: 'center', color: '#94a3b8', fontSize: '12px' }}>No quotes for this company — use + to create or link one.</div>}
+                                    </>)}
+                                  </div>
                                 </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
+                              </div>
+                              {/* Slide-in: create or link */}
+                              {companyRailPanel && (
+                                <>
+                                  <div onClick={() => setCompanyRailPanel(null)} style={{ position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.35)', zIndex: 390 }} />
+                                  <div style={{ position: 'fixed', right: 0, top: 0, bottom: 0, width: isMobile ? '100%' : '400px', backgroundColor: '#fff', zIndex: 400, boxShadow: '-8px 0 24px rgba(0,0,0,0.15)', display: 'flex', flexDirection: 'column' }}>
+                                    <div style={{ padding: '14px 16px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#0f172a' }}>
+                                      <span style={{ fontSize: '13px', fontWeight: '600', color: '#fff' }}>{companyRailPanel === 'contacts' ? 'Add or link a contact' : companyRailPanel === 'properties' ? 'Link a property' : 'Add or link a quote'}</span>
+                                      <button onClick={() => setCompanyRailPanel(null)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', display: 'flex', padding: '4px' }}><X size={16} /></button>
+                                    </div>
+                                    <div style={{ flex: 1, overflowY: 'auto', padding: '16px' }}>
+                                      {companyRailPanel === 'contacts' && (<>
+                                        <div style={sectionTitle}>Link an existing contact</div>
+                                        <input placeholder="Search contacts…" value={railSearch} onChange={e => setRailSearch(e.target.value)} style={{ ...inputStyle, marginBottom: '8px' }} />
+                                        <div style={{ maxHeight: '220px', overflowY: 'auto', marginBottom: '16px' }}>
+                                          {contacts.filter(x => x.companyId !== co.id && (!railSearch || (x.name || '').toLowerCase().includes(railSearch.toLowerCase()) || (x.email || '').toLowerCase().includes(railSearch.toLowerCase()))).slice(0, 30).map(x => (
+                                            <div key={x.id} onClick={() => { setContacts(prev => prev.map(k => k.id === x.id ? { ...k, companyId: co.id } : k)); setCompanyRailPanel(null); }} style={{ padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', marginBottom: '5px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                                              <div style={{ minWidth: 0 }}>
+                                                <div style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a' }}>{x.name}</div>
+                                                <div style={{ fontSize: '10px', color: '#94a3b8' }}>{x.jobTitle || x.role || ''}{x.companyId ? ` · ${companies.find(cc => cc.id === x.companyId)?.name || ''}` : ''}</div>
+                                              </div>
+                                              <Link2 size={13} style={{ color: '#059669', flexShrink: 0 }} />
+                                            </div>
+                                          ))}
+                                          {contacts.filter(x => x.companyId !== co.id).length === 0 && <div style={{ fontSize: '12px', color: '#94a3b8', padding: '8px 0' }}>Every contact is already linked to this company.</div>}
+                                        </div>
+                                        <div style={sectionTitle}>Or create a new contact</div>
+                                        {[['name', 'Full name *'], ['jobTitle', 'Job title'], ['email', 'Email'], ['phone', 'Phone']].map(([f, label]) => (
+                                          <div key={f} style={{ marginBottom: '10px' }}>
+                                            <label style={labelStyle}>{label}</label>
+                                            <input value={railForm[f] || ''} onChange={e => setRailForm({ ...railForm, [f]: e.target.value })} style={inputStyle} />
+                                          </div>
+                                        ))}
+                                        <button onClick={() => { if (!(railForm.name || '').trim()) return; setContacts(prev => [{ id: Date.now(), name: railForm.name.trim(), email: railForm.email || '--', jobTitle: railForm.jobTitle || '', phone: railForm.phone || '', officePhone: '', linkedin: '', companyId: co.id, role: 'Other', origin: '', owner: user.name || 'Ashley Austin-Buah', lastActivity: today }, ...prev]); setRailForm({}); setCompanyRailPanel(null); }} style={{ width: '100%', padding: '10px', backgroundColor: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '13px', fontWeight: '600', cursor: 'pointer' }}>Create & link contact</button>
+                                      </>)}
+                                      {companyRailPanel === 'properties' && (<>
+                                        <div style={sectionTitle}>Link a property from the pipeline</div>
+                                        <input placeholder="Search by address or postcode…" value={railSearch} onChange={e => setRailSearch(e.target.value)} style={{ ...inputStyle, marginBottom: '8px' }} />
+                                        <div style={{ marginBottom: '14px' }}>
+                                          {unlinkedProps.filter(p => !railSearch || (p.address || '').toLowerCase().includes(railSearch.toLowerCase()) || (p.postcode || '').toLowerCase().includes(railSearch.toLowerCase())).slice(0, 30).map(p => (
+                                            <div key={p.id} onClick={() => togglePropertyCompanyLink(p.id, co.id, true)} style={{ padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', marginBottom: '5px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                                              <div style={{ minWidth: 0 }}>
+                                                <div style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.address}</div>
+                                                <div style={{ fontSize: '10px', color: '#94a3b8' }}>{p.status || 'Sourced'}{p.guidePrice ? ` · £${p.guidePrice.toLocaleString()}` : ''}</div>
+                                              </div>
+                                              <Link2 size={13} style={{ color: '#059669', flexShrink: 0 }} />
+                                            </div>
+                                          ))}
+                                          {unlinkedProps.length === 0 && <div style={{ fontSize: '12px', color: '#94a3b8', padding: '8px 0' }}>All pipeline properties are already linked.</div>}
+                                        </div>
+                                        <div style={{ fontSize: '11px', color: '#94a3b8', lineHeight: 1.5 }}>New properties are added from the Auction Pipeline tab — once added there, link them here.</div>
+                                      </>)}
+                                      {companyRailPanel === 'quotes' && (<>
+                                        <button onClick={() => { setEditingQuoteId(null); setQuoteForm({ ...EMPTY_QUOTE_FORM, companyId: String(co.id), quoteDate: today }); setQuoteModalTab('details'); setShowQuoteModal(true); setCompanyRailPanel(null); }} style={{ width: '100%', padding: '10px', backgroundColor: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '13px', fontWeight: '600', cursor: 'pointer', marginBottom: '16px' }}>+ New quote for {co.name}</button>
+                                        <div style={sectionTitle}>Or link an existing quote</div>
+                                        <input placeholder="Search quotes…" value={railSearch} onChange={e => setRailSearch(e.target.value)} style={{ ...inputStyle, marginBottom: '8px' }} />
+                                        <div>
+                                          {refurbQuotes.filter(q => String(q.companyId) !== String(co.id) && (!railSearch || (q.tradeCategory || '').toLowerCase().includes(railSearch.toLowerCase()) || (q.quoteRef || '').toLowerCase().includes(railSearch.toLowerCase()))).slice(0, 30).map(q => (
+                                            <div key={q.id} onClick={() => { setRefurbQuotes(prev => prev.map(x => x.id === q.id ? { ...x, companyId: co.id } : x)); setCompanyRailPanel(null); }} style={{ padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', marginBottom: '5px', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                                              <div style={{ minWidth: 0 }}>
+                                                <div style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a' }}>{q.tradeCategory || 'Quote'}{q.quoteRef ? ` · ${q.quoteRef}` : ''}</div>
+                                                <div style={{ fontSize: '10px', color: '#94a3b8' }}>{q.totalAmount ? `£${parseFloat(q.totalAmount).toLocaleString()}` : '—'} · {q.status || 'received'}</div>
+                                              </div>
+                                              <Link2 size={13} style={{ color: '#059669', flexShrink: 0 }} />
+                                            </div>
+                                          ))}
+                                        </div>
+                                      </>)}
+                                    </div>
+                                  </div>
+                                </>
+                              )}
+                            </>
+                          );
+                        })()}
                       </div>
                     )}
                   </div>
