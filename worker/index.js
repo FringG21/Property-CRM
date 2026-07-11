@@ -1,4 +1,5 @@
 import puppeteer from '@cloudflare/puppeteer';
+import { handleMarketIntelRoutes } from './marketIntel.js';
 
 // ============================================================
 // Property CRM — Cloudflare Worker
@@ -2417,6 +2418,15 @@ export default {
 };
 
 async function handleApiRoutes(request, env, url) {
+    // --------------------------------------------------------
+    // MARKET INTELLIGENCE — all /api/market/* routes live in
+    // worker/marketIntel.js behind a single session check.
+    // --------------------------------------------------------
+
+    if (url.pathname.startsWith('/api/market/')) {
+      return handleMarketIntelRoutes(request, env, url);
+    }
+
     // --------------------------------------------------------
     // AUCTION CONTROL CENTRE API ROUTES
     // --------------------------------------------------------
