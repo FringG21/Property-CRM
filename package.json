@@ -8,7 +8,8 @@
 		"build": "vite build",
 		"lint": "eslint .",
 		"preview": "npm run build && vite preview",
-		"deploy": "npm run build && wrangler deploy"
+		"deploy": "npm run build && wrangler deploy",
+		"test": "node --test worker/"
 	},
 	"dependencies": {
 		"@cloudflare/puppeteer": "^1.1.0",

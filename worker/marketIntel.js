@@ -154,6 +154,334 @@ export async function seedBranches(env) {
 }
 
 // ------------------------------------------------------------
+// Pass A page parsing — pure functions, fixture-tested via
+// worker/marketIntel.test.mjs against saved real pages.
+// ------------------------------------------------------------
+
+export function decodeEntities(s) {
+  return String(s || '')
+    .replace(/&#163;|&pound;/g, '£')
+    .replace(/&amp;/g, '&')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&nbsp;/g, ' ');
+}
+
+export function parseMoney(text) {
+  const m = decodeEntities(text).match(/£\s*([\d,]+)/);
+  if (!m) return null;
+  const n = parseInt(m[1].replace(/,/g, ''), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Guide formats seen live: '£15,000' | '£10,000 - £25,000' | '£80,000+'
+export function parseGuide(text) {
+  const t = decodeEntities(text);
+  const amounts = [...t.matchAll(/£\s*([\d,]+)/g)].map(m => parseInt(m[1].replace(/,/g, ''), 10));
+  if (!amounts.length) return { guideMin: null, guideMax: null };
+  if (amounts.length >= 2) return { guideMin: amounts[0], guideMax: amounts[1] };
+  // '£80,000+' has an open top end — max unknown, not equal to min
+  if (/\+/.test(t)) return { guideMin: amounts[0], guideMax: null };
+  return { guideMin: amounts[0], guideMax: amounts[0] };
+}
+
+// Contract: only statuses carrying a printed price count as confirmed sale
+// evidence (sold_for, sold_prior_for, sold_after_for). A bare 'Sold' /
+// 'Sold Prior' / 'Sold After' is real but unconfirmed. 'Last Bid: £X' is a
+// bid, never a sale — its amount goes in lastBidPrice, NOT soldPrice.
+export function normalizeResultStatus(text) {
+  const t = decodeEntities(text).trim().replace(/\s+/g, ' ');
+  const lower = t.toLowerCase();
+  const price = parseMoney(t);
+  const out = { status: 'unknown', soldPrice: null, priceConfirmed: 0, lastBidPrice: null, rawText: t };
+  if (/^sold prior/.test(lower)) {
+    out.status = price != null ? 'sold_prior_for' : 'sold_prior';
+  } else if (/^sold after/.test(lower)) {
+    out.status = price != null ? 'sold_after_for' : 'sold_after';
+  } else if (/^sold/.test(lower)) {
+    out.status = price != null ? 'sold_for' : 'sold';
+  } else if (/^last bid/.test(lower)) {
+    out.status = 'last_bid';
+    out.lastBidPrice = price;
+    return out;
+  } else if (/^no bids?/.test(lower)) {
+    out.status = 'no_bids';
+  } else if (/^withdrawn/.test(lower)) {
+    out.status = 'withdrawn';
+  } else if (/^postponed/.test(lower)) {
+    out.status = 'postponed';
+  } else if (/^unsold/.test(lower)) {
+    out.status = 'unsold';
+  } else if (/^available/.test(lower)) {
+    out.status = 'available';
+  }
+  if (price != null && ['sold_for', 'sold_prior_for', 'sold_after_for'].includes(out.status)) {
+    out.soldPrice = price;
+    out.priceConfirmed = 1;
+  }
+  return out;
+}
+
+const POSTCODE_RE = /\b([A-Z]{1,2}\d[A-Z\d]?)\s*(\d[A-Z]{2})\b/i;
+
+export function extractPostcodeParts(address) {
+  const m = String(address || '').match(POSTCODE_RE);
+  if (!m) return { postcode: null, outcode: null };
+  return { postcode: `${m[1].toUpperCase()} ${m[2].toUpperCase()}`, outcode: m[1].toUpperCase() };
+}
+
+// Town heuristic for 'street, town[, county], postcode' shaped addresses.
+// Outcode is the primary area key; town is display-level only.
+export function extractTown(address) {
+  const parts = String(address || '').split(',').map(p => p.trim()).filter(Boolean);
+  if (!parts.length) return null;
+  const withoutPc = POSTCODE_RE.test(parts[parts.length - 1]) ? parts.slice(0, -1) : parts;
+  if (!withoutPc.length) return null;
+  return withoutPc.length >= 3 ? withoutPc[withoutPc.length - 2] : withoutPc[withoutPc.length - 1];
+}
+
+// Pass A eligibility from address text alone — deliberately conservative:
+// only patterns that unambiguously identify a non-house. Everything else
+// stays eligible-pending until the Pass B lot page settles it.
+export function classifyLotPassA(address) {
+  const a = String(address || '').toLowerCase();
+  const reasons = [];
+  if (/^(apartment|flat|maisonette)\b/.test(a) || /\b(apartment|flat|maisonette)\s+\d/.test(a)) reasons.push('flat');
+  if (/^(land|plot)\b|\bland (at|adjacent|adjoining|to the (rear|side|front)|off)\b/.test(a)) reasons.push('land');
+  if (/\bgarage(s)?\b/.test(a) && !/\bwith garage\b/.test(a)) reasons.push('garage');
+  if (/\b(car park(ing)?|parking space)\b/.test(a)) reasons.push('parking');
+  if (/\b(public house|retail unit|commercial unit|office(s)? at|workshop)\b/.test(a)) reasons.push('commercial');
+  return { excluded: reasons.length ? 1 : 0, reasons, leaseholdFlag: 0 };
+}
+
+// '07/07/2026 13:06' -> '2026-07-07T13:06' (naive local time; string-sortable)
+export function parseAuctionEnd(text) {
+  const m = String(text || '').match(/(\d{2})\/(\d{2})\/(\d{4})(?:\s+(\d{2}):(\d{2}))?/);
+  if (!m) return { endAt: null, date: null };
+  const date = `${m[3]}-${m[2]}-${m[1]}`;
+  return { endAt: m[4] ? `${date}T${m[4]}:${m[5]}` : date, date };
+}
+
+// Parses one /{region}/auction/past-auctions page. Rows are
+// <tr class="fw-normal"> with cells: image+lot link | address | auctioneer |
+// auction ended | guide | result. Structure verified against saved fixtures.
+export function parsePastAuctionPage(html) {
+  const lots = [];
+  const rows = String(html).split('<tr class="fw-normal">').slice(1);
+  for (const row of rows) {
+    const cells = [...row.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(m =>
+      decodeEntities(m[1].replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim()
+    );
+    if (cells.length < 6) continue;
+    const urlMatch = row.match(/online\.auctionhouse\.co\.uk\/lot\/(?:redirect\/)?(\d+)/);
+    const address = cells[1];
+    const { endAt, date } = parseAuctionEnd(cells[3]);
+    const { guideMin, guideMax } = parseGuide(cells[4]);
+    const result = normalizeResultStatus(cells[5]);
+    const { postcode, outcode } = extractPostcodeParts(address);
+    lots.push({
+      platformLotId: urlMatch ? urlMatch[1] : null,
+      lotUrl: urlMatch ? `https://online.auctionhouse.co.uk/lot/${urlMatch[1]}` : null,
+      address,
+      postcode,
+      outcode,
+      town: extractTown(address),
+      auctioneer: cells[2] || null,
+      auctionEndAt: endAt,
+      auctionDate: date,
+      guideMin,
+      guideMax,
+      guideText: cells[4] || null,
+      ...result,
+    });
+  }
+  const pageNums = [...String(html).matchAll(/past-auctions\?page=(\d+)/g)].map(m => parseInt(m[1], 10));
+  return { lots, totalPages: pageNums.length ? Math.max(...pageNums) : 1 };
+}
+
+// ------------------------------------------------------------
+// Ingestion — idempotent upserts; observation history is append-only
+// ------------------------------------------------------------
+
+function lotRowId(branchId, lot) {
+  if (lot.platformLotId) return `mi-${branchId}-${lot.platformLotId}`;
+  // Fallback identity mirrors stableLotId's spirit: date + address slug
+  const slug = String(lot.address || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 60);
+  return `mi-${branchId}-${lot.auctionDate || 'nodate'}-${slug}`;
+}
+
+export async function ingestParsedPage(env, branch, parsed, sourceUrl) {
+  const now = nowIso();
+  const stmts = [];
+  const auctionIds = new Set();
+  let upserts = 0;
+  for (const lot of parsed.lots) {
+    if (!lot.address || !lot.auctionDate) continue;
+    const lotId = lotRowId(branch.id, lot);
+    const auctionId = `${branch.id}:${lot.auctionDate}`;
+    if (!auctionIds.has(auctionId)) {
+      auctionIds.add(auctionId);
+      stmts.push(env.CRM_DB.prepare(
+        `INSERT INTO mi_auctions (id, branch_id, auction_date, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`
+      ).bind(auctionId, branch.id, lot.auctionDate, now, now));
+    }
+    const cls = classifyLotPassA(lot.address);
+    const raw = JSON.stringify({
+      sourceUrl,
+      parserVersion: MI_PARSER_VERSION,
+      resultText: lot.rawText,
+      guideText: lot.guideText,
+      lastBidPrice: lot.lastBidPrice,
+      auctioneer: lot.auctioneer,
+    });
+    // Relists: the newer observation wins mi_lots (guarded on auction_end_at);
+    // every observation is preserved in mi_lot_results regardless.
+    stmts.push(env.CRM_DB.prepare(
+      `INSERT INTO mi_lots (id, platform_lot_id, branch_id, auction_id, address, postcode, outcode, town,
+         guide_min, guide_max, result_status, sold_price, price_confirmed,
+         excluded, exclusion_reasons, auction_end_at, first_seen_at, last_seen_at, raw)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         auction_id = excluded.auction_id,
+         guide_min = excluded.guide_min,
+         guide_max = excluded.guide_max,
+         result_status = excluded.result_status,
+         sold_price = excluded.sold_price,
+         price_confirmed = excluded.price_confirmed,
+         auction_end_at = excluded.auction_end_at,
+         last_seen_at = excluded.last_seen_at,
+         raw = excluded.raw
+       WHERE excluded.auction_end_at >= mi_lots.auction_end_at OR mi_lots.auction_end_at IS NULL`
+    ).bind(
+      lotId, lot.platformLotId, branch.id, auctionId, lot.address, lot.postcode, lot.outcode, lot.town,
+      lot.guideMin, lot.guideMax, lot.status, lot.soldPrice, lot.priceConfirmed,
+      cls.excluded, JSON.stringify(cls.reasons), lot.auctionEndAt, now, now, raw
+    ));
+    stmts.push(env.CRM_DB.prepare(
+      `INSERT INTO mi_lot_results (lot_id, auction_id, observed_at, result_status, sold_price, guide_min, guide_max, source_url)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(lot_id, auction_id, result_status) DO NOTHING`
+    ).bind(lotId, auctionId, now, lot.status, lot.soldPrice, lot.guideMin, lot.guideMax, sourceUrl));
+    upserts++;
+  }
+  if (stmts.length) await env.CRM_DB.batch(stmts);
+  return { upserts, auctions: auctionIds.size };
+}
+
+// ------------------------------------------------------------
+// Job runner — one job per tick, cursor checkpointed after every page
+// ------------------------------------------------------------
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function saveJob(env, job, fields) {
+  const merged = { ...job, ...fields, updated_at: nowIso() };
+  await env.CRM_DB.prepare(
+    `UPDATE mi_jobs SET status=?, cursor=?, attempts=?, next_run_at=?, last_error=?, stats=?, updated_at=? WHERE id=?`
+  ).bind(merged.status, merged.cursor, merged.attempts, merged.next_run_at, merged.last_error, merged.stats, merged.updated_at, job.id).run();
+  return merged;
+}
+
+async function runPassAIndexJob(env, job, opts) {
+  const branch = await env.CRM_DB.prepare('SELECT * FROM mi_branches WHERE id = ?').bind(job.target).first();
+  if (!branch) {
+    await saveJob(env, job, { status: 'error', last_error: `Unknown branch: ${job.target}` });
+    return { jobId: job.id, error: 'unknown branch' };
+  }
+  const cursor = JSON.parse(job.cursor || '{"nextPage":1}');
+  const stats = JSON.parse(job.stats || '{}');
+  const pageBudget = Math.min(opts.maxPages || MI_LIMITS.indexPagesPerTick, MI_LIMITS.indexPagesPerTick);
+  let fetched = 0;
+
+  while (fetched < pageBudget) {
+    const page = cursor.nextPage || 1;
+    if (cursor.maxPages && page > cursor.maxPages) break;
+    if (cursor.totalPages && page > cursor.totalPages) break;
+    const pageUrl = page > 1 ? `${branch.results_url}?page=${page}` : branch.results_url;
+    const res = await fetch(pageUrl, {
+      headers: { 'User-Agent': MI_UA },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status} on ${pageUrl}`);
+    const parsed = parsePastAuctionPage(await res.text());
+    fetched++;
+
+    if (!parsed.lots.length) {
+      // Zero lots on page 1 = parser/site-change tripwire; deeper pages just
+      // mean we ran off the end of pagination.
+      if (page === 1) {
+        stats.zeroParse = (stats.zeroParse || 0) + 1;
+        await saveJob(env, job, { status: 'error', last_error: `zero_parse on ${pageUrl}`, stats: JSON.stringify(stats) });
+        return { jobId: job.id, error: 'zero_parse', pageUrl };
+      }
+      cursor.totalPages = page - 1;
+      break;
+    }
+
+    const { upserts } = await ingestParsedPage(env, branch, parsed, pageUrl);
+    cursor.totalPages = parsed.totalPages;
+    cursor.nextPage = page + 1;
+    stats.pagesFetched = (stats.pagesFetched || 0) + 1;
+    stats.lotsUpserted = (stats.lotsUpserted || 0) + upserts;
+    await saveJob(env, { ...job, status: 'running' }, { status: 'running', cursor: JSON.stringify(cursor), stats: JSON.stringify(stats) });
+    if (parsed.totalPages !== branch.page_count_estimate) {
+      await env.CRM_DB.prepare('UPDATE mi_branches SET page_count_estimate = ?, updated_at = ? WHERE id = ?')
+        .bind(parsed.totalPages, nowIso(), branch.id).run();
+    }
+    const limitReached = cursor.maxPages ? cursor.nextPage > cursor.maxPages : false;
+    if (cursor.nextPage > cursor.totalPages || limitReached) break;
+    await sleep(MI_LIMITS.fetchSpacingMs);
+  }
+
+  const finished = (cursor.totalPages && (cursor.nextPage || 1) > cursor.totalPages)
+    || (cursor.maxPages && (cursor.nextPage || 1) > cursor.maxPages);
+  await saveJob(env, job, {
+    status: finished ? 'done' : 'queued',
+    cursor: JSON.stringify(cursor),
+    attempts: 0,
+    last_error: null,
+    stats: JSON.stringify(stats),
+  });
+  return { jobId: job.id, status: finished ? 'done' : 'queued', pagesFetched: fetched, cursor };
+}
+
+export async function runMarketIntelTick(env, opts = {}) {
+  const now = nowIso();
+  const job = await env.CRM_DB.prepare(
+    `SELECT * FROM mi_jobs WHERE status = 'queued' AND (next_run_at IS NULL OR next_run_at <= ?)
+     ORDER BY created_at LIMIT 1`
+  ).bind(now).first();
+  if (!job) return { idle: true };
+
+  // Optimistic lock — a concurrent manual tick + cron tick can both select
+  // the same job; only one wins this UPDATE.
+  const lock = await env.CRM_DB.prepare(
+    `UPDATE mi_jobs SET status = 'running', updated_at = ? WHERE id = ? AND status = 'queued'`
+  ).bind(now, job.id).run();
+  if (lock.meta.changes === 0) return { idle: true, reason: 'lost lock' };
+
+  try {
+    if (job.type === 'passA_index' || job.type === 'passA_refresh') {
+      return await runPassAIndexJob(env, job, opts);
+    }
+    await saveJob(env, job, { status: 'error', last_error: `Job type not implemented yet: ${job.type}` });
+    return { jobId: job.id, error: 'not implemented' };
+  } catch (err) {
+    const attempts = (job.attempts || 0) + 1;
+    const dead = attempts >= MI_LIMITS.maxAttempts;
+    const backoffMs = MI_LIMITS.backoffBaseMinutes * 60 * 1000 * Math.pow(2, attempts);
+    await saveJob(env, job, {
+      status: dead ? 'error' : 'queued',
+      attempts,
+      next_run_at: dead ? null : new Date(Date.now() + backoffMs).toISOString(),
+      last_error: String(err).slice(0, 500),
+    });
+    return { jobId: job.id, error: String(err), attempts, dead };
+  }
+}
+
+// ------------------------------------------------------------
 // Job queue CRUD (the cron tick that consumes these lands in Phase 1+)
 // ------------------------------------------------------------
 
@@ -238,6 +566,13 @@ export async function handleMarketIntelRoutes(request, env, url) {
   if (path === '/api/market/jobs/seed' && method === 'POST') {
     const body = await request.json().catch(() => ({}));
     return seedJobs(env, body);
+  }
+
+  if (path === '/api/market/jobs/tick' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const maxPages = Number.isInteger(body?.maxPages) ? body.maxPages : undefined;
+    const result = await runMarketIntelTick(env, { maxPages });
+    return json({ success: true, ...result });
   }
 
   const jobAction = path.match(/^\/api\/market\/jobs\/([^/]+)\/(pause|resume)$/);
