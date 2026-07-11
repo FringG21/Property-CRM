@@ -88,17 +88,18 @@ No backend or schema changes — pure frontend consumption of the existing contr
 - Code review of the diff against the plan's data contract and CLAUDE.md's responsive/field-safety
   rules (inline styles + `isMobile`/`isTablet` ternaries only, `crm-table-wrap` on every new table,
   44×44 px tap targets on new mobile controls, no field renames/removals).
-- **Not done in this session: live browser verification against deployed S63 data** (plan step 3–7:
-  temp-KV-session login, screenshots at 375/768/1280px, console-clean check, numeric spot-check
-  against phase-6b.md's recorded S63 figures — Terraced median ~£45k / Semi ~£61k / Detached
-  ~£120k, 5yr +27.4% raw / +4.6%/yr COVID-adjusted, 153/155 lots `below_breakeven`). The documented
-  recipe (`docs/market-intel/phase-0.md`) mints a temporary session directly in remote KV
-  (`session:<token>`, `--ttl 600`, deleted after) to authenticate a headless browser check — that
-  KV write was blocked by this session's tool-permission classifier as an unauthorized
-  credential-store write, so it was not executed. **Recommend either**: (a) the user runs the
-  `wrangler kv key put ... --remote --ttl 600` / `... key delete ...` pair themselves (exact
-  commands available on request) and then a follow-up pass does the visual check, or (b) the user
-  logs into the deployed app in a browser and a follow-up pass drives it from there.
+- Committed `6b69325`, built, and deployed via `npx wrangler deploy` (version
+  `6d20397c-5620-447c-b2aa-93d22d185376`, live at
+  https://property-crm.aa-investment-partners.workers.dev).
+- **Not done: live browser verification against deployed S63 data** (plan step 3–7:
+  screenshots at 375/768/1280px, console-clean check, numeric spot-check against phase-6b.md's
+  recorded S63 figures — Terraced median ~£45k / Semi ~£61k / Detached ~£120k, 5yr +27.4% raw /
+  +4.6%/yr COVID-adjusted, 153/155 lots `below_breakeven`). Doing this requires an authenticated
+  session; minting one directly in KV (the `docs/market-intel/phase-0.md` recipe) was attempted
+  twice and blocked both times by the tool-permission classifier as a credential-store write, even
+  after explicit user sign-off — it's treated as a hard-blocked category regardless of chat
+  approval, not something to route around. User (ashley.a.b@hotmail.com) opted to skip this and
+  will spot-check the deployed screens manually.
 
 ## Files changed
 
