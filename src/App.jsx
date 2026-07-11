@@ -11,6 +11,7 @@ import {
   Bell, Download, MessageSquare, ListChecks, Activity, AlertTriangle, MoreHorizontal, Layers, RefreshCw,
   Bold, Italic, Underline, List, ListOrdered
 } from 'lucide-react';
+import MarketIntel from './views/MarketIntel.jsx';
 
 // Fix Leaflet default marker icons
 delete L.Icon.Default.prototype._getIconUrl;
@@ -502,7 +503,8 @@ export default function App({ user = {}, onLogout }) {
     { key: 'pipeline', label: 'Auction Pipeline' },
     { key: 'scraper', label: 'Auction Triage' },
     { key: 'surveyors', label: 'Surveyor Intel' },
-    { key: 'auctionintel', label: 'Auction Intel' },
+    { key: 'auctionintel', label: 'Bidding Intel' },
+    { key: 'marketintel', label: 'Market Intel' },
     { key: 'dealanalysis', label: 'Deal Analysis' },
     { key: 'portfolio', label: 'Portfolio' },
     { key: 'companies', label: 'Companies Directory' },
@@ -3282,7 +3284,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 {can('pipeline') && <button onClick={() => go('pipeline')} {...navTipProps('Auction Pipeline')} style={navBtnStyle('pipeline')}><MapPin size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Auction Pipeline</span>}</button>}
                 {can('scraper') && <button onClick={() => go('scraper')} {...navTipProps('Auction Triage')} style={navBtnStyle('scraper')}><Calendar size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Auction Triage {unreviewedScrapedCount > 0 && <span style={{ marginLeft: '4px', background: '#f87171', color: '#fff', borderRadius: '8px', fontSize: '10px', padding: '1px 5px' }}>{unreviewedScrapedCount}</span>}</span>}</button>}
                 {can('surveyors') && <button onClick={() => go('surveyors')} {...navTipProps('Surveyor Intel')} style={navBtnStyle('surveyors')}><ClipboardList size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Surveyor Intel</span>}</button>}
-                {can('auctionintel') && <button onClick={() => go('auctionintel')} {...navTipProps('Auction Intel')} style={navBtnStyle('auctionintel')}><TrendingUp size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Auction Intel</span>}</button>}
+                {can('auctionintel') && <button onClick={() => go('auctionintel')} {...navTipProps('Bidding Intel')} style={navBtnStyle('auctionintel')}><TrendingUp size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Bidding Intel</span>}</button>}
+                {can('marketintel') && <button onClick={() => go('marketintel')} {...navTipProps('Market Intel')} style={navBtnStyle('marketintel')}><Globe size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Market Intel</span>}</button>}
                 {can('dealanalysis') && <button onClick={() => go('dealanalysis')} {...navTipProps('Deal Analysis')} style={navBtnStyle('dealanalysis', '#7C3AED')}><BarChart2 size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Deal Analysis</span>}</button>}
                 {can('portfolio') && <button onClick={() => go('portfolio')} {...navTipProps('Portfolio')} style={navBtnStyle('portfolio', '#059669')}><DollarSign size={18} style={{ flexShrink: 0 }} />{(!sidebarCollapsed || isMobile) && <span>Portfolio</span>}</button>}
                 <div style={{ margin: '8px 0 0', borderTop: '1px solid #1e293b', paddingTop: '8px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
@@ -5873,7 +5876,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 {activeTab === 'pipeline' && '🏠 Live Property Tracker Pipeline'}
                 {activeTab === 'scraper' && '🔎 Auction Triage — scraped lots & manual watchlist'}
                 {activeTab === 'surveyors' && '📋 Surveyor Intelligence Hub'}
-                {activeTab === 'auctionintel' && '📈 Auction Intelligence'}
+                {activeTab === 'auctionintel' && '📈 Bidding Intelligence'}
+                {activeTab === 'marketintel' && '🌍 Market Intelligence — Auction Area Rankings'}
                 {activeTab === 'companies' && '🏢 Linked Corporate Accounts Engine'}
                 {activeTab === 'contacts' && '👥 Sourcing Contacts Profile Roster'}
                 {activeTab === 'dealanalysis' && '📊 Deal Analysis & Scenario Matrix'}
@@ -7197,6 +7201,9 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                   </div>
                 </div>
               )}
+
+              {/* ==================== TAB: MARKET INTEL ==================== */}
+              {activeTab === 'marketintel' && <MarketIntel isMobile={isMobile} />}
 
               {/* ==================== TAB: AUCTION INTEL (Option A) ==================== */}
               {activeTab === 'auctionintel' && (() => {

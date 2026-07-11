@@ -887,6 +887,59 @@ export async function handleMarketIntelRoutes(request, env, url) {
     return json({ success: true, ...(await runAggregation(env)) });
   }
 
+  if (path === '/api/market/overview' && method === 'GET') {
+    const [totals, areas, jobs, branches, lastAgg] = await Promise.all([
+      env.CRM_DB.prepare(
+        `SELECT COUNT(*) lots,
+           SUM(price_confirmed) confirmed,
+           SUM(CASE WHEN price_confirmed = 1 AND sold_price <= 100000 THEN 1 ELSE 0 END) sub100k,
+           SUM(CASE WHEN result_status = 'unknown' THEN 1 ELSE 0 END) unknown_status,
+           COUNT(DISTINCT outcode) outcodes,
+           MIN(auction_end_at) earliest, MAX(auction_end_at) latest
+         FROM mi_lots`
+      ).first(),
+      env.CRM_DB.prepare(`SELECT COUNT(*) n FROM mi_area_scores WHERE model_id = (SELECT id FROM mi_scoring_models WHERE is_default = 1 LIMIT 1)`).first(),
+      env.CRM_DB.prepare(`SELECT status, COUNT(*) n FROM mi_jobs GROUP BY status`).all(),
+      env.CRM_DB.prepare(`SELECT COUNT(*) n FROM mi_branches WHERE active = 1`).first(),
+      env.CRM_DB.prepare(`SELECT MAX(computed_at) t FROM mi_area_metrics`).first(),
+    ]);
+    return json({
+      success: true,
+      totals,
+      areasScored: areas.n,
+      branches: branches.n,
+      jobs: Object.fromEntries(jobs.results.map(r => [r.status, r.n])),
+      lastAggregatedAt: lastAgg.t,
+    });
+  }
+
+  if (path === '/api/market/lots' && method === 'GET') {
+    const p = url.searchParams;
+    const where = ['1=1'];
+    const binds = [];
+    const add = (clause, value) => { binds.push(value); where.push(clause.replace('?', `?${binds.length}`)); };
+    if (p.get('branch')) add('branch_id = ?', p.get('branch'));
+    if (p.get('outcode')) add('outcode LIKE ?', p.get('outcode').toUpperCase() + '%');
+    if (p.get('status')) add('result_status = ?', p.get('status'));
+    if (p.get('confirmedOnly') === '1') where.push('price_confirmed = 1');
+    if (p.get('excluded') === '0') where.push('excluded = 0');
+    if (p.get('maxPrice')) add('sold_price <= ?', parseInt(p.get('maxPrice'), 10) || 100000);
+    if (p.get('q')) add('address LIKE ?', '%' + p.get('q') + '%');
+    const sort = p.get('sort') === 'price' ? 'sold_price DESC' : 'auction_end_at DESC';
+    const limit = Math.min(parseInt(p.get('limit') || '50', 10), 1000);
+    const offset = Math.max(parseInt(p.get('offset') || '0', 10), 0);
+    const whereSql = where.join(' AND ');
+    const [rows, count] = await Promise.all([
+      env.CRM_DB.prepare(
+        `SELECT id, platform_lot_id, branch_id, address, postcode, outcode, town, guide_min, guide_max,
+                result_status, sold_price, price_confirmed, excluded, exclusion_reasons, auction_end_at
+         FROM mi_lots WHERE ${whereSql} ORDER BY ${sort} LIMIT ${limit} OFFSET ${offset}`
+      ).bind(...binds).all(),
+      env.CRM_DB.prepare(`SELECT COUNT(*) n FROM mi_lots WHERE ${whereSql}`).bind(...binds).first(),
+    ]);
+    return json({ success: true, total: count.n, limit, offset, lots: rows.results });
+  }
+
   if (path === '/api/market/areas' && method === 'GET') {
     const type = url.searchParams.get('type') || 'outcode';
     if (!['outcode', 'town', 'branch'].includes(type)) {
