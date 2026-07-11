@@ -296,7 +296,10 @@ export function parsePastAuctionPage(html) {
     });
   }
   const pageNums = [...String(html).matchAll(/past-auctions\?page=(\d+)/g)].map(m => parseInt(m[1], 10));
-  return { lots, totalPages: pageNums.length ? Math.max(...pageNums) : 1 };
+  // hasResultsShell distinguishes a legitimately-empty branch (page renders,
+  // heading present, zero rows) from a redesign/outage (shell missing).
+  const hasResultsShell = /Past online auction results/i.test(html);
+  return { lots, totalPages: pageNums.length ? Math.max(...pageNums) : 1, hasResultsShell };
 }
 
 // ------------------------------------------------------------
@@ -408,14 +411,22 @@ async function runPassAIndexJob(env, job, opts) {
     fetched++;
 
     if (!parsed.lots.length) {
-      // Zero lots on page 1 = parser/site-change tripwire; deeper pages just
-      // mean we ran off the end of pagination.
+      // Page-1 zero lots is only a parser/site-change tripwire when the
+      // branch has previously yielded lots (a regression). Branches with no
+      // online results render no table at all (hertfordshireandwestessex,
+      // northwales as of 2026-07) — those finish cleanly as empty. Deeper
+      // pages just mean we ran off the end of pagination.
       if (page === 1) {
-        stats.zeroParse = (stats.zeroParse || 0) + 1;
-        await saveJob(env, job, { status: 'error', last_error: `zero_parse on ${pageUrl}`, stats: JSON.stringify(stats) });
-        return { jobId: job.id, error: 'zero_parse', pageUrl };
+        const existing = await env.CRM_DB.prepare(
+          'SELECT COUNT(*) n FROM mi_lots WHERE branch_id = ?'
+        ).bind(branch.id).first();
+        if (existing.n > 0) {
+          stats.zeroParse = (stats.zeroParse || 0) + 1;
+          await saveJob(env, job, { status: 'error', last_error: `zero_parse on ${pageUrl}`, stats: JSON.stringify(stats) });
+          return { jobId: job.id, error: 'zero_parse', pageUrl };
+        }
       }
-      cursor.totalPages = page - 1;
+      cursor.totalPages = page === 1 ? 0 : page - 1;
       break;
     }
 
@@ -434,7 +445,7 @@ async function runPassAIndexJob(env, job, opts) {
     await sleep(MI_LIMITS.fetchSpacingMs);
   }
 
-  const finished = (cursor.totalPages && (cursor.nextPage || 1) > cursor.totalPages)
+  const finished = (cursor.totalPages != null && (cursor.nextPage || 1) > cursor.totalPages)
     || (cursor.maxPages && (cursor.nextPage || 1) > cursor.maxPages);
   await saveJob(env, job, {
     status: finished ? 'done' : 'queued',
@@ -534,6 +545,91 @@ async function setJobStatus(env, jobId, from, to) {
 }
 
 // ------------------------------------------------------------
+// Storage projection (Phase 2 go/no-go gate before national backfill)
+// ------------------------------------------------------------
+
+// Fetches page 1 of every active branch to record real pagination depth —
+// no ingestion, just page_count_estimate. ~23 fetches at 1.1s spacing.
+async function probeBranches(env) {
+  const { results: branches } = await env.CRM_DB.prepare(
+    'SELECT * FROM mi_branches WHERE active = 1 ORDER BY id'
+  ).all();
+  const probed = [];
+  for (const b of branches) {
+    try {
+      const res = await fetch(b.results_url, { headers: { 'User-Agent': MI_UA }, signal: AbortSignal.timeout(20000) });
+      if (!res.ok) {
+        probed.push({ id: b.id, error: `HTTP ${res.status}` });
+      } else {
+        const parsed = parsePastAuctionPage(await res.text());
+        await env.CRM_DB.prepare('UPDATE mi_branches SET page_count_estimate = ?, updated_at = ? WHERE id = ?')
+          .bind(parsed.totalPages, nowIso(), b.id).run();
+        probed.push({ id: b.id, pages: parsed.totalPages, lotsOnPage1: parsed.lots.length });
+      }
+    } catch (err) {
+      probed.push({ id: b.id, error: String(err).slice(0, 120) });
+    }
+    await sleep(MI_LIMITS.fetchSpacingMs);
+  }
+  return probed;
+}
+
+async function storageEstimate(env) {
+  const lotSample = await env.CRM_DB.prepare(
+    `SELECT COUNT(*) n, AVG(
+       LENGTH(id) + LENGTH(COALESCE(platform_lot_id,'')) + LENGTH(branch_id) +
+       LENGTH(COALESCE(auction_id,'')) + LENGTH(COALESCE(address,'')) +
+       LENGTH(COALESCE(postcode,'')) + LENGTH(COALESCE(outcode,'')) +
+       LENGTH(COALESCE(town,'')) + LENGTH(result_status) +
+       LENGTH(COALESCE(exclusion_reasons,'')) + LENGTH(COALESCE(auction_end_at,'')) +
+       LENGTH(COALESCE(first_seen_at,'')) + LENGTH(COALESCE(last_seen_at,'')) +
+       LENGTH(raw) + 80
+     ) avg_bytes FROM mi_lots`
+  ).first();
+  const resSample = await env.CRM_DB.prepare(
+    `SELECT COUNT(*) n, AVG(
+       LENGTH(lot_id) + LENGTH(auction_id) + LENGTH(observed_at) +
+       LENGTH(result_status) + LENGTH(COALESCE(source_url,'')) + 60
+     ) avg_bytes FROM mi_lot_results`
+  ).first();
+  const { results: branches } = await env.CRM_DB.prepare(
+    'SELECT id, page_count_estimate FROM mi_branches WHERE active = 1'
+  ).all();
+
+  const LOTS_PER_PAGE = 30;
+  const knownPages = branches.filter(b => b.page_count_estimate != null);
+  const totalKnownPages = knownPages.reduce((s, b) => s + b.page_count_estimate, 0);
+  const projectedLots = totalKnownPages * LOTS_PER_PAGE;
+  const INDEX_FACTOR = 1.35;      // measured-vs-raw D1 overhead allowance
+  const RELIST_FACTOR = 1.2;      // history rows exceed lots when lots reappear
+  const avgLot = lotSample.avg_bytes || 900;
+  const avgRes = resSample.avg_bytes || 200;
+  const projectedBytes = Math.round((projectedLots * avgLot + projectedLots * RELIST_FACTOR * avgRes) * INDEX_FACTOR);
+
+  const dbSize = await env.CRM_DB.prepare('SELECT page_count * page_size AS bytes FROM pragma_page_count(), pragma_page_size()').first().catch(() => null);
+
+  return {
+    sample: {
+      lots: lotSample.n,
+      avgLotBytes: Math.round(avgLot),
+      historyRows: resSample.n,
+      avgHistoryBytes: Math.round(avgRes),
+    },
+    branchesProbed: knownPages.length,
+    branchesUnprobed: branches.length - knownPages.length,
+    pagesByBranch: Object.fromEntries(knownPages.map(b => [b.id, b.page_count_estimate])),
+    projection: {
+      totalPages: totalKnownPages,
+      lots: projectedLots,
+      bytes: projectedBytes,
+      mb: +(projectedBytes / 1048576).toFixed(1),
+      pctOfFreeDbLimit: +((projectedBytes / (500 * 1048576)) * 100).toFixed(2),
+    },
+    currentDbBytes: dbSize ? dbSize.bytes : null,
+  };
+}
+
+// ------------------------------------------------------------
 // Route handler — single session-checked entry for all /api/market/*
 // ------------------------------------------------------------
 
@@ -554,6 +650,15 @@ export async function handleMarketIntelRoutes(request, env, url) {
   if (path === '/api/market/branches/seed' && method === 'POST') {
     const result = await seedBranches(env);
     return json({ success: true, ...result });
+  }
+
+  if (path === '/api/market/branches/probe' && method === 'POST') {
+    const probed = await probeBranches(env);
+    return json({ success: true, probed });
+  }
+
+  if (path === '/api/market/storage-estimate' && method === 'GET') {
+    return json({ success: true, ...(await storageEstimate(env)) });
   }
 
   if (path === '/api/market/jobs' && method === 'GET') {

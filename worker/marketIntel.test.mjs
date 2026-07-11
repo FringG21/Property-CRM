@@ -165,9 +165,19 @@ test('manchester fixture: different branch, Postponed status, shallow pagination
 });
 
 test('empty/garbage HTML parses to zero lots (zero-parse tripwire input)', () => {
-  const { lots, totalPages } = parsePastAuctionPage('<html><body>maintenance</body></html>');
+  const { lots, totalPages, hasResultsShell } = parsePastAuctionPage('<html><body>maintenance</body></html>');
   assert.equal(lots.length, 0);
   assert.equal(totalPages, 1);
+  assert.equal(hasResultsShell, false);
+});
+
+test('results shell detected on real pages — distinguishes empty branch from breakage', () => {
+  assert.equal(parsePastAuctionPage(fixture('sy-page1.html')).hasResultsShell, true);
+  assert.equal(parsePastAuctionPage(fixture('manchester-page1.html')).hasResultsShell, true);
+  const emptyBranch = '<html><body><h3>Past online auction results for <span>Auction House North Wales</span></h3><table class="table"></table></body></html>';
+  const parsed = parsePastAuctionPage(emptyBranch);
+  assert.equal(parsed.lots.length, 0);
+  assert.equal(parsed.hasResultsShell, true);
 });
 
 // --- branch discovery ------------------------------------------------------
