@@ -1,5 +1,5 @@
 import puppeteer from '@cloudflare/puppeteer';
-import { handleMarketIntelRoutes } from './marketIntel.js';
+import { handleMarketIntelRoutes, runMarketIntelTick } from './marketIntel.js';
 
 // ============================================================
 // Property CRM — Cloudflare Worker
@@ -2383,6 +2383,17 @@ export default {
     // on their twice-weekly schedule to avoid running them every hour.
     if (event.cron === '0 * * * *') {
       ctx.waitUntil(dispatchTaskReminders(env).catch(err => console.error('Task reminders failed:', err)));
+      return;
+    }
+    if (event.cron === '7-57/10 * * * *') {
+      // Market Intel scrape tick. Courtesy skip around the Wed/Sat 22:00
+      // heavy scrape slot so the two never compete for account quotas.
+      const d = new Date(event.scheduledTime);
+      const nearHeavySlot = (d.getUTCDay() === 3 || d.getUTCDay() === 6)
+        && ((d.getUTCHours() === 21 && d.getUTCMinutes() >= 55) || (d.getUTCHours() === 22 && d.getUTCMinutes() <= 30));
+      if (!nearHeavySlot) {
+        ctx.waitUntil(runMarketIntelTick(env).catch(err => console.error('Market intel tick failed:', err)));
+      }
       return;
     }
     ctx.waitUntil(Promise.all([
