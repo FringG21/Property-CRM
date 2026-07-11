@@ -303,6 +303,110 @@ export function parsePastAuctionPage(html) {
 }
 
 // ------------------------------------------------------------
+// Pass B — lot detail page parse + eligibility refinement
+// ------------------------------------------------------------
+
+// Strips a lot detail page to newline-delimited text. Scripts/styles are
+// removed first so the bidding-widget noise can never leak into extraction.
+// Self-contained (mirrors index.js stripHtml) to keep the circular-import-free
+// boundary this module deliberately maintains.
+export function stripLotHtml(html) {
+  return decodeEntities(
+    String(html || '')
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<[^>]+>/g, '\n')
+  ).replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim();
+}
+
+// Ordered so multi-word types win over their bare stems (semi-detached before
+// detached, end/mid terrace before terrace). 'flat' is last and guarded below
+// against 'flat roof' / 'flat pack'.
+const MI_TYPE_TOKEN_RE = /\b(end[- ]?terraced?|mid[- ]?terraced?|through[- ]?terraced?|semi[- ]?detached|detached|terraced?|town\s?house|cottage|bungalow|mews|apartment|maisonette|flat)\b/gi;
+const MI_FLAT_TYPES = /^(apartment|maisonette|flat)$/;
+
+// Parses an online.auctionhouse.co.uk lot detail page. Everything is best-effort
+// off the description text; absent fields return null and are NEVER guessed.
+// Each derived value carries an evidence snippet for provenance. method='text'.
+export function parseLotDetail(html) {
+  const text = stripLotHtml(html);
+  const evidence = {};
+
+  // Bedrooms: the '<n> Bedroom(s)' summary chip is the reliable signal; fall
+  // back to counting 'Bedroom 1/2/3' enumerations in the accommodation list.
+  let bedrooms = null;
+  // Same-line only ([ \t]*, never \s*): the summary chip is '<n> Bedroom(s)' on
+  // one line. Allowing \n would let a room dimension ('... x 3.10') bleed into
+  // the following 'Bedroom 1 -' enumeration line and read '10 Bedrooms'.
+  let m = text.match(/(\d+)[ \t]*Bedrooms?\b/i);
+  if (m) { bedrooms = parseInt(m[1], 10); evidence.bedrooms = m[0].trim(); }
+  else {
+    const nums = [...text.matchAll(/\bBedroom\s*(\d+)\b/gi)].map(x => parseInt(x[1], 10));
+    if (nums.length) { bedrooms = nums.length; evidence.bedrooms = `enumerated x${nums.length}`; }
+  }
+  if (bedrooms != null && (!Number.isFinite(bedrooms) || bedrooms < 1 || bedrooms > 15)) { bedrooms = null; delete evidence.bedrooms; }
+
+  // Property type: first type keyword in the description, guarding 'flat roof'.
+  let propertyType = null, isFlat = false;
+  for (const mm of text.matchAll(MI_TYPE_TOKEN_RE)) {
+    const val = mm[0].toLowerCase().replace(/\s+/g, ' ');
+    if (val === 'flat') {
+      const after = text.slice(mm.index + mm[0].length, mm.index + mm[0].length + 8).toLowerCase();
+      if (/^[- ]?(roof|pack|screen)/.test(after)) continue;
+    }
+    propertyType = val;
+    isFlat = MI_FLAT_TYPES.test(val);
+    evidence.propertyType = mm[0];
+    break;
+  }
+
+  // Tenure.
+  let tenure = null;
+  if (/\bleasehold\b/i.test(text)) { tenure = 'leasehold'; evidence.tenure = 'leasehold'; }
+  else if (/\bfreehold\b/i.test(text)) { tenure = 'freehold'; evidence.tenure = 'freehold'; }
+
+  // Page-stated EPC (A-G) and council tax band (A-H). Sourced 'listing' — the
+  // authoritative EPC register match is Phase 6b, not this.
+  let epcRating = null;
+  m = text.match(/EPC(?:\s*Rating)?[:\s]+([A-G])\b/i);
+  if (m) { epcRating = m[1].toUpperCase(); evidence.epcRating = m[0].trim(); }
+  let councilTaxBand = null;
+  m = text.match(/Council Tax(?:\s*Band)?[:\s]+([A-H])\b/i);
+  if (m) { councilTaxBand = m[1].toUpperCase(); evidence.councilTaxBand = m[0].trim(); }
+
+  // Condition / occupancy exclusion signals — deliberately tight patterns to
+  // stay clear of legal boilerplate ('if sold subject to a tenancy...'). The
+  // policy decision (whether to exclude) lives in classifyLotPassB.
+  const signals = {
+    tenanted: /\b(?:tenant in situ|tenant in place|sold with (?:a |the )?(?:sitting )?tenant|currently (?:let|tenanted)|subject to an? (?:existing|assured shorthold) tenanc)/i.test(text),
+    fireDamaged: /\bfire[- ]?damaged?\b|damaged by (?:a )?fire\b|following a (?:recent )?fire\b/i.test(text),
+    nonStandard: /\bnon[- ]?standard construction\b|\bconcrete construction\b|\bairey\b|\bno[- ]?fines\b/i.test(text),
+    noAccess: /\bno internal access\b|internal (?:access|inspection) (?:is )?(?:not available|unavailable)/i.test(text),
+  };
+  for (const [k, v] of Object.entries(signals)) if (v) (evidence.signals ||= []).push(k);
+
+  return { propertyType, isFlat, bedrooms, tenure, leaseholdFlag: tenure === 'leasehold' ? 1 : 0, epcRating, councilTaxBand, signals, evidence };
+}
+
+// Refines Pass A eligibility with detail-page facts. Conservative by design:
+// only adds exclusions on positive evidence; unknown attributes never exclude
+// (they cost confidence at scoring, per the brief). Leasehold *houses* are
+// flagged, not excluded — only a leasehold flat is excluded (via its type).
+export function classifyLotPassB(passA, detail) {
+  const reasons = new Set(Array.isArray(passA?.reasons) ? passA.reasons : []);
+  let leaseholdFlag = passA?.leaseholdFlag ? 1 : 0;
+  if (detail?.isFlat) reasons.add('flat');
+  if (detail?.leaseholdFlag) leaseholdFlag = 1;
+  if (Number.isInteger(detail?.bedrooms) && detail.bedrooms < 2) reasons.add('under_2_beds');
+  const s = detail?.signals || {};
+  if (s.tenanted) reasons.add('tenanted');
+  if (s.fireDamaged) reasons.add('fire_damaged');
+  if (s.nonStandard) reasons.add('non_standard_construction');
+  if (s.noAccess) reasons.add('no_internal_access');
+  return { excluded: reasons.size ? 1 : 0, reasons: [...reasons], leaseholdFlag };
+}
+
+// ------------------------------------------------------------
 // Ingestion — idempotent upserts; observation history is append-only
 // ------------------------------------------------------------
 
@@ -457,6 +561,89 @@ async function runPassAIndexJob(env, job, opts) {
   return { jobId: job.id, status: finished ? 'done' : 'queued', pagesFetched: fetched, cursor };
 }
 
+// Pass B lot-detail enrichment. Targets one outcode; each tick fetches the next
+// batch of not-yet-enriched, not-already-excluded lots, fills type/beds/tenure
+// and refines exclusions. Every processed lot gets enrichment_level=1 (even on
+// fetch failure) so the job always terminates; re-running only picks up level-0
+// lots, so it is idempotent and resumable.
+async function runPassBLotsJob(env, job, opts) {
+  const outcode = String(job.target || '').toUpperCase().trim();
+  if (!outcode) {
+    await saveJob(env, job, { status: 'error', last_error: 'passB_lots job has no outcode target' });
+    return { jobId: job.id, error: 'no target' };
+  }
+  const stats = JSON.parse(job.stats || '{}');
+  const budget = Math.min(opts.maxDetail || MI_LIMITS.detailFetchesPerTick, MI_LIMITS.detailFetchesPerTick);
+
+  const { results: lots } = await env.CRM_DB.prepare(
+    `SELECT id, platform_lot_id, excluded, exclusion_reasons, leasehold_flag, raw
+     FROM mi_lots WHERE outcode = ? AND excluded = 0 AND enrichment_level = 0
+     ORDER BY id LIMIT ?`
+  ).bind(outcode, budget).all();
+
+  if (!lots.length) {
+    await saveJob(env, job, { status: 'done', attempts: 0, last_error: null, stats: JSON.stringify(stats) });
+    return { jobId: job.id, status: 'done', outcode, processed: 0 };
+  }
+
+  let processed = 0;
+  for (const lot of lots) {
+    const now = nowIso();
+    let up = { propertyType: null, bedrooms: null, tenure: null, leaseholdFlag: lot.leasehold_flag || 0, epcRating: null, excluded: 0, reasons: JSON.parse(lot.exclusion_reasons || '[]'), passB: {} };
+    try {
+      if (!lot.platform_lot_id) {
+        up.passB = { enrichError: 'no_lot_id', fetchedAt: now, parserVersion: MI_PARSER_VERSION };
+        stats.noId = (stats.noId || 0) + 1;
+      } else {
+        const detailUrl = `https://online.auctionhouse.co.uk/lot/redirect/${lot.platform_lot_id}`;
+        const res = await fetch(detailUrl, { headers: { 'User-Agent': MI_UA, Accept: 'text/html' }, signal: AbortSignal.timeout(20000) });
+        if (!res.ok) {
+          up.passB = { enrichError: `http_${res.status}`, detailUrl, fetchedAt: now, parserVersion: MI_PARSER_VERSION };
+          stats[`http_${res.status}`] = (stats[`http_${res.status}`] || 0) + 1;
+        } else {
+          const detail = parseLotDetail(await res.text());
+          const passA = { excluded: lot.excluded, reasons: JSON.parse(lot.exclusion_reasons || '[]'), leaseholdFlag: lot.leasehold_flag || 0 };
+          const cls = classifyLotPassB(passA, detail);
+          up = {
+            propertyType: detail.propertyType, bedrooms: detail.bedrooms, tenure: detail.tenure,
+            leaseholdFlag: cls.leaseholdFlag, epcRating: detail.epcRating, excluded: cls.excluded, reasons: cls.reasons,
+            passB: { detailUrl, finalUrl: res.url || detailUrl, fetchedAt: now, method: 'text', parserVersion: MI_PARSER_VERSION, evidence: detail.evidence, councilTaxBand: detail.councilTaxBand },
+          };
+          stats.enriched = (stats.enriched || 0) + 1;
+          if (cls.excluded && !lot.excluded) {
+            stats.excludedNew = (stats.excludedNew || 0) + 1;
+            for (const r of cls.reasons) stats.byReason = { ...stats.byReason, [r]: (stats.byReason?.[r] || 0) + 1 };
+          }
+        }
+      }
+    } catch (err) {
+      up.passB = { enrichError: String(err).slice(0, 120), fetchedAt: now, parserVersion: MI_PARSER_VERSION };
+      stats.errors = (stats.errors || 0) + 1;
+    }
+
+    let raw;
+    try { raw = JSON.parse(lot.raw || '{}'); } catch { raw = {}; }
+    raw.passB = up.passB;
+    // COALESCE keeps existing card data when the detail page yielded nothing.
+    await env.CRM_DB.prepare(
+      `UPDATE mi_lots SET property_type = COALESCE(?, property_type), bedrooms = COALESCE(?, bedrooms),
+         tenure = COALESCE(?, tenure), leasehold_flag = ?, epc_rating = COALESCE(?, epc_rating),
+         excluded = ?, exclusion_reasons = ?, enrichment_level = 1, last_seen_at = ?, raw = ?
+       WHERE id = ?`
+    ).bind(up.propertyType, up.bedrooms, up.tenure, up.leaseholdFlag, up.epcRating, up.excluded, JSON.stringify(up.reasons), now, JSON.stringify(raw), lot.id).run();
+    processed++;
+    stats.processed = (stats.processed || 0) + 1;
+    if (processed < lots.length) await sleep(MI_LIMITS.fetchSpacingMs);
+  }
+
+  const remaining = await env.CRM_DB.prepare(
+    'SELECT COUNT(*) n FROM mi_lots WHERE outcode = ? AND excluded = 0 AND enrichment_level = 0'
+  ).bind(outcode).first();
+  const done = remaining.n === 0;
+  await saveJob(env, job, { status: done ? 'done' : 'queued', attempts: 0, last_error: null, stats: JSON.stringify(stats) });
+  return { jobId: job.id, status: done ? 'done' : 'queued', outcode, processed, remaining: remaining.n };
+}
+
 export async function runMarketIntelTick(env, opts = {}) {
   const now = nowIso();
   const job = await env.CRM_DB.prepare(
@@ -475,6 +662,9 @@ export async function runMarketIntelTick(env, opts = {}) {
   try {
     if (job.type === 'passA_index' || job.type === 'passA_refresh') {
       return await runPassAIndexJob(env, job, opts);
+    }
+    if (job.type === 'passB_lots') {
+      return await runPassBLotsJob(env, job, opts);
     }
     await saveJob(env, job, { status: 'error', last_error: `Job type not implemented yet: ${job.type}` });
     return { jobId: job.id, error: 'not implemented' };
@@ -501,6 +691,29 @@ async function seedJobs(env, body) {
   if (!['passA_index', 'passA_refresh', 'passB_lots', 'passB_context', 'aggregate'].includes(type)) {
     return json({ success: false, message: `Unknown job type: ${type}` }, 400);
   }
+
+  // Pass B enrichment is targeted by outcode, not branch — one job per area.
+  if (type === 'passB_lots') {
+    const outcode = String(body?.outcode || '').toUpperCase().trim();
+    if (!outcode) return json({ success: false, message: 'passB_lots requires an outcode (e.g. "S63")' }, 400);
+    const id = `passB_lots:${outcode}`;
+    const now = nowIso();
+    if (body?.force) {
+      await env.CRM_DB.prepare(
+        `INSERT INTO mi_jobs (id, type, target, status, cursor, attempts, stats, created_at, updated_at)
+         VALUES (?, 'passB_lots', ?, 'queued', '{}', 0, '{}', ?, ?)
+         ON CONFLICT(id) DO UPDATE SET status='queued', attempts=0, last_error=NULL, stats='{}', updated_at=excluded.updated_at`
+      ).bind(id, outcode, now, now).run();
+      return json({ success: true, type, outcode, jobId: id, reset: 1 });
+    }
+    const res = await env.CRM_DB.prepare(
+      `INSERT INTO mi_jobs (id, type, target, status, cursor, attempts, stats, created_at, updated_at)
+       VALUES (?, 'passB_lots', ?, 'queued', '{}', 0, '{}', ?, ?)
+       ON CONFLICT(id) DO NOTHING`
+    ).bind(id, outcode, now, now).run();
+    return json({ success: true, type, outcode, jobId: id, created: res.meta.changes > 0 ? 1 : 0, skipped: res.meta.changes > 0 ? 0 : 1 });
+  }
+
   let branchIds = Array.isArray(body?.branches) && body.branches.length
     ? body.branches.map(String)
     : (await env.CRM_DB.prepare('SELECT id FROM mi_branches WHERE active = 1').all()).results.map(r => r.id);

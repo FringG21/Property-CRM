@@ -11,6 +11,8 @@ import {
   extractPostcodeParts,
   extractTown,
   classifyLotPassA,
+  parseLotDetail,
+  classifyLotPassB,
   parseAuctionEnd,
   parsePastAuctionPage,
   parseSitemapRegions,
@@ -114,6 +116,90 @@ test('classifyLotPassA excludes clear non-houses only', () => {
   // Houses stay eligible — unknown never excludes
   assert.equal(classifyLotPassA('55 Spansyke Street, Doncaster, South Yorkshire, DN4 0AX').excluded, 0);
   assert.equal(classifyLotPassA('The Old Chapel, Some Lane, Leeds LS1 1AA').excluded, 0);
+});
+
+// --- Pass B: lot detail parse + eligibility refinement --------------------
+
+test('parseLotDetail: freehold 2-bed house fixture — beds chip, tenure, type, no false signals', () => {
+  const d = parseLotDetail(fixture('lot-detail-freehold-house.html'));
+  assert.equal(d.bedrooms, 2);
+  assert.equal(d.tenure, 'freehold');
+  assert.equal(d.leaseholdFlag, 0);
+  assert.equal(d.isFlat, false);
+  assert.match(d.propertyType, /terrace/);
+  assert.equal(d.epcRating, null);           // page said 'EPC: Ordered' — not a real A-G rating
+  // A clean house description must not trip any condition/occupancy signal
+  assert.deepEqual(Object.values(d.signals).filter(Boolean), []);
+});
+
+test('parseLotDetail: leasehold apartment fixture — the case Pass A could not see', () => {
+  const d = parseLotDetail(fixture('lot-detail-leasehold-flat.html'));
+  assert.equal(d.bedrooms, 1);
+  assert.equal(d.tenure, 'leasehold');
+  assert.equal(d.leaseholdFlag, 1);
+  assert.equal(d.isFlat, true);
+  assert.match(d.propertyType, /apartment/);
+  assert.equal(d.epcRating, 'C');
+  assert.equal(d.councilTaxBand, 'A');
+});
+
+test('parseLotDetail: absent fields return null, never guessed', () => {
+  const d = parseLotDetail('<html><body>An unremarkable page with no property facts.</body></html>');
+  assert.equal(d.bedrooms, null);
+  assert.equal(d.tenure, null);
+  assert.equal(d.propertyType, null);
+  assert.equal(d.epcRating, null);
+  assert.equal(d.councilTaxBand, null);
+});
+
+test('parseLotDetail: a room dimension before an enumerated bedroom is not misread as the count', () => {
+  // Real S63 lot 335437 had no summary chip; '...x 3.10' preceding 'Bedroom 1 -'
+  // must not read as '10 Bedrooms'. Falls back to the enumeration count (3).
+  const html = '<div>Accommodation\nBathroom - 1.66 x 3.10\nBedroom 1 - 3.97 x 3.77\nBedroom 2 - 3.0 x 3.0\nBedroom 3 - 2.5 x 2.0\nTenure: Freehold.</div>';
+  const d = parseLotDetail(html);
+  assert.equal(d.bedrooms, 3);
+});
+
+test('parseLotDetail: "flat roof" on a house is not read as a flat', () => {
+  const d = parseLotDetail('<div>A semi-detached house with a flat roof extension. 3 Bedrooms. Tenure: Freehold.</div>');
+  assert.equal(d.isFlat, false);
+  assert.equal(d.propertyType, 'semi-detached');
+  assert.equal(d.bedrooms, 3);
+});
+
+test('classifyLotPassB: leasehold house flagged, NOT excluded', () => {
+  const passA = { excluded: 0, reasons: [], leaseholdFlag: 0 };
+  const detail = { isFlat: false, bedrooms: 3, leaseholdFlag: 1, signals: {} };
+  const r = classifyLotPassB(passA, detail);
+  assert.equal(r.excluded, 0);
+  assert.equal(r.leaseholdFlag, 1);
+  assert.deepEqual(r.reasons, []);
+});
+
+test('classifyLotPassB: detail-derived flat excluded even when Pass A missed it', () => {
+  const passA = { excluded: 0, reasons: [], leaseholdFlag: 0 };
+  const detail = parseLotDetail(fixture('lot-detail-leasehold-flat.html'));
+  const r = classifyLotPassB(passA, detail);
+  assert.equal(r.excluded, 1);
+  assert.equal(r.reasons.includes('flat'), true);
+  assert.equal(r.reasons.includes('under_2_beds'), true);   // 1-bed
+  assert.equal(r.leaseholdFlag, 1);
+});
+
+test('classifyLotPassB: <2-bed house excluded; unknown beds never excludes', () => {
+  const passA = { excluded: 0, reasons: [], leaseholdFlag: 0 };
+  assert.equal(classifyLotPassB(passA, { isFlat: false, bedrooms: 1, signals: {} }).reasons.includes('under_2_beds'), true);
+  const unknown = classifyLotPassB(passA, { isFlat: false, bedrooms: null, signals: {} });
+  assert.equal(unknown.excluded, 0);
+  assert.deepEqual(unknown.reasons, []);
+});
+
+test('classifyLotPassB: condition/occupancy signals map to reasons', () => {
+  const passA = { excluded: 0, reasons: [], leaseholdFlag: 0 };
+  const r = classifyLotPassB(passA, { isFlat: false, bedrooms: 3, signals: { tenanted: true, fireDamaged: true } });
+  assert.equal(r.excluded, 1);
+  assert.equal(r.reasons.includes('tenanted'), true);
+  assert.equal(r.reasons.includes('fire_damaged'), true);
 });
 
 // --- full page parsing against saved real pages ---------------------------
