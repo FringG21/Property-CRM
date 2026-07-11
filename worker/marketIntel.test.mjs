@@ -21,7 +21,23 @@ import {
   shrink,
   shrinkConfidence,
   computeAreaScore,
+  parseLrPpd,
+  buildComps,
+  lotTypeToLrClass,
+  computeGdv,
+  sdlt,
+  hpiGrowth,
+  flipSpreadScore,
+  compQualityScore,
+  growthResilienceScore,
 } from './marketIntel.js';
+
+// A synthetic LR PPD comp set (dates relative to now so the 24m window holds).
+const recentDate = monthsAgo => {
+  const d = new Date();
+  d.setMonth(d.getMonth() - monthsAgo);
+  return d.toISOString().slice(0, 10);
+};
 
 const fixturesDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'test', 'fixtures');
 const fixture = name => readFileSync(join(fixturesDir, name), 'utf8');
@@ -307,4 +323,95 @@ test('parseSitemapRegions extracts only past-auctions slugs', () => {
     <loc>https://www.auctionhouse.co.uk/london/company/about-us</loc>`;
   assert.deepEqual(parseSitemapRegions(xml).sort(), ['london', 'southyorkshire']);
   assert.equal(MI_KNOWN_REGIONS.length, 23);
+});
+
+// --- Pass B 6b: comps, growth, GDV ----------------------------------------
+
+test('parseLrPpd normalises PPD items and drops zero-price rows', () => {
+  const json = { result: { items: [
+    { pricePaid: 82000, transactionDate: '2025-03-01', newBuild: false, propertyType: { _about: 'http://landregistry/def/concept/ppd/terraced' }, propertyAddress: { paon: '12', street: 'CHAPEL LANE', town: 'ROTHERHAM', postcode: 'S63 0AA' } },
+    { pricePaid: 0, transactionDate: '2025-01-01', propertyType: 'terraced', propertyAddress: { paon: '5', street: 'X' } },
+  ] } };
+  const out = parseLrPpd(json, 'S63 0AA');
+  assert.equal(out.length, 1);
+  assert.deepEqual({ price: out[0].price, type: out[0].propertyType, street: out[0].street }, { price: 82000, type: 'Terraced', street: 'CHAPEL LANE' });
+});
+
+test('buildComps: per-class quantiles, new-build excluded, thin flagged, street + outcode ceilings', () => {
+  const mk = (price, type, street, newBuild = false) => ({ price, date: recentDate(6), propertyType: type, street, newBuild });
+  const items = [
+    mk(60000, 'Terraced', 'Chapel Lane'), mk(70000, 'Terraced', 'Chapel Lane'), mk(80000, 'Terraced', 'High St'),
+    mk(90000, 'Terraced', 'High St'), mk(100000, 'Terraced', 'High St'),
+    mk(250000, 'Terraced', 'High St', true),       // new-build — excluded
+    mk(120000, 'Semi-detached', 'Elm Rd'),          // only 1 semi — thin
+    { price: 65000, date: recentDate(40), propertyType: 'Terraced', street: 'Old Rd' }, // outside 24m
+  ];
+  const c = buildComps(items, { months: 24, minSample: 3 });
+  assert.equal(c.classes.Terraced.count, 5);
+  assert.equal(c.classes.Terraced.median, 80000);
+  assert.equal(c.classes['Semi-detached'].thin, true);
+  assert.equal(c.sameStreet['high st'], 100000);
+  assert.equal(c.houseSales, 6);          // 5 terraced + 1 semi, new-build & stale dropped
+  assert.ok(c.outcodeCeiling >= 100000);
+});
+
+test('lotTypeToLrClass maps parsed types; ambiguous -> null (all-house fallback)', () => {
+  assert.equal(lotTypeToLrClass('end-terrace'), 'Terraced');
+  assert.equal(lotTypeToLrClass('town house'), 'Terraced');
+  assert.equal(lotTypeToLrClass('semi-detached'), 'Semi-detached');
+  assert.equal(lotTypeToLrClass('detached'), 'Detached');
+  assert.equal(lotTypeToLrClass('bungalow'), null);
+  assert.equal(lotTypeToLrClass(''), null);
+});
+
+test('sdlt applies bands + additional-dwelling surcharge', () => {
+  assert.equal(sdlt(60000, 0.05), 3000);      // below £125k: only 5% surcharge
+  assert.equal(sdlt(60000, 0), 0);            // surcharge off
+  assert.equal(sdlt(200000, 0.05), 1500 + 10000); // 2% on 75k above 125k + 5% surcharge
+});
+
+test('computeGdv: bands ordered, ROI band classification, thin comps -> nulls', () => {
+  const comps = { classes: { Terraced: { count: 8, thin: false, p25: 70000, median: 85000, p75: 100000, ceiling: 110000 } }, houseAll: { count: 8, thin: false, p25: 70000, median: 85000, p75: 100000 }, minSample: 3 };
+  const g = computeGdv(45000, comps, 'Terraced', { streetCeiling: 95000 });
+  assert.equal(g.gdvConservative, 70000);
+  assert.equal(g.gdvExpected, 85000);
+  assert.equal(g.gdvOptimistic, 95000);       // p75 100k capped at street ceiling 95k
+  assert.ok(g.gdvConservative < g.gdvExpected && g.gdvExpected <= 100000);
+  assert.ok(['target', 'entry_opportunity', 'below_breakeven'].includes(g.band));
+  // A dear purchase with the same GDV must fall to a weaker band
+  const dear = computeGdv(95000, comps, 'Terraced', {});
+  assert.ok(['entry_opportunity', 'below_breakeven'].includes(dear.band));
+  // Thin class -> nulls
+  const thin = computeGdv(45000, { classes: { Terraced: { count: 1, thin: true } }, houseAll: { thin: true }, minSample: 3 }, 'Terraced', {});
+  assert.equal(thin.gdvExpected, null);
+  assert.equal(thin.thin, true);
+});
+
+test('hpiGrowth separates the COVID spike from the post-2021 trend', () => {
+  // Monthly series: steady, then post-2021 modest growth
+  const series = [];
+  for (let y = 2019; y <= 2026; y++) for (let m = 1; m <= 12; m++) {
+    if (y === 2026 && m > 7) break;
+    const date = `${y}-${String(m).padStart(2, '0')}-01`;
+    // pre-2021 flat ~100k, a 2020 dip, then steady climb
+    let price = 100000;
+    if (y >= 2021) price = 100000 + (y - 2021) * 4000 + m * 100;
+    series.push({ date, price });
+  }
+  const g = hpiGrowth(series);
+  assert.ok(g.growth5yr != null);
+  assert.ok(g.covidAdjustedAnnual != null);
+  assert.ok(g.volatility != null);
+  assert.equal(g.lastUpdated.slice(0, 7), '2026-07');
+});
+
+test('area-score factors: monotonic + null-safe', () => {
+  assert.equal(flipSpreadScore(null, 50000), null);
+  assert.ok(flipSpreadScore(85000, 45000) > flipSpreadScore(60000, 45000)); // bigger spread -> higher
+  assert.equal(flipSpreadScore(100000, 50000), 100);                        // 100% spread saturates
+  assert.ok(compQualityScore(40) > compQualityScore(5));
+  assert.equal(compQualityScore(null), null);
+  assert.ok(growthResilienceScore(5, 2) > growthResilienceScore(-5, 2));    // growth beats decline
+  assert.ok(growthResilienceScore(5, 0) > growthResilienceScore(5, 12));    // volatility penalised
+  assert.equal(growthResilienceScore(null, 1), null);
 });

@@ -644,6 +644,192 @@ async function runPassBLotsJob(env, job, opts) {
   return { jobId: job.id, status: done ? 'done' : 'queued', outcode, processed, remaining: remaining.n };
 }
 
+const MI_CONTEXT_FETCHES_PER_TICK = 12;
+const LR_CACHE_DAYS = 90;
+
+// Loads cached LR PPD items for a set of postcodes (fresh cache only).
+async function loadLrCache(env, postcodes) {
+  if (!postcodes.length) return {};
+  const now = nowIso();
+  const rows = await env.CRM_DB.prepare(
+    `SELECT cache_key, data FROM mi_lr_cache WHERE cache_key IN (${postcodes.map(() => '?').join(',')}) AND (expires_at IS NULL OR expires_at > ?)`
+  ).bind(...postcodes.map(p => `ppd:${p}`), now).all();
+  const out = {};
+  for (const r of rows.results) { try { out[r.cache_key] = JSON.parse(r.data); } catch { out[r.cache_key] = []; } }
+  return out;
+}
+
+// Pass B area context: LR comps, ceilings, HPI growth (COVID-split), per-lot GDV,
+// and the score factors Pass A cannot compute. Outcode-targeted, two-stage cursor
+// (fetch LR per postcode → compute). Idempotent: re-runs rebuild from cache.
+async function runPassBContextJob(env, job, opts) {
+  const outcode = String(job.target || '').toUpperCase().trim();
+  if (!outcode) {
+    await saveJob(env, job, { status: 'error', last_error: 'passB_context job has no outcode target' });
+    return { jobId: job.id, error: 'no target' };
+  }
+  const stats = JSON.parse(job.stats || '{}');
+  let cursor = JSON.parse(job.cursor || '{}');
+
+  // Initialise the postcode worklist from the outcode's eligible lots.
+  if (!cursor.postcodes) {
+    const { results } = await env.CRM_DB.prepare(
+      `SELECT DISTINCT postcode FROM mi_lots WHERE outcode = ? AND excluded = 0 AND postcode IS NOT NULL AND postcode != '' ORDER BY postcode`
+    ).bind(outcode).all();
+    cursor = { stage: 'fetch', postcodes: results.map(r => r.postcode), idx: 0 };
+  }
+
+  // ---- FETCH STAGE: LR PPD per postcode, cached 90 days ----
+  if (cursor.stage === 'fetch') {
+    const fresh = await loadLrCache(env, cursor.postcodes);
+    let fetched = 0;
+    while (cursor.idx < cursor.postcodes.length && fetched < MI_CONTEXT_FETCHES_PER_TICK) {
+      const pc = cursor.postcodes[cursor.idx];
+      if (fresh[`ppd:${pc}`]) { cursor.idx++; continue; }               // already cached
+      try {
+        const res = await fetch(
+          `https://landregistry.data.gov.uk/data/ppi/transaction-record.json?propertyAddress.postcode=${encodeURIComponent(pc)}&_pageSize=100&_sort=-transactionDate`,
+          { headers: { Accept: 'application/json', 'User-Agent': MI_UA }, signal: AbortSignal.timeout(15000) }
+        );
+        const items = res.ok ? parseLrPpd(await res.json(), pc) : [];
+        const expires = new Date(Date.now() + LR_CACHE_DAYS * 864e5).toISOString();
+        await env.CRM_DB.prepare(
+          `INSERT INTO mi_lr_cache (cache_key, fetched_at, expires_at, data) VALUES (?, ?, ?, ?)
+           ON CONFLICT(cache_key) DO UPDATE SET fetched_at=excluded.fetched_at, expires_at=excluded.expires_at, data=excluded.data`
+        ).bind(`ppd:${pc}`, nowIso(), expires, JSON.stringify(items)).run();
+        stats.lrFetched = (stats.lrFetched || 0) + 1;
+        stats.lrSales = (stats.lrSales || 0) + items.length;
+      } catch (err) {
+        stats.lrErrors = (stats.lrErrors || 0) + 1;
+      }
+      fetched++;
+      cursor.idx++;
+      if (cursor.idx < cursor.postcodes.length && fetched < MI_CONTEXT_FETCHES_PER_TICK) await sleep(MI_LIMITS.fetchSpacingMs);
+    }
+    if (cursor.idx >= cursor.postcodes.length) cursor.stage = 'compute';
+    await saveJob(env, { ...job, status: 'running' }, { status: 'queued', cursor: JSON.stringify(cursor), stats: JSON.stringify(stats), attempts: 0, last_error: null });
+    return { jobId: job.id, status: 'queued', outcode, stage: 'fetch', idx: cursor.idx, of: cursor.postcodes.length };
+  }
+
+  // ---- COMPUTE STAGE: comps + growth + per-lot GDV + score ----
+  const cache = await loadLrCache(env, cursor.postcodes);
+  const lrItems = Object.values(cache).flat();
+  const comps = buildComps(lrItems, { months: 24 });
+
+  // geo + HPI (one call each) — best-effort, never blocks the compute.
+  let geo = null, growth = null, hpiRaw = null;
+  const sampleLot = await env.CRM_DB.prepare(
+    `SELECT postcode FROM mi_lots WHERE outcode = ? AND postcode IS NOT NULL AND postcode != '' LIMIT 1`
+  ).bind(outcode).first();
+  if (sampleLot?.postcode) {
+    try {
+      const pRes = await fetch(`https://api.postcodes.io/postcodes/${encodeURIComponent(sampleLot.postcode)}`, { signal: AbortSignal.timeout(10000) });
+      if (pRes.ok) {
+        const pj = await pRes.json();
+        const r = pj.result || {};
+        geo = { laCode: r.codes?.admin_district || null, localAuthority: r.admin_district || null, region: r.region || null, lat: r.latitude || null, lon: r.longitude || null, country: r.country || null };
+      }
+    } catch { /* geo optional */ }
+  }
+  // UK HPI is keyed by region SLUG (not the GSS code); refPeriodStart is a human
+  // date ('Sun, 01 Jan 1995') so parse it to ISO and sort by refMonth desc.
+  const laSlug = geo?.localAuthority
+    ? geo.localAuthority.toLowerCase().replace(/['’.]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+    : null;
+  if (geo) geo.laSlug = laSlug;
+  if (laSlug) {
+    try {
+      const hRes = await fetch(
+        `https://landregistry.data.gov.uk/data/ukhpi/region/${encodeURIComponent(laSlug)}/month.json?_pageSize=80&_sort=-refMonth`,
+        { headers: { Accept: 'application/json', 'User-Agent': MI_UA }, signal: AbortSignal.timeout(12000) }
+      );
+      if (hRes.ok) {
+        const hj = await hRes.json();
+        const series = (hj.result?.items || []).map(i => ({
+          date: i.refPeriodStart ? new Date(i.refPeriodStart).toISOString().slice(0, 10) : '',
+          price: Number(i.averagePrice) || 0,
+        }));
+        hpiRaw = hpiGrowth(series);
+        growth = hpiRaw ? { growth5yr: hpiRaw.growth5yr, growth3yr: hpiRaw.growth3yr, growth1yr: hpiRaw.growth1yr, covidAdjustedAnnual: hpiRaw.covidAdjustedAnnual, volatility: hpiRaw.volatility, lastUpdated: hpiRaw.lastUpdated } : null;
+      }
+    } catch { /* hpi optional */ }
+  }
+
+  // Per-lot GDV for eligible lots. streetCeiling = best same-street LR sale whose
+  // street name appears in the lot address.
+  const { results: eligibleLots } = await env.CRM_DB.prepare(
+    `SELECT id, address, property_type, sold_price, price_confirmed, guide_min, guide_max, raw FROM mi_lots WHERE outcode = ? AND excluded = 0 AND enrichment_level = 1`
+  ).bind(outcode).all();
+  const streetKeys = Object.keys(comps.sameStreet);
+  const expectedGdvs = [], purchases = [];
+  const updates = [];
+  let withEconomics = 0;
+  for (const lot of eligibleLots) {
+    const normAddr = normStreet(lot.address);
+    let streetCeiling = null;
+    for (const k of streetKeys) if (k.length >= 4 && normAddr.includes(k)) streetCeiling = Math.max(streetCeiling || 0, comps.sameStreet[k]);
+    const lrClass = lotTypeToLrClass(lot.property_type);
+    let purchase = null, basis = null;
+    if (lot.price_confirmed && lot.sold_price) { purchase = lot.sold_price; basis = 'confirmed_sale'; }
+    else if (lot.guide_min) { purchase = lot.guide_max ? Math.round((lot.guide_min + lot.guide_max) / 2) : lot.guide_min; basis = 'guide_midpoint'; }
+    const g = computeGdv(purchase, comps, lrClass, { streetCeiling });
+    if (g.gdvExpected != null) { expectedGdvs.push(g.gdvExpected); if (purchase) purchases.push(purchase); }
+    if (g.band) withEconomics++;
+    let raw; try { raw = JSON.parse(lot.raw || '{}'); } catch { raw = {}; }
+    raw.passBContext = { ...g, purchase, purchaseBasis: basis, streetCeiling, computedAt: nowIso() };
+    updates.push(env.CRM_DB.prepare('UPDATE mi_lots SET raw = ? WHERE id = ?').bind(JSON.stringify(raw), lot.id));
+  }
+  for (const batch of chunkBatches(env, updates)) if (batch.length) await env.CRM_DB.batch(batch);
+
+  // Score factors + area-level summaries.
+  const medExpected = expectedGdvs.length ? quantile([...expectedGdvs].sort((a, b) => a - b), 0.5) : null;
+  const medPurchase = purchases.length ? quantile([...purchases].sort((a, b) => a - b), 0.5) : null;
+  const factors = {
+    flipSpread: flipSpreadScore(medExpected, medPurchase),
+    compQuality: compQualityScore(comps.houseSales),
+    growthResilience: growthResilienceScore(growth?.covidAdjustedAnnual ?? null, growth?.volatility ?? null),
+  };
+  const compsSummary = {
+    classes: Object.fromEntries(Object.entries(comps.classes).map(([k, v]) => [k, { count: v.count, thin: v.thin, median: v.median, p25: v.p25, p75: v.p75, ceiling: v.ceiling }])),
+    houseSales: comps.houseSales, totalSales: comps.totalSales, outcodeCeiling: comps.outcodeCeiling,
+    medianExpectedGdv: medExpected, medianPurchase: medPurchase, lotsWithEconomics: withEconomics, eligibleLots: eligibleLots.length,
+  };
+  const ceiling = { outcodeCeiling: comps.outcodeCeiling, topStreets: Object.entries(comps.sameStreet).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([street, price]) => ({ street, price })) };
+
+  const ctxNow = nowIso();
+  const ctxStmts = [
+    ['comps_summary', compsSummary], ['ceiling', ceiling], ['score_factors', factors],
+  ];
+  if (geo) ctxStmts.push(['geo', geo]);
+  if (growth) ctxStmts.push(['growth', growth]);
+  if (hpiRaw) ctxStmts.push(['hpi', hpiRaw]);
+  await env.CRM_DB.batch(ctxStmts.map(([kind, data]) => env.CRM_DB.prepare(
+    `INSERT INTO mi_area_context (area_type, area_id, kind, data, fetched_at) VALUES ('outcode', ?, ?, ?, ?)
+     ON CONFLICT(area_type, area_id, kind) DO UPDATE SET data=excluded.data, fetched_at=excluded.fetched_at`
+  ).bind(outcode, kind, JSON.stringify(data), ctxNow)));
+
+  // Merge the new factors into the existing Pass A score and recompute.
+  const model = await env.CRM_DB.prepare('SELECT * FROM mi_scoring_models WHERE is_default = 1 LIMIT 1').first();
+  const weights = JSON.parse(model?.weights || '{}');
+  const existing = await env.CRM_DB.prepare(
+    `SELECT components, confidence FROM mi_area_scores WHERE area_type='outcode' AND area_id=? AND model_id=?`
+  ).bind(outcode, model?.id || 'default-v1').first();
+  let scoreWritten = null;
+  if (existing) {
+    const prev = JSON.parse(existing.components || '{}');
+    const merged = { ...(prev.values || {}), ...Object.fromEntries(Object.entries(factors).filter(([, v]) => v != null)) };
+    const { score, values, missing } = computeAreaScore(merged, weights);
+    scoreWritten = score;
+    await env.CRM_DB.prepare(
+      `UPDATE mi_area_scores SET score=?, components=?, computed_at=? WHERE area_type='outcode' AND area_id=? AND model_id=?`
+    ).bind(score, JSON.stringify({ ...prev, values, missing, passB: factors }), ctxNow, outcode, model?.id || 'default-v1').run();
+  }
+
+  stats.compute = { eligibleLots: eligibleLots.length, houseSales: comps.houseSales, medianExpectedGdv: medExpected, factors, scoreWritten };
+  await saveJob(env, job, { status: 'done', cursor: JSON.stringify(cursor), attempts: 0, last_error: null, stats: JSON.stringify(stats) });
+  return { jobId: job.id, status: 'done', outcode, ...stats.compute };
+}
+
 export async function runMarketIntelTick(env, opts = {}) {
   const now = nowIso();
   const job = await env.CRM_DB.prepare(
@@ -665,6 +851,9 @@ export async function runMarketIntelTick(env, opts = {}) {
     }
     if (job.type === 'passB_lots') {
       return await runPassBLotsJob(env, job, opts);
+    }
+    if (job.type === 'passB_context') {
+      return await runPassBContextJob(env, job, opts);
     }
     await saveJob(env, job, { status: 'error', last_error: `Job type not implemented yet: ${job.type}` });
     return { jobId: job.id, error: 'not implemented' };
@@ -692,25 +881,25 @@ async function seedJobs(env, body) {
     return json({ success: false, message: `Unknown job type: ${type}` }, 400);
   }
 
-  // Pass B enrichment is targeted by outcode, not branch — one job per area.
-  if (type === 'passB_lots') {
+  // Pass B jobs are targeted by outcode, not branch — one job per area.
+  if (type === 'passB_lots' || type === 'passB_context') {
     const outcode = String(body?.outcode || '').toUpperCase().trim();
-    if (!outcode) return json({ success: false, message: 'passB_lots requires an outcode (e.g. "S63")' }, 400);
-    const id = `passB_lots:${outcode}`;
+    if (!outcode) return json({ success: false, message: `${type} requires an outcode (e.g. "S63")` }, 400);
+    const id = `${type}:${outcode}`;
     const now = nowIso();
     if (body?.force) {
       await env.CRM_DB.prepare(
         `INSERT INTO mi_jobs (id, type, target, status, cursor, attempts, stats, created_at, updated_at)
-         VALUES (?, 'passB_lots', ?, 'queued', '{}', 0, '{}', ?, ?)
-         ON CONFLICT(id) DO UPDATE SET status='queued', attempts=0, last_error=NULL, stats='{}', updated_at=excluded.updated_at`
-      ).bind(id, outcode, now, now).run();
+         VALUES (?, ?, ?, 'queued', '{}', 0, '{}', ?, ?)
+         ON CONFLICT(id) DO UPDATE SET status='queued', cursor='{}', attempts=0, last_error=NULL, stats='{}', updated_at=excluded.updated_at`
+      ).bind(id, type, outcode, now, now).run();
       return json({ success: true, type, outcode, jobId: id, reset: 1 });
     }
     const res = await env.CRM_DB.prepare(
       `INSERT INTO mi_jobs (id, type, target, status, cursor, attempts, stats, created_at, updated_at)
-       VALUES (?, 'passB_lots', ?, 'queued', '{}', 0, '{}', ?, ?)
+       VALUES (?, ?, ?, 'queued', '{}', 0, '{}', ?, ?)
        ON CONFLICT(id) DO NOTHING`
-    ).bind(id, outcode, now, now).run();
+    ).bind(id, type, outcode, now, now).run();
     return json({ success: true, type, outcode, jobId: id, created: res.meta.changes > 0 ? 1 : 0, skipped: res.meta.changes > 0 ? 0 : 1 });
   }
 
@@ -805,6 +994,220 @@ export function computeAreaScore(components, weights) {
   return { score: Math.round((acc / weightSum) * 10) / 10, values, missing };
 }
 
+// ------------------------------------------------------------
+// Pass B — comparables, growth, GDV (pure helpers, exported for tests)
+// LR PPD gives sale price + property type + street, but NO bedroom count, so
+// GDV is matched on property type only. Everything here is best-effort off
+// public data; thin samples are flagged, never invented.
+// ------------------------------------------------------------
+
+const MI_HOUSE_LR_CLASSES = ['Detached', 'Semi-detached', 'Terraced'];
+
+// Default flip cost model — clearly-labelled, configurable assumptions
+// (surfaced/editable in Phase 6c settings). Never silently invents a fee.
+export const MI_FLIP_COSTS = {
+  buyersPremiumPct: 0.03,     // auction buyer's premium (typical; per-branch fee overrides later)
+  buyersPremiumMin: 1500,
+  sdltSurchargePct: 0.05,     // additional-dwelling surcharge (flips are 2nd properties)
+  legalBuy: 1500,
+  legalSell: 1200,
+  holdingMonths: 7,
+  holdingPerMonth: 350,       // insurance/utilities/void council tax/finance proxy
+  agentPct: 0.012,            // selling agent fee
+  refurbLight: 20000,
+  refurbHeavy: 35000,
+  targetReturn: 0.15,
+};
+
+// Banded SDLT (England residential) + optional additional-dwelling surcharge on
+// the whole price. Labelled assumption — user can zero the surcharge in settings.
+export function sdlt(price, surchargePct = MI_FLIP_COSTS.sdltSurchargePct) {
+  if (!price || price <= 0) return 0;
+  const bands = [[125000, 0], [250000, 0.02], [925000, 0.05], [1500000, 0.10], [Infinity, 0.12]];
+  let tax = 0, prev = 0;
+  for (const [cap, rate] of bands) {
+    if (price <= prev) break;
+    tax += (Math.min(price, cap) - prev) * rate;
+    prev = cap;
+  }
+  return Math.round(tax + price * surchargePct);
+}
+
+// Land Registry Price Paid parse — mirrors the shape used in index.js.
+export function parseLrPpd(json, postcode) {
+  const typeLabel = t => {
+    if (!t) return '';
+    const uri = typeof t === 'string' ? t : (t._about || '');
+    const tail = uri.split('/').pop() || '';
+    return ({ detached: 'Detached', 'semi-detached': 'Semi-detached', terraced: 'Terraced', flat: 'Flat', 'other-property-type': 'Other' }[tail] || tail);
+  };
+  return (json?.result?.items || []).map(it => {
+    const a = it.propertyAddress || {};
+    return {
+      price: it.pricePaid || 0,
+      date: String(it.transactionDate || '').slice(0, 10),
+      paon: a.paon || '',
+      street: a.street || '',
+      address: [a.saon, a.paon, a.street].filter(Boolean).join(' '),
+      town: a.town || '',
+      postcode: a.postcode || postcode,
+      propertyType: typeLabel(it.propertyType),
+      newBuild: !!it.newBuild,
+    };
+  }).filter(x => x.price > 0 && x.date);
+}
+
+const normStreet = s => String(s || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+
+function summarizePrices(sortedPrices, minSample) {
+  const count = sortedPrices.length;
+  if (count < minSample) return { count, thin: true, median: null, p25: null, p75: null, min: null, ceiling: null };
+  return {
+    count, thin: false,
+    median: quantile(sortedPrices, 0.5),
+    p25: quantile(sortedPrices, 0.25),
+    p75: quantile(sortedPrices, 0.75),
+    min: sortedPrices[0],
+    ceiling: quantile(sortedPrices, 0.95),
+  };
+}
+
+// Aggregate LR items into per-class distributions + same-street / outcode
+// ceilings. New-builds are separated out (not refurb-flip comparables).
+export function buildComps(items, opts = {}) {
+  const months = opts.months ?? 24;
+  const minSample = opts.minSample ?? 3;
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - months);
+  const cut = cutoff.toISOString().slice(0, 10);
+  const recent = (items || []).filter(i => i.price > 0 && i.date >= cut);
+  const houses = recent.filter(i => MI_HOUSE_LR_CLASSES.includes(i.propertyType) && !i.newBuild);
+  const classes = {};
+  for (const cls of MI_HOUSE_LR_CLASSES) {
+    const arr = houses.filter(i => i.propertyType === cls).map(i => i.price).sort((a, b) => a - b);
+    classes[cls] = summarizePrices(arr, minSample);
+  }
+  const allHouse = houses.map(i => i.price).sort((a, b) => a - b);
+  const houseAll = summarizePrices(allHouse, minSample);
+  const sameStreet = {};
+  for (const i of houses) {
+    const st = normStreet(i.street);
+    if (!st) continue;
+    if (!sameStreet[st] || i.price > sameStreet[st]) sameStreet[st] = i.price;
+  }
+  const outcodeCeiling = allHouse.length >= 5 ? quantile(allHouse, 0.95) : (allHouse.length ? allHouse[allHouse.length - 1] : null);
+  return { classes, houseAll, sameStreet, outcodeCeiling, months, minSample, totalSales: recent.length, houseSales: houses.length };
+}
+
+// Maps a parsed lot property type to the LR class its comps come from.
+// Ambiguous types (bungalow/cottage/mews) fall back to the all-house pool.
+export function lotTypeToLrClass(propertyType) {
+  const t = String(propertyType || '').toLowerCase();
+  if (!t) return null;
+  if (/terrace|town\s?house/.test(t)) return 'Terraced';
+  if (/semi/.test(t)) return 'Semi-detached';
+  if (/\bdetached\b/.test(t)) return 'Detached';
+  return null; // bungalow, cottage, mews, unknown → all-house fallback
+}
+
+// Per-lot GDV bands + flip economics. conservative=P25, expected=median,
+// optimistic=P75 capped at the same-street ceiling. purchase basis is the
+// caller's responsibility (confirmed price vs guide midpoint) and is echoed back.
+export function computeGdv(purchase, comps, lrClass, opts = {}) {
+  const c = { ...MI_FLIP_COSTS, ...(opts.costs || {}) };
+  const minSample = opts.minSample ?? comps.minSample ?? 3;
+  const cls = (lrClass && comps.classes[lrClass] && !comps.classes[lrClass].thin)
+    ? comps.classes[lrClass] : comps.houseAll;
+  if (!cls || cls.thin) {
+    return { gdvConservative: null, gdvExpected: null, gdvOptimistic: null, compClass: lrClass, compCount: cls?.count ?? 0, thin: true };
+  }
+  const streetCeil = opts.streetCeiling || null;
+  const gdvConservative = cls.p25;
+  const gdvExpected = cls.median;
+  const gdvOptimistic = streetCeil ? Math.min(cls.p75, streetCeil) : cls.p75;
+  const compClass = comps.classes[lrClass] && !comps.classes[lrClass].thin ? lrClass : 'all-house';
+
+  // GDV bands stand on the comps alone; flip economics need a purchase price.
+  if (!purchase) {
+    return { gdvConservative, gdvExpected, gdvOptimistic, compClass, compCount: cls.count, profitExpected: null, roiExpected: null, band: null, refurbBand: [c.refurbLight, c.refurbHeavy], thin: false };
+  }
+
+  const buyersPremium = Math.max(c.buyersPremiumMin, Math.round(purchase * c.buyersPremiumPct));
+  const buyCosts = buyersPremium + sdlt(purchase, c.sdltSurchargePct) + c.legalBuy;
+  const holding = c.holdingPerMonth * c.holdingMonths;
+  const refurbMid = Math.round((c.refurbLight + c.refurbHeavy) / 2);
+  const sellCosts = gdv => Math.round(gdv * c.agentPct) + c.legalSell;
+  const totalCost = refurb => purchase + buyCosts + holding + refurb;
+  const profitAt = (gdv, refurb) => gdv - totalCost(refurb) - sellCosts(gdv);
+
+  const profitExpected = profitAt(gdvExpected, refurbMid);
+  const roiExpected = +(profitExpected / totalCost(refurbMid)).toFixed(3);
+  const band = roiExpected >= c.targetReturn ? 'target' : (profitExpected > 0 ? 'entry_opportunity' : 'below_breakeven');
+
+  return {
+    gdvConservative, gdvExpected, gdvOptimistic,
+    compClass, compCount: cls.count,
+    profitExpected, roiExpected, band,
+    refurbBand: [c.refurbLight, c.refurbHeavy],
+    costs: { buyCosts, holding, sellCostsAtExpected: sellCosts(gdvExpected) },
+    thin: false,
+  };
+}
+
+// HPI growth with the 2020 COVID shock separated out (raw 1/3/5yr kept for
+// transparency; the score uses the post-2021 annualised trend + volatility).
+export function hpiGrowth(series) {
+  const items = (series || []).filter(i => i.price > 0 && i.date).sort((a, b) => b.date.localeCompare(a.date));
+  if (!items.length) return null;
+  const current = items[0].price;
+  const at = monthsAgo => {
+    const t = new Date(items[0].date);
+    t.setMonth(t.getMonth() - monthsAgo);
+    const s = t.toISOString().slice(0, 7);
+    return items.find(i => i.date.slice(0, 7) <= s)?.price || null;
+  };
+  const pct = (a, b) => b ? Math.round((a - b) / b * 1000) / 10 : null;
+  const postCovid = items.find(i => i.date.slice(0, 7) <= '2021-07');
+  let covidAdjustedAnnual = null;
+  if (postCovid && postCovid.price > 0) {
+    const months = Math.max(1, Math.round((new Date(items[0].date) - new Date(postCovid.date)) / (30.44 * 864e5)));
+    if (months >= 6) covidAdjustedAnnual = Math.round((Math.pow(current / postCovid.price, 12 / months) - 1) * 1000) / 10;
+  }
+  const yoy = [];
+  for (let m = 12; m <= 60; m += 12) {
+    const younger = m === 12 ? current : at(m - 12);
+    const older = at(m);
+    if (younger && older) yoy.push((younger - older) / older);
+  }
+  let volatility = null;
+  if (yoy.length >= 2) {
+    const mean = yoy.reduce((s, v) => s + v, 0) / yoy.length;
+    volatility = +(Math.sqrt(yoy.reduce((s, v) => s + (v - mean) ** 2, 0) / yoy.length) * 100).toFixed(1);
+  }
+  return {
+    current: Math.round(current),
+    growth1yr: pct(current, at(12)), growth3yr: pct(current, at(36)), growth5yr: pct(current, at(60)),
+    covidAdjustedAnnual, volatility, lastUpdated: items[0].date, points: items.length,
+  };
+}
+
+// Pass B area-score factors (0-100). Null when the underlying data is absent.
+export function flipSpreadScore(medianExpectedGdv, medianPurchase) {
+  if (!medianExpectedGdv || !medianPurchase) return null;
+  const spread = (medianExpectedGdv - medianPurchase) / medianPurchase;
+  return Math.max(0, Math.min(100, Math.round(spread / 0.5 * 100))); // 50%+ spread saturates at 100
+}
+export function compQualityScore(houseSales) {
+  if (houseSales == null) return null;
+  return Math.round(100 * houseSales / (houseSales + 25)); // ~40 comps → ~62, saturating
+}
+export function growthResilienceScore(covidAdjustedAnnual, volatility) {
+  if (covidAdjustedAnnual == null) return null;
+  let s = 50 + covidAdjustedAnnual * 7;
+  if (volatility != null) s -= Math.min(20, volatility * 1.5);
+  return Math.max(0, Math.min(100, Math.round(s)));
+}
+
 const CONFIRMED_STATUSES = ['sold_for', 'sold_prior_for', 'sold_after_for'];
 const UNCONFIRMED_SOLD_STATUSES = ['sold', 'sold_prior', 'sold_after'];
 const MI_WINDOW = '24m';
@@ -845,7 +1248,7 @@ export async function runAggregation(env) {
     WHERE auction_end_at >= ? AND auction_end_at <= ? AND ${key} IS NOT NULL
     GROUP BY ${key}`;
 
-  const [outcodeGroups, townGroups, branchGroups, confirmedRows, repeatRows, model] = await Promise.all([
+  const [outcodeGroups, townGroups, branchGroups, confirmedRows, repeatRows, model, contextRows] = await Promise.all([
     env.CRM_DB.prepare(groupSql('outcode')).bind(from, to + 'T23:59').all(),
     env.CRM_DB.prepare(groupSql('town')).bind(from, to + 'T23:59').all(),
     env.CRM_DB.prepare(groupSql('branch_id')).bind(from, to + 'T23:59').all(),
@@ -861,8 +1264,15 @@ export async function runAggregation(env) {
        GROUP BY l.outcode, l.town, l.branch_id`
     ).all(),
     env.CRM_DB.prepare('SELECT * FROM mi_scoring_models WHERE is_default = 1 LIMIT 1').first(),
+    env.CRM_DB.prepare(`SELECT area_type, area_id, data FROM mi_area_context WHERE kind = 'score_factors'`).all(),
   ]);
   const weights = JSON.parse(model?.weights || '{}');
+  // Pass B factors, keyed by area — injected so a wholesale recompute never
+  // clobbers an enriched area's fuller score with Pass-A-only nulls.
+  const passBFactors = new Map();
+  for (const r of (contextRows?.results || [])) {
+    try { passBFactors.set(`${r.area_type}:${r.area_id}`, JSON.parse(r.data)); } catch { /* skip */ }
+  }
 
   // Per-area detail from the bulk confirmed-price rows
   const detailByArea = { outcode: new Map(), town: new Map(), branch: new Map() };
@@ -943,15 +1353,16 @@ export async function runAggregation(env) {
       ));
       summary.areas++;
 
-      // Pass A score components (0-100 each)
+      // Pass A components + any Pass B factors already computed for this area.
+      const pb = passBFactors.get(`${type}:${g.area_id}`) || {};
       const components = {
         sub100kSupply: 100 * g.sub100k_confirmed / (g.sub100k_confirmed + 20),
         demandLiquidity: sellThrough != null
           ? shrink(sellThrough, n, national.sellThrough) * 100 : null,
         risk: shrinkConfidence(n) * 100,
-        flipSpread: null,
-        compQuality: null,
-        growthResilience: null,
+        flipSpread: pb.flipSpread ?? null,
+        compQuality: pb.compQuality ?? null,
+        growthResilience: pb.growthResilience ?? null,
       };
       const { score, values, missing } = computeAreaScore(components, weights);
       if (score == null) continue;
@@ -1209,6 +1620,29 @@ export async function handleMarketIntelRoutes(request, env, url) {
     return action === 'pause'
       ? setJobStatus(env, decodeURIComponent(jobId), ['queued', 'error'], 'paused')
       : setJobStatus(env, decodeURIComponent(jobId), ['paused', 'error'], 'queued');
+  }
+
+  // Pass B area context: comps/growth/ceiling summaries + per-lot GDV bands.
+  if (path === '/api/market/context' && method === 'GET') {
+    const areaType = url.searchParams.get('type') || 'outcode';
+    const areaId = (url.searchParams.get('id') || '').toUpperCase();
+    if (!areaId) return json({ success: false, message: 'id is required' }, 400);
+    const [ctx, lots] = await Promise.all([
+      env.CRM_DB.prepare('SELECT kind, data, fetched_at FROM mi_area_context WHERE area_type = ? AND area_id = ?').bind(areaType, areaId).all(),
+      areaType === 'outcode'
+        ? env.CRM_DB.prepare(
+            `SELECT id, address, property_type, bedrooms, tenure, sold_price, price_confirmed, guide_min, guide_max,
+                    json_extract(raw, '$.passBContext') gdv
+             FROM mi_lots WHERE outcode = ? AND excluded = 0 AND enrichment_level = 1
+               AND json_extract(raw, '$.passBContext.gdvExpected') IS NOT NULL
+             ORDER BY json_extract(raw, '$.passBContext.roiExpected') DESC LIMIT 300`
+          ).bind(areaId).all()
+        : Promise.resolve({ results: [] }),
+    ]);
+    const context = {};
+    for (const r of ctx.results) { try { context[r.kind] = { ...JSON.parse(r.data), fetchedAt: r.fetched_at }; } catch { /* skip */ } }
+    const gdvLots = (lots.results || []).map(l => ({ ...l, gdv: l.gdv ? JSON.parse(l.gdv) : null }));
+    return json({ success: true, areaType, areaId, context, gdvLots });
   }
 
   return json({ success: false, message: 'Not found' }, 404);
