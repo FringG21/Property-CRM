@@ -15,6 +15,10 @@ import {
   parsePastAuctionPage,
   parseSitemapRegions,
   MI_KNOWN_REGIONS,
+  quantile,
+  shrink,
+  shrinkConfidence,
+  computeAreaScore,
 } from './marketIntel.js';
 
 const fixturesDir = join(dirname(fileURLToPath(import.meta.url)), '..', 'test', 'fixtures');
@@ -178,6 +182,35 @@ test('results shell detected on real pages — distinguishes empty branch from b
   const parsed = parsePastAuctionPage(emptyBranch);
   assert.equal(parsed.lots.length, 0);
   assert.equal(parsed.hasResultsShell, true);
+});
+
+// --- aggregation + scoring maths -------------------------------------------
+
+test('quantile on sorted arrays', () => {
+  assert.equal(quantile([], 0.5), null);
+  assert.equal(quantile([50000], 0.5), 50000);
+  assert.equal(quantile([10, 20, 30, 40], 0.5), 25);
+  assert.equal(quantile([10, 20, 30, 40, 100], 0.25), 20);
+  assert.equal(quantile([10, 20, 30, 40, 100], 0.75), 40);
+});
+
+test('shrinkage pulls small samples to the national value', () => {
+  // 1 observation of 100% sell-through in a 60% nation -> barely moves
+  assert.ok(Math.abs(shrink(1.0, 1, 0.6) - 0.644) < 0.001);
+  // 80 observations dominate the prior
+  assert.ok(shrink(1.0, 80, 0.6) > 0.95);
+  assert.equal(shrink(null, 0, 0.6), 0.6);
+  assert.ok(Math.abs(shrinkConfidence(8) - 0.5) < 0.001);
+  assert.ok(shrinkConfidence(0) === 0);
+});
+
+test('computeAreaScore renormalises over available factors and reports missing', () => {
+  const weights = { demandLiquidity: 0.25, flipSpread: 0.20, sub100kSupply: 0.20, compQuality: 0.15, growthResilience: 0.15, risk: 0.05 };
+  const r = computeAreaScore({ sub100kSupply: 80, demandLiquidity: 60, risk: 50, flipSpread: null, compQuality: null, growthResilience: null }, weights);
+  // (0.20*80 + 0.25*60 + 0.05*50) / 0.50 = 67
+  assert.equal(r.score, 67);
+  assert.deepEqual(r.missing.sort(), ['compQuality', 'flipSpread', 'growthResilience']);
+  assert.equal(computeAreaScore({}, weights).score, null);
 });
 
 // --- branch discovery ------------------------------------------------------

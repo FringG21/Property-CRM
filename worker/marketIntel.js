@@ -545,6 +545,228 @@ async function setJobStatus(env, jobId, from, to) {
 }
 
 // ------------------------------------------------------------
+// Aggregation + scoring (Pass A) — pure helpers exported for tests
+// ------------------------------------------------------------
+
+export function quantile(sortedNums, q) {
+  if (!sortedNums.length) return null;
+  const pos = (sortedNums.length - 1) * q;
+  const lo = Math.floor(pos), hi = Math.ceil(pos);
+  if (lo === hi) return sortedNums[lo];
+  return Math.round(sortedNums[lo] + (sortedNums[hi] - sortedNums[lo]) * (pos - lo));
+}
+
+// Bayesian shrinkage toward a broader mean: small samples get pulled to the
+// national value instead of dominating rankings. k≈8 confirmed sales = the
+// point where an area's own data carries half the weight.
+export const SHRINKAGE_K = 8;
+
+export function shrink(value, n, nationalValue, k = SHRINKAGE_K) {
+  if (value == null) return nationalValue;
+  return (n * value + k * nationalValue) / (n + k);
+}
+
+export function shrinkConfidence(n, k = SHRINKAGE_K) {
+  return n / (n + k);
+}
+
+// Combined Pass A score. Weights come from mi_scoring_models; factors the
+// model names but Pass A cannot compute (flipSpread, compQuality,
+// growthResilience — all Pass B) are renormalised away and listed as
+// missing, so a Pass A score is never silently padded with fake data.
+export function computeAreaScore(components, weights) {
+  const values = {};
+  let weightSum = 0, acc = 0;
+  const missing = [];
+  for (const [factor, w] of Object.entries(weights)) {
+    const v = components[factor];
+    if (v == null || Number.isNaN(v)) {
+      missing.push(factor);
+      continue;
+    }
+    values[factor] = Math.round(v * 10) / 10;
+    weightSum += w;
+    acc += w * v;
+  }
+  if (weightSum === 0) return { score: null, values, missing };
+  return { score: Math.round((acc / weightSum) * 10) / 10, values, missing };
+}
+
+const CONFIRMED_STATUSES = ['sold_for', 'sold_prior_for', 'sold_after_for'];
+const UNCONFIRMED_SOLD_STATUSES = ['sold', 'sold_prior', 'sold_after'];
+const MI_WINDOW = '24m';
+const SUB100K = 100000;
+
+function windowCutoffs() {
+  const now = new Date();
+  const from = new Date(now);
+  from.setUTCMonth(from.getUTCMonth() - 24);
+  return { from: from.toISOString().slice(0, 10), to: now.toISOString().slice(0, 10) };
+}
+
+function chunkBatches(env, stmts, size = 90) {
+  const batches = [];
+  for (let i = 0; i < stmts.length; i += size) batches.push(stmts.slice(i, i + size));
+  return batches;
+}
+
+// Free-plan subrequest budget shapes this: 3 GROUP BY queries + 1 bulk
+// confirmed-price fetch + 1 repeat-lot query cover every area, then
+// ~90-statement batches write metrics and scores (~35 subrequests total).
+export async function runAggregation(env) {
+  const { from, to } = windowCutoffs();
+  const now = nowIso();
+  const confirmedIn = CONFIRMED_STATUSES.map(s => `'${s}'`).join(',');
+  const unconfirmedIn = UNCONFIRMED_SOLD_STATUSES.map(s => `'${s}'`).join(',');
+
+  const groupSql = key => `
+    SELECT ${key} area_id,
+      COUNT(*) lots_total,
+      SUM(CASE WHEN excluded = 0 THEN 1 ELSE 0 END) lots_eligible,
+      SUM(CASE WHEN excluded = 0 AND result_status IN (${confirmedIn}) THEN 1 ELSE 0 END) sold_confirmed,
+      SUM(CASE WHEN excluded = 0 AND result_status IN (${unconfirmedIn}) THEN 1 ELSE 0 END) sold_unconfirmed,
+      SUM(CASE WHEN excluded = 0 AND price_confirmed = 1 AND sold_price <= ${SUB100K} THEN 1 ELSE 0 END) sub100k_confirmed,
+      SUM(CASE WHEN excluded = 0 AND result_status IN ('withdrawn','postponed') THEN 1 ELSE 0 END) not_offered,
+      SUM(CASE WHEN excluded = 0 AND result_status IN ('no_bids','unsold','last_bid') THEN 1 ELSE 0 END) failed_to_sell
+    FROM mi_lots
+    WHERE auction_end_at >= ? AND auction_end_at <= ? AND ${key} IS NOT NULL
+    GROUP BY ${key}`;
+
+  const [outcodeGroups, townGroups, branchGroups, confirmedRows, repeatRows, model] = await Promise.all([
+    env.CRM_DB.prepare(groupSql('outcode')).bind(from, to + 'T23:59').all(),
+    env.CRM_DB.prepare(groupSql('town')).bind(from, to + 'T23:59').all(),
+    env.CRM_DB.prepare(groupSql('branch_id')).bind(from, to + 'T23:59').all(),
+    env.CRM_DB.prepare(
+      `SELECT outcode, town, branch_id, sold_price, guide_min, substr(auction_end_at, 1, 7) month
+       FROM mi_lots
+       WHERE excluded = 0 AND price_confirmed = 1 AND auction_end_at >= ? AND auction_end_at <= ?`
+    ).bind(from, to + 'T23:59').all(),
+    env.CRM_DB.prepare(
+      `SELECT l.outcode, l.town, l.branch_id, COUNT(*) n FROM (
+         SELECT lot_id FROM mi_lot_results GROUP BY lot_id HAVING COUNT(DISTINCT auction_id) > 1
+       ) r JOIN mi_lots l ON l.id = r.lot_id
+       GROUP BY l.outcode, l.town, l.branch_id`
+    ).all(),
+    env.CRM_DB.prepare('SELECT * FROM mi_scoring_models WHERE is_default = 1 LIMIT 1').first(),
+  ]);
+  const weights = JSON.parse(model?.weights || '{}');
+
+  // Per-area detail from the bulk confirmed-price rows
+  const detailByArea = { outcode: new Map(), town: new Map(), branch: new Map() };
+  const areaKeyOf = { outcode: r => r.outcode, town: r => r.town, branch: r => r.branch_id };
+  for (const row of confirmedRows.results) {
+    for (const [type, keyFn] of Object.entries(areaKeyOf)) {
+      const key = keyFn(row);
+      if (!key) continue;
+      let d = detailByArea[type].get(key);
+      if (!d) detailByArea[type].set(key, d = { prices: [], guideRatios: [], months: {}, sub100kMonths: new Set() });
+      d.prices.push(row.sold_price);
+      if (row.guide_min > 0) d.guideRatios.push(row.sold_price / row.guide_min);
+      d.months[row.month] = (d.months[row.month] || 0) + 1;
+      if (row.sold_price <= SUB100K) d.sub100kMonths.add(row.month);
+    }
+  }
+  const repeatByArea = { outcode: new Map(), town: new Map(), branch: new Map() };
+  for (const r of repeatRows.results) {
+    if (r.outcode) repeatByArea.outcode.set(r.outcode, (repeatByArea.outcode.get(r.outcode) || 0) + r.n);
+    if (r.town) repeatByArea.town.set(r.town, (repeatByArea.town.get(r.town) || 0) + r.n);
+    repeatByArea.branch.set(r.branch_id, (repeatByArea.branch.get(r.branch_id) || 0) + r.n);
+  }
+
+  // National baselines for shrinkage
+  const natGroups = branchGroups.results;
+  const natEligible = natGroups.reduce((s, g) => s + g.lots_eligible, 0);
+  const natConfirmed = natGroups.reduce((s, g) => s + g.sold_confirmed, 0);
+  const natUnconfirmed = natGroups.reduce((s, g) => s + g.sold_unconfirmed, 0);
+  const natSub100k = natGroups.reduce((s, g) => s + g.sub100k_confirmed, 0);
+  const natNotOffered = natGroups.reduce((s, g) => s + g.not_offered, 0);
+  const natOffered = natEligible - natNotOffered;
+  const national = {
+    sellThrough: natOffered > 0 ? (natConfirmed + natUnconfirmed) / natOffered : 0,
+    pctUnderBudget: natConfirmed > 0 ? natSub100k / natConfirmed : 0,
+  };
+
+  const metricStmts = [];
+  const scoreStmts = [];
+  const groupsByType = { outcode: outcodeGroups.results, town: townGroups.results, branch: branchGroups.results };
+  const summary = { areas: 0, scored: 0 };
+
+  for (const [type, groups] of Object.entries(groupsByType)) {
+    for (const g of groups) {
+      const d = detailByArea[type].get(g.area_id) || { prices: [], guideRatios: [], months: {}, sub100kMonths: new Set() };
+      const prices = d.prices.slice().sort((a, b) => a - b);
+      const offered = g.lots_eligible - g.not_offered;
+      const sellThrough = offered > 0 ? (g.sold_confirmed + g.sold_unconfirmed) / offered : null;
+      const guideRatio = d.guideRatios.length >= 3
+        ? d.guideRatios.reduce((s, v) => s + v, 0) / d.guideRatios.length : null;
+      const n = g.sold_confirmed;
+      const detail = {
+        statusCounts: { failedToSell: g.failed_to_sell, notOffered: g.not_offered },
+        monthlyConfirmed: d.months,
+        activeSub100kMonths: d.sub100kMonths.size,
+        repeatLots: repeatByArea[type].get(g.area_id) || 0,
+      };
+      metricStmts.push(env.CRM_DB.prepare(
+        `INSERT INTO mi_area_metrics (area_type, area_id, window, lots_total, lots_eligible, sold_confirmed,
+           sold_unconfirmed, sub100k_confirmed, sell_through_pct, price_median, price_p25, price_p75,
+           guide_to_sold_ratio, sample_size, detail, computed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(area_type, area_id, window) DO UPDATE SET
+           lots_total=excluded.lots_total, lots_eligible=excluded.lots_eligible,
+           sold_confirmed=excluded.sold_confirmed, sold_unconfirmed=excluded.sold_unconfirmed,
+           sub100k_confirmed=excluded.sub100k_confirmed, sell_through_pct=excluded.sell_through_pct,
+           price_median=excluded.price_median, price_p25=excluded.price_p25, price_p75=excluded.price_p75,
+           guide_to_sold_ratio=excluded.guide_to_sold_ratio, sample_size=excluded.sample_size,
+           detail=excluded.detail, computed_at=excluded.computed_at`
+      ).bind(
+        type, g.area_id, MI_WINDOW, g.lots_total, g.lots_eligible, g.sold_confirmed,
+        g.sold_unconfirmed, g.sub100k_confirmed,
+        sellThrough != null ? +(sellThrough * 100).toFixed(1) : null,
+        prices.length >= 3 ? quantile(prices, 0.5) : null,
+        prices.length >= 3 ? quantile(prices, 0.25) : null,
+        prices.length >= 3 ? quantile(prices, 0.75) : null,
+        guideRatio != null ? +guideRatio.toFixed(3) : null,
+        n, JSON.stringify(detail), now
+      ));
+      summary.areas++;
+
+      // Pass A score components (0-100 each)
+      const components = {
+        sub100kSupply: 100 * g.sub100k_confirmed / (g.sub100k_confirmed + 20),
+        demandLiquidity: sellThrough != null
+          ? shrink(sellThrough, n, national.sellThrough) * 100 : null,
+        risk: shrinkConfidence(n) * 100,
+        flipSpread: null,
+        compQuality: null,
+        growthResilience: null,
+      };
+      const { score, values, missing } = computeAreaScore(components, weights);
+      if (score == null) continue;
+      scoreStmts.push(env.CRM_DB.prepare(
+        `INSERT INTO mi_area_scores (area_type, area_id, model_id, score, confidence, components, computed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(area_type, area_id, model_id) DO UPDATE SET
+           score=excluded.score, confidence=excluded.confidence,
+           components=excluded.components, computed_at=excluded.computed_at`
+      ).bind(
+        type, g.area_id, model?.id || 'default-v1', score,
+        +shrinkConfidence(n).toFixed(3),
+        JSON.stringify({
+          values, missing,
+          shrinkage: { k: SHRINKAGE_K, n, nationalSellThrough: +(national.sellThrough * 100).toFixed(1) },
+          pctUnderBudget: n > 0 ? +((g.sub100k_confirmed / n) * 100).toFixed(1) : null,
+        }), now
+      ));
+      summary.scored++;
+    }
+  }
+
+  for (const batch of chunkBatches(env, metricStmts)) await env.CRM_DB.batch(batch);
+  for (const batch of chunkBatches(env, scoreStmts)) await env.CRM_DB.batch(batch);
+  return { ...summary, window: MI_WINDOW, from, to, national: { sellThroughPct: +(national.sellThrough * 100).toFixed(1), pctUnderBudget: +(national.pctUnderBudget * 100).toFixed(1) }, modelId: model?.id };
+}
+
+// ------------------------------------------------------------
 // Storage projection (Phase 2 go/no-go gate before national backfill)
 // ------------------------------------------------------------
 
@@ -659,6 +881,41 @@ export async function handleMarketIntelRoutes(request, env, url) {
 
   if (path === '/api/market/storage-estimate' && method === 'GET') {
     return json({ success: true, ...(await storageEstimate(env)) });
+  }
+
+  if (path === '/api/market/aggregate' && method === 'POST') {
+    return json({ success: true, ...(await runAggregation(env)) });
+  }
+
+  if (path === '/api/market/areas' && method === 'GET') {
+    const type = url.searchParams.get('type') || 'outcode';
+    if (!['outcode', 'town', 'branch'].includes(type)) {
+      return json({ success: false, message: 'type must be outcode|town|branch' }, 400);
+    }
+    const minConfirmed = parseInt(url.searchParams.get('minConfirmed') || '0', 10);
+    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 500);
+    const offset = Math.max(parseInt(url.searchParams.get('offset') || '0', 10), 0);
+    const prefix = url.searchParams.get('prefix');
+    const sort = url.searchParams.get('sort') === 'sub100k' ? 'm.sub100k_confirmed' : 's.score';
+    let where = 'm.area_type = ?1 AND m.window = ?2 AND m.sold_confirmed >= ?3';
+    const binds = [type, '24m', minConfirmed];
+    if (prefix) {
+      where += ` AND m.area_id LIKE ?${binds.length + 1}`;
+      binds.push(prefix.toUpperCase() + '%');
+    }
+    const { results } = await env.CRM_DB.prepare(
+      `SELECT m.area_id, m.lots_total, m.lots_eligible, m.sold_confirmed, m.sold_unconfirmed,
+              m.sub100k_confirmed, m.sell_through_pct, m.price_median, m.price_p25, m.price_p75,
+              m.guide_to_sold_ratio, m.detail, m.computed_at,
+              s.score, s.confidence, s.components
+       FROM mi_area_metrics m
+       LEFT JOIN mi_area_scores s ON s.area_type = m.area_type AND s.area_id = m.area_id
+         AND s.model_id = (SELECT id FROM mi_scoring_models WHERE is_default = 1 LIMIT 1)
+       WHERE ${where}
+       ORDER BY ${sort} DESC
+       LIMIT ${limit} OFFSET ${offset}`
+    ).bind(...binds).all();
+    return json({ success: true, type, window: '24m', count: results.length, areas: results });
   }
 
   if (path === '/api/market/jobs' && method === 'GET') {
