@@ -510,9 +510,9 @@ function extractPropertyDetails(html, pageUrl) {
   let auctionDate = '';
   const MONTHS = { january:'01',february:'02',march:'03',april:'04',may:'05',june:'06',july:'07',august:'08',september:'09',october:'10',november:'11',december:'12' };
   const d1 = clean.match(/(\d{1,2})(?:st|nd|rd|th)?\s+(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})/i);
-  const d2 = clean.match(/(\d{2})[\/-](\d{2})[\/-](\d{4})/);
+  const d2 = clean.match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
   if (d1) auctionDate = `${d1[3]}-${MONTHS[d1[2].toLowerCase()]}-${d1[1].padStart(2,'0')}`;
-  else if (d2) auctionDate = `${d2[3]}-${d2[2]}-${d2[1]}`;
+  else if (d2) auctionDate = `${d2[3]}-${d2[2].padStart(2,'0')}-${d2[1].padStart(2,'0')}`;
 
   // Auction time
   let auctionTime = '';
@@ -969,8 +969,8 @@ function extractAuctionDate(text) {
   if (m) return `${m[3]}-${MONTHS_MAP[m[2].toLowerCase()]}-${String(m[1]).padStart(2, '0')}`;
   m = t.match(/(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})/i);
   if (m) return `${m[3]}-${MONTHS_MAP[m[1].toLowerCase()]}-${String(m[2]).padStart(2, '0')}`;
-  m = t.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-  if (m) return `${m[3]}-${m[2]}-${m[1]}`;
+  m = t.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (m) return `${m[3]}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`;
   return null;
 }
 
@@ -1107,13 +1107,17 @@ async function enrichLotFromDetailPage(lot) {
   const res = await fetch(lot.lotUrl, { headers: { 'User-Agent': SCRAPER_UA, 'Accept': 'text/html' }, signal: AbortSignal.timeout(8000) });
   if (!res.ok) return lot;
   const html = await res.text();
-  let m = html.match(/closing on\s*(\d{2})\/(\d{2})\/(\d{4})/i);
-  if (!m) m = html.match(/Bidding Opens\s*(\d{2})\/(\d{2})\/(\d{4})/i);
-  if (m) lot.auctionDate = `${m[3]}-${m[2]}-${m[1]}`;
+  let m = html.match(/closing on\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i);
+  if (!m) m = html.match(/Bidding Opens\s*(\d{1,2})\/(\d{1,2})\/(\d{4})/i);
+  if (m) lot.auctionDate = `${m[3]}-${String(m[2]).padStart(2, '0')}-${String(m[1]).padStart(2, '0')}`;
   const stripped = stripHtml(html);
   if (!lot.auctionDate) {
     const d = extractAuctionDate(stripped.slice(0, 6000));
     if (d) lot.auctionDate = d;
+  }
+  if (!lot.auctionDate) {
+    const au = html.match(/\/auction\/(\d{4})\/(\d{1,2})\/(\d{1,2})/);
+    if (au) lot.auctionDate = `${au[1]}-${String(au[2]).padStart(2, '0')}-${String(au[3]).padStart(2, '0')}`;
   }
   if (lot.guidePrice == null) {
     const g = stripped.match(/Guide Price\*?\s*:?\s*£\s*([\d,]+)/i) || stripped.match(/£\s*([\d,]{4,})/);

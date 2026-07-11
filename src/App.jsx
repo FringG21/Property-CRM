@@ -1865,7 +1865,7 @@ export default function App({ user = {}, onLogout }) {
 
   const sendLotToPipeline = (lot) => {
     setProperties(prev => [...prev, {
-      id: Date.now(), address: lot.address, guidePrice: lot.guidePrice || 0, auctionDate: lot.auctionDate, auctionTime: '12:00', maxBid: 0, refurb: 0, bedrooms: lot.bedrooms || 0, propertyType: lot.propertyType || 'Unknown', sourcePlatform: lot.houseName || 'Auction', listingUrl: lot.lotUrl || '', isConsideration: false, isStrongBid: false, planningToBid: true, surveyorStatus: 'called', surveyorDate: '', checklist: { legalReviewed: false, financeApproved: false, costsPriced: false }, notesList: [], files: { mainReport: null, spriftReport: null, surveyFile: null, legalPack: null }, status: 'Sourced', hammerPrice: null, outcome: '',
+      id: Date.now(), address: lot.address, guidePrice: lot.guidePrice || 0, auctionDate: lot.auctionDate, auctionTime: '12:00', maxBid: 0, refurb: 0, bedrooms: lot.bedrooms || 0, propertyType: lot.propertyType || 'Unknown', sourcePlatform: lot.houseName || 'Auction', listingUrl: lot.lotUrl || reconstructLotUrl({ sourceLotId: lot.id, sourceOrigin: lot.origin }), isConsideration: false, isStrongBid: false, planningToBid: true, surveyorStatus: 'called', surveyorDate: '', checklist: { legalReviewed: false, financeApproved: false, costsPriced: false }, notesList: [], files: { mainReport: null, spriftReport: null, surveyFile: null, legalPack: null }, status: 'Sourced', hammerPrice: null, outcome: '',
       // provenance back to the triage lead this property came from
       sourceLotId: lot.id, sourceOrigin: lot.origin || 'scraped', dataSource: 'auction_triage',
       activityLog: [{ id: Date.now() + Math.random(), type: 'created', detail: `Promoted from auction triage (${lot.origin === 'manual' ? 'manual lead' : lot.houseName || 'scraped lot'})`, user: user.name || 'You', at: new Date().toISOString() }],
@@ -2255,6 +2255,12 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
     'Withdrawn':          'Lost',
   };
   const normaliseStatus = (s) => LEGACY_STATUS_MAP[s] || s || 'Sourced';
+  const reconstructLotUrl = (p) => {
+    if (!p || p.sourceOrigin === 'manual') return '';
+    const m = String(p.sourceLotId || '').match(/(\d+)$/);
+    return m ? `https://online.auctionhouse.co.uk/lot/redirect/${m[1]}` : '';
+  };
+  const lotLinkFor = (p) => p?.listingUrl || reconstructLotUrl(p);
   // Bid-outcome detail formerly carried by the Outbid/No Bid statuses now lives in
   // property.bidOutcome ({ result: 'won'|'outbid'|'no_bid'|'withdrawn' }); legacy
   // statuses are read as a fallback so old records keep their detail.
@@ -3432,6 +3438,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
             const actLog = currentViewProperty.activityLog || [];
             const AICONS = { created: '🆕', stage: '🔀', note: '📝', document: '📄', survey: '📋', intelligence: '🔍', bid: '🔨' };
             const propPostcode = currentViewProperty.postcode || extractPostcode(currentViewProperty.address || '') || extractPostcode(currentViewProperty.dealName || '');
+            const propLotLink = lotLinkFor(currentViewProperty);
             const intel = currentViewProperty.intelligence || {};
             const intelConflicts = currentViewProperty.intelligenceConflicts || [];
             const fmtAt = iso => { const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); };
@@ -3502,8 +3509,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       >
                         {intelligenceRunning ? '⏳' : '🔍'}
                       </button>
-                      {currentViewProperty.listingUrl && (
-                        <a href={currentViewProperty.listingUrl} target="_blank" rel="noreferrer" title="Open listing" style={{ display: 'flex', alignItems: 'center', fontSize: '11px', color: '#38bdf8', padding: '4px 8px', border: '1px solid #0c4a6e', borderRadius: '6px', background: '#0c2a3d', textDecoration: 'none', whiteSpace: 'nowrap' }}>
+                      {propLotLink && (
+                        <a href={propLotLink} target="_blank" rel="noreferrer" title="Open listing" style={{ display: 'flex', alignItems: 'center', fontSize: '11px', color: '#38bdf8', padding: '4px 8px', border: '1px solid #0c4a6e', borderRadius: '6px', background: '#0c2a3d', textDecoration: 'none', whiteSpace: 'nowrap' }}>
                           <ExternalLink size={11} />
                         </a>
                       )}
@@ -3551,8 +3558,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       >
                         {intelligenceRunning ? '⏳ Running…' : intel.lastRun ? '🔍 Refresh Intel' : '🔍 Run Intelligence'}
                       </button>
-                      {currentViewProperty.listingUrl && (
-                        <a href={currentViewProperty.listingUrl} target="_blank" rel="noreferrer" style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: '#38bdf8', padding: '5px 10px', border: '1px solid #0c4a6e', borderRadius: '6px', background: '#0c2a3d', textDecoration: 'none', whiteSpace: 'nowrap' }}>
+                      {propLotLink && (
+                        <a href={propLotLink} target="_blank" rel="noreferrer" style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: '#38bdf8', padding: '5px 10px', border: '1px solid #0c4a6e', borderRadius: '6px', background: '#0c2a3d', textDecoration: 'none', whiteSpace: 'nowrap' }}>
                           <ExternalLink size={11} /> Listing
                         </a>
                       )}
@@ -3935,8 +3942,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       <input type="checkbox" checked={currentViewProperty.planningToBid || false} onChange={e => updateFieldInView('planningToBid', e.target.checked)} style={{ width: '14px', height: '14px', cursor: 'pointer' }} />
                       Planning to bid
                     </label>
-                    {currentViewProperty.listingUrl && (
-                      <a href={currentViewProperty.listingUrl} target="_blank" rel="noreferrer" style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#64748b', marginTop: '8px', textDecoration: 'none' }}>
+                    {propLotLink && (
+                      <a href={propLotLink} target="_blank" rel="noreferrer" style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '11px', color: '#64748b', marginTop: '8px', textDecoration: 'none' }}>
                         <ExternalLink size={11} /> View listing
                       </a>
                     )}
@@ -3997,16 +4004,21 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     }));
                     lrItems.forEach(item => upsert([item.address, item.town].filter(Boolean).join(', '), 'Land Reg', 'lr', {
                       address: [item.address, item.town].filter(Boolean).join(', '), price: item.price,
-                      date: item.date ? String(item.date).slice(0, 7) : '', propertyType: item.propertyType, newBuild: item.newBuild,
+                      date: item.date || '', propertyType: item.propertyType, newBuild: item.newBuild,
                       epcRating: item.epcRating, floorArea: item.floorArea, habitableRooms: item.habitableRooms,
                     }));
                     otherComps.forEach(c => {
                       const isReport = /report/i.test(c.source || ''); const isLr = /land\s*reg/i.test(c.source || '');
                       upsert(c.address, isReport ? 'Report' : isLr ? 'Land Reg' : 'Manual', isReport ? 'report' : isLr ? 'lr' : 'manual', {
                         address: c.address, price: c.soldPrice ?? c.price,
-                        date: (c.soldDate || c.date) ? String(c.soldDate || c.date).slice(0, 7) : '', bedrooms: c.bedrooms, notes: c.notes,
+                        date: (c.soldDate || c.date) || '', bedrooms: c.bedrooms, notes: c.notes,
                       });
                     });
+                    const fmtCompDate = (d) => {
+                      if (!d) return '—';
+                      const dt = new Date(d);
+                      return isNaN(dt) ? String(d) : dt.toLocaleDateString('en-GB');
+                    };
                     let rows = order.map(k => merged[k]);
                     if (compSort === 'asc') rows = rows.sort((a, b) => (a.price || 0) - (b.price || 0));
                     else if (compSort === 'desc') rows = rows.sort((a, b) => (b.price || 0) - (a.price || 0));
@@ -4033,8 +4045,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                           </div>
                         ) : (
                           <div style={{ border: '0.5px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden', background: '#fff' }}>
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '8px', padding: '6px 12px', background: '#f8fafc', borderBottom: '0.5px solid #e2e8f0', fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em' }}>
-                              <span>Address</span><span>Source</span><span style={{ textAlign: 'right' }}>Sold</span>
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto auto', gap: '8px', padding: '6px 12px', background: '#f8fafc', borderBottom: '0.5px solid #e2e8f0', fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em' }}>
+                              <span>Address</span><span>Source</span><span>Date</span><span style={{ textAlign: 'right' }}>Sold</span>
                             </div>
                             {rows.map((r, i) => {
                               const epcBg = EPC_COL[r.epcRating] || null;
@@ -4052,7 +4064,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                 </span>
                               );
                               return (
-                                <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto', gap: '8px', padding: '7px 12px', borderBottom: '0.5px solid #f1f5f9', fontSize: '11px', alignItems: 'center' }}>
+                                <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto auto', gap: '8px', padding: '7px 12px', borderBottom: '0.5px solid #f1f5f9', fontSize: '11px', alignItems: 'center' }}>
                                   <div style={{ minWidth: 0 }}>
                                     <div style={{ color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.address || '—'}</div>
                                     {metaLine([
@@ -4067,10 +4079,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                     ])}
                                   </div>
                                   <div style={{ display: 'flex', gap: '4px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: '120px' }}>{r.tags.map(t => tag(t.label, t.kind))}</div>
-                                  <div style={{ textAlign: 'right' }}>
-                                    <div style={{ color: '#0f172a', fontWeight: '600' }}>{r.price ? `£${Number(r.price).toLocaleString()}` : '—'}</div>
-                                    <div style={{ color: '#94a3b8', fontSize: '10px' }}>{r.date || ''}</div>
-                                  </div>
+                                  <div style={{ color: '#64748b', whiteSpace: 'nowrap' }}>{fmtCompDate(r.date)}</div>
+                                  <div style={{ textAlign: 'right', color: '#0f172a', fontWeight: '600' }}>{r.price ? `£${Number(r.price).toLocaleString()}` : '—'}</div>
                                 </div>
                               );
                             })}
@@ -4288,65 +4298,6 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                 </div>
                               );
                             })}
-                          </div>
-                        </div>
-
-                        {/* Row 3 — Notes (compact composer + pinned/recent notes) */}
-                        <div style={{ padding: '11px 16px' }}>
-                          <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8', marginBottom: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span>Notes</span>
-                            <span style={{ fontWeight: '400', textTransform: 'none', letterSpacing: 0 }}>{currentViewProperty.notesList?.length || 0} notes</span>
-                          </div>
-                          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '12px' }}>
-                            {/* Composer */}
-                            <form onSubmit={handleAddPropertyNote} style={{ border: '0.5px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden', background: '#fff' }}>
-                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 10px', borderBottom: '0.5px solid #f1f5f9', background: '#f8fafc' }}>
-                                <div style={{ width: '7px', height: '7px', borderRadius: '50%', background: NOTE_TYPE_COLORS[noteType] || '#94a3b8', flexShrink: 0 }} />
-                                <select value={noteType} onChange={e => setNoteType(e.target.value)} style={{ padding: isMobile ? '8px 10px' : '3px 6px', border: '1px solid #e2e8f0', borderRadius: '4px', fontSize: '10px', fontFamily: 'inherit', background: '#fff', color: '#0f172a', outline: 'none' }}>
-                                  <option value="Review">Review</option>
-                                  <option value="Survey update">Survey update</option>
-                                  <option value="Legal">Legal</option>
-                                  <option value="Finance">Finance</option>
-                                  <option value="Task">Task / action</option>
-                                  <option value="Flag">Flag / risk</option>
-                                </select>
-                                <select value={noteAuthor} onChange={e => setNoteAuthor(e.target.value)} style={{ padding: '3px 6px', border: '1px solid #e2e8f0', borderRadius: '4px', fontSize: '10px', fontFamily: 'inherit', background: '#fff', color: '#64748b', outline: 'none' }}>
-                                  <option value="Ashley">Ashley</option>
-                                  <option value="Femi">Femi</option>
-                                </select>
-                              </div>
-                              <textarea
-                                value={noteText}
-                                onChange={e => setNoteText(e.target.value)}
-                                placeholder={NOTE_TYPE_PLACEHOLDERS[noteType] || 'Add a note…'}
-                                style={{ width: '100%', minHeight: '50px', padding: '7px 10px', border: 'none', fontSize: '11px', fontFamily: 'inherit', resize: 'none', color: '#0f172a', outline: 'none', lineHeight: '1.5', boxSizing: 'border-box' }}
-                              />
-                              <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '5px 10px', borderTop: '0.5px solid #f1f5f9', background: '#f8fafc' }}>
-                                <button type="submit" style={{ padding: '4px 12px', background: '#059669', color: '#fff', border: 'none', borderRadius: '5px', fontSize: '10px', fontWeight: '500', cursor: 'pointer', fontFamily: 'inherit' }}>Post note</button>
-                              </div>
-                            </form>
-                            {/* Recent notes */}
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '5px', maxHeight: '130px', overflowY: 'auto' }}>
-                              {[...(currentViewProperty.notesList || [])].reverse().slice(0, 4).map(n => {
-                                const typeColor = NOTE_TYPE_COLORS[n.type] || '#94a3b8';
-                                const typeBg    = NOTE_TYPE_BG[n.type] || '#f8fafc';
-                                const typeText  = NOTE_TYPE_TEXT[n.type] || '#64748b';
-                                return (
-                                  <div key={n.id} style={{ borderRadius: '6px', border: '0.5px solid #e2e8f0', borderLeft: `2px solid ${typeColor}`, background: '#fff', padding: '6px 9px', opacity: n.done ? 0.65 : 1 }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '3px' }}>
-                                      <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '8px', background: typeBg, color: typeText, fontWeight: '500' }}>{n.type}</span>
-                                      <span style={{ fontSize: '10px', color: '#94a3b8' }}>{n.author}</span>
-                                      {n.bookmarked && <Bookmark size={9} fill="#0284c7" color="#0284c7" />}
-                                      <span style={{ fontSize: '10px', color: '#94a3b8', marginLeft: 'auto' }}>{n.date}</span>
-                                    </div>
-                                    <p style={{ margin: 0, fontSize: '11px', lineHeight: '1.4', color: n.done ? '#94a3b8' : '#1f2937', textDecoration: n.done ? 'line-through' : 'none', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{n.text}</p>
-                                  </div>
-                                );
-                              })}
-                              {(!currentViewProperty.notesList || currentViewProperty.notesList.length === 0) && (
-                                <div style={{ fontSize: '11px', color: '#94a3b8', padding: '8px 0' }}>No notes yet — use the form to add one.</div>
-                              )}
-                            </div>
                           </div>
                         </div>
 
@@ -6428,7 +6379,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                               )}
                             </div>
                             {!isCollapsed && (
-                              <>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', overflowY: 'auto', maxHeight: isMobile ? 'calc(100vh - 340px)' : 'calc(100vh - 300px)' }}>
                                 {stageProp.length === 0 && <div style={{ fontSize: '10px', color: '#cbd5e1', textAlign: 'center', padding: '14px 0' }}>Empty</div>}
                                 {stageProp.map(p => {
                                   const countdown = getCountdown(p.auctionDate);
@@ -6439,27 +6390,27 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                       onDragStart={e => { e.dataTransfer.setData('propId', p.id); setDraggedPropId(p.id); }}
                                       onDragEnd={() => setDraggedPropId(null)}
                                       onClick={() => { if (bulkMode) { setBulkSelectedIds(prev => prev.includes(p.id) ? prev.filter(id => id !== p.id) : [...prev, p.id]); } else { setCurrentViewProperty(p); } }}
-                                      style={{ background: bulkMode && bulkSelectedIds.includes(p.id) ? '#F5F3FF' : draggedPropId === p.id ? '#f0fdf4' : '#ffffff', border: bulkMode && bulkSelectedIds.includes(p.id) ? '1.5px solid #7C3AED' : `0.5px solid ${cols.border}`, borderLeft: bulkMode && bulkSelectedIds.includes(p.id) ? '3px solid #7C3AED' : p.isStrongBid ? '3px solid #059669' : `0.5px solid ${cols.border}`, borderRadius: '7px', padding: '10px', cursor: bulkMode ? 'pointer' : 'grab', opacity: draggedPropId === p.id ? 0.5 : 1, position: 'relative' }}>
+                                      style={{ background: bulkMode && bulkSelectedIds.includes(p.id) ? '#F5F3FF' : draggedPropId === p.id ? '#f0fdf4' : '#ffffff', border: bulkMode && bulkSelectedIds.includes(p.id) ? '1.5px solid #7C3AED' : `0.5px solid ${cols.border}`, borderLeft: bulkMode && bulkSelectedIds.includes(p.id) ? '3px solid #7C3AED' : p.isStrongBid ? '3px solid #059669' : `0.5px solid ${cols.border}`, borderRadius: '7px', padding: '7px 9px', cursor: bulkMode ? 'pointer' : 'grab', opacity: draggedPropId === p.id ? 0.5 : 1, position: 'relative' }}>
                                       {bulkMode && <div style={{ position: 'absolute', top: '8px', right: '8px', width: '16px', height: '16px', borderRadius: '4px', border: `2px solid ${bulkSelectedIds.includes(p.id) ? '#7C3AED' : '#cbd5e1'}`, background: bulkSelectedIds.includes(p.id) ? '#7C3AED' : '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{bulkSelectedIds.includes(p.id) && <span style={{ color: '#fff', fontSize: '10px', fontWeight: '700', lineHeight: 1 }}>✓</span>}</div>}
-                                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '2px', paddingRight: bulkMode ? '22px' : '0' }}>
+                                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1px', paddingRight: bulkMode ? '22px' : '0' }}>
                                         <div style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a', flex: 1, marginRight: '4px' }}>{p.dealName || p.address.split(',')[0]}</div>
                                         {!bulkMode && <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '8px', backgroundColor: getStatusStyle(stage).bg, color: getStatusStyle(stage).color, fontWeight: '600', flexShrink: 0, whiteSpace: 'nowrap' }}>{stage}</span>}
                                       </div>
-                                      <div style={{ fontSize: '10px', color: '#64748b', marginBottom: '5px' }}>{p.sourcePlatform}</div>
-                                      <div style={{ fontSize: '12px', fontWeight: '700', color: '#059669', marginBottom: '4px' }}>£{(p.guidePrice || 0).toLocaleString()}</div>
+                                      <div style={{ fontSize: '10px', color: '#64748b', marginBottom: '3px' }}>{p.sourcePlatform}</div>
+                                      <div style={{ fontSize: '12px', fontWeight: '700', color: '#059669', marginBottom: '2px' }}>£{(p.guidePrice || 0).toLocaleString()}</div>
                                       {p.bedrooms > 0 && <div style={{ fontSize: '10px', color: '#94a3b8' }}>{p.bedrooms} bed · {p.auctionDate}</div>}
                                       {!p.bedrooms && p.auctionDate && <div style={{ fontSize: '10px', color: '#94a3b8' }}>{p.auctionDate}</div>}
                                       {countdown && <div style={{ marginTop: '5px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                         {p.isStrongBid && <span style={{ fontSize: '10px', padding: '1px 5px', borderRadius: '4px', background: '#dcfce7', color: '#166534' }}>Strong bid</span>}
                                         <span style={{ marginLeft: 'auto', fontSize: '10px', padding: '1px 6px', borderRadius: '8px', background: urgent ? '#fef2f2' : '#f1f5f9', color: urgent ? '#dc2626' : '#475569', fontWeight: '600' }}>{countdown}</span>
                                       </div>}
-                                      <div style={{ marginTop: '4px', display: 'flex', justifyContent: 'flex-end' }}>
+                                      <div style={{ marginTop: '2px', display: 'flex', justifyContent: 'flex-end' }}>
                                         <span onClick={e => { e.stopPropagation(); handleDeleteProperty(p.id); }} style={{ cursor: 'pointer' }}><Trash2 size={11} style={{ color: '#fca5a5' }} /></span>
                                       </div>
                                     </div>
                                   );
                                 })}
-                              </>
+                              </div>
                             )}
                           </div>
                         );
