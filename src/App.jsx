@@ -7203,7 +7203,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
               )}
 
               {/* ==================== TAB: MARKET INTEL ==================== */}
-              {activeTab === 'marketintel' && <MarketIntel isMobile={isMobile} />}
+              {activeTab === 'marketintel' && <MarketIntel isMobile={isMobile} isTablet={isTablet} />}
 
               {/* ==================== TAB: AUCTION INTEL (Option A) ==================== */}
               {activeTab === 'auctionintel' && (() => {
