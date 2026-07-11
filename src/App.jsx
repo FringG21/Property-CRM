@@ -2392,6 +2392,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
   const [taskSidebarPriority, setTaskSidebarPriority] = useState('all');
   const [taskSidebarAssignee, setTaskSidebarAssignee] = useState('all');
   const [taskSidebarProperty, setTaskSidebarProperty] = useState('all');
+  const [taskSidebarCollapsed, setTaskSidebarCollapsed] = useState({});
   const [drawerNewComment, setDrawerNewComment] = useState('');
   const [drawerNewSubtask, setDrawerNewSubtask] = useState('');
   const [showTaskApplyModal, setShowTaskApplyModal] = useState(false);
@@ -5995,11 +5996,11 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 try { const h = JSON.parse(localStorage.getItem('crm_margin_history') || '{}'); const d = new Date(); d.setMonth(d.getMonth() - 1); lastMonthMargin = h[d.toISOString().slice(0, 7)] ?? null; } catch { /* ignore */ }
                 const weekAgoMs = Date.now() - 7 * 86400000;
                 const newThisWeek = properties.filter(p => typeof p.id === 'number' && p.id > weekAgoMs).length;
-                const overdueTasks = tasks.filter(t => t.status === 'open' && t.dueDate && t.dueDate < todayStr);
-                const todayTasks = tasks.filter(t => t.status === 'open' && t.dueDate === todayStr);
+                const overdueTasks = tasks.filter(t => t.status !== 'done' && t.dueDate && t.dueDate < todayStr);
+                const todayTasks = tasks.filter(t => t.status !== 'done' && t.dueDate === todayStr);
                 const strongSoon = strongBids.filter(p => { if (!p.auctionDate) return false; const d = Math.ceil((new Date(p.auctionDate) - today) / 86400000); return d >= 0 && d <= 7; }).length;
                 const auctionsThisWeek = properties.filter(p => { if (!p.auctionDate) return false; const d = Math.ceil((new Date(p.auctionDate) - today) / 86400000); return d >= 0 && d <= 14; }).sort((a, b) => new Date(a.auctionDate) - new Date(b.auctionDate));
-                const openTasks = tasks.filter(t => t.status === 'open' && t.dueDate).sort((a, b) => a.dueDate.localeCompare(b.dueDate)).slice(0, 6);
+                const openTasks = tasks.filter(t => t.status !== 'done' && t.dueDate).sort((a, b) => a.dueDate.localeCompare(b.dueDate)).slice(0, 6);
                 const relDate = (ds) => { const d = new Date(ds); const diff = Math.round((new Date(ds) - new Date(todayStr)) / 86400000); if (diff < 0) return { txt: `${Math.abs(diff)} day${Math.abs(diff) !== 1 ? 's' : ''} ago`, color: '#dc2626', dot: '#dc2626' }; if (diff === 0) return { txt: 'Today', color: '#92400e', dot: '#d97706' }; if (diff === 1) return { txt: 'Tomorrow', color: '#64748b', dot: '#d97706' }; return { txt: d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }), color: '#64748b', dot: '#059669' }; };
                 const propName = (pid) => { const p = properties.find(x => x.id === pid); return p ? (p.dealName || p.address?.split(',')[0] || '') : ''; };
                 const recentActivity = properties
@@ -9273,6 +9274,13 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                   </button>
                 );
 
+                const sidebarSection = (key, label, topMargin = '12px') => (
+                  <button onClick={() => setTaskSidebarCollapsed(c => ({ ...c, [key]: !c[key] }))} style={{ display: 'flex', alignItems: 'center', gap: '3px', width: '100%', border: 'none', background: 'none', padding: 0, cursor: 'pointer', fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '6px', marginTop: topMargin }}>
+                    <ChevronRight size={11} style={{ flexShrink: 0, transform: taskSidebarCollapsed[key] ? 'none' : 'rotate(90deg)', transition: 'transform .15s' }} />
+                    {label}
+                  </button>
+                );
+
                 return (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
                     {/* KPI strip */}
@@ -9329,36 +9337,46 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                         {/* Filter sidebar — desktop only */}
                         {!isMobile && (
                           <div style={{ width: '184px', flexShrink: 0, borderRight: '1px solid #e2e8f0', paddingRight: '12px', marginRight: '14px' }}>
-                            <div style={{ fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '6px', marginTop: '4px' }}>Smart views</div>
-                            {sidebarBtn(taskSidebarStatus === 'active', () => setTaskSidebarStatus('active'), <><AlertTriangle size={12} />Active tasks<span style={{ marginLeft: 'auto', fontSize: '10px', color: '#94a3b8' }}>{allTasksNorm.filter(t => t._ns !== 'done').length}</span></>)}
-                            {sidebarBtn(taskSidebarAssignee === (user.name || 'Ashley') && taskSidebarStatus === 'active', () => { setTaskSidebarAssignee(user.name || 'Ashley'); setTaskSidebarStatus('active'); }, <><User size={12} />My tasks</>)}
-                            {sidebarBtn(false, () => { setTaskSidebarStatus('all'); setTaskSidebarAssignee('all'); setTaskSidebarPriority('all'); setTaskSidebarProperty('all'); }, <><ListChecks size={12} />All tasks<span style={{ marginLeft: 'auto', fontSize: '10px', color: '#94a3b8' }}>{tasks.length}</span></>)}
+                            {sidebarSection('smart', 'Smart views', '4px')}
+                            {!taskSidebarCollapsed.smart && <>
+                              {sidebarBtn(taskSidebarStatus === 'active', () => setTaskSidebarStatus('active'), <><AlertTriangle size={12} />Active tasks<span style={{ marginLeft: 'auto', fontSize: '10px', color: '#94a3b8' }}>{allTasksNorm.filter(t => t._ns !== 'done').length}</span></>)}
+                              {sidebarBtn(taskSidebarAssignee === (user.name || 'Ashley') && taskSidebarStatus === 'active', () => { setTaskSidebarAssignee(user.name || 'Ashley'); setTaskSidebarStatus('active'); }, <><User size={12} />My tasks</>)}
+                              {sidebarBtn(false, () => { setTaskSidebarStatus('all'); setTaskSidebarAssignee('all'); setTaskSidebarPriority('all'); setTaskSidebarProperty('all'); }, <><ListChecks size={12} />All tasks<span style={{ marginLeft: 'auto', fontSize: '10px', color: '#94a3b8' }}>{tasks.length}</span></>)}
+                            </>}
 
-                            <div style={{ fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '6px', marginTop: '12px' }}>Status</div>
-                            {sidebarBtn(taskSidebarStatus === 'all' && taskSidebarPriority === 'all' && taskSidebarAssignee === 'all', () => setTaskSidebarStatus('all'), <>All statuses</>)}
-                            {TASK_STATUSES.map(s => (
-                              sidebarBtn(taskSidebarStatus === s.value, () => setTaskSidebarStatus(s.value),
-                                <><span style={{ width: 7, height: 7, borderRadius: '50%', background: s.color, flexShrink: 0 }}></span>{s.label}<span style={{ marginLeft: 'auto', fontSize: '10px', color: '#94a3b8' }}>{allTasksNorm.filter(t => t._ns === s.value).length}</span></>
-                              )
-                            ))}
+                            {sidebarSection('status', 'Status')}
+                            {!taskSidebarCollapsed.status && <>
+                              {sidebarBtn(taskSidebarStatus === 'all' && taskSidebarPriority === 'all' && taskSidebarAssignee === 'all', () => setTaskSidebarStatus('all'), <>All statuses</>)}
+                              {TASK_STATUSES.map(s => (
+                                sidebarBtn(taskSidebarStatus === s.value, () => setTaskSidebarStatus(s.value),
+                                  <><span style={{ width: 7, height: 7, borderRadius: '50%', background: s.color, flexShrink: 0 }}></span>{s.label}<span style={{ marginLeft: 'auto', fontSize: '10px', color: '#94a3b8' }}>{allTasksNorm.filter(t => t._ns === s.value).length}</span></>
+                                )
+                              ))}
+                            </>}
 
-                            <div style={{ fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '6px', marginTop: '12px' }}>Priority</div>
-                            {[['all', 'All'], ['High', 'High'], ['Medium', 'Medium'], ['Low', 'Low']].map(([k, l]) => (
-                              sidebarBtn(taskSidebarPriority === k, () => setTaskSidebarPriority(k), <>{l}</>)
-                            ))}
+                            {sidebarSection('priority', 'Priority')}
+                            {!taskSidebarCollapsed.priority && <>
+                              {[['all', 'All'], ['High', 'High'], ['Medium', 'Medium'], ['Low', 'Low']].map(([k, l]) => (
+                                sidebarBtn(taskSidebarPriority === k, () => setTaskSidebarPriority(k), <>{l}</>)
+                              ))}
+                            </>}
 
                             {assigneeOptions.length > 1 && <>
-                              <div style={{ fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '6px', marginTop: '12px' }}>Assignee</div>
-                              {sidebarBtn(taskSidebarAssignee === 'all', () => setTaskSidebarAssignee('all'), <>All</>)}
-                              {assigneeOptions.map(name => sidebarBtn(taskSidebarAssignee === name, () => setTaskSidebarAssignee(name), <>{assigneeChip(name, true)}</>))}
+                              {sidebarSection('assignee', 'Assignee')}
+                              {!taskSidebarCollapsed.assignee && <>
+                                {sidebarBtn(taskSidebarAssignee === 'all', () => setTaskSidebarAssignee('all'), <>All</>)}
+                                {assigneeOptions.map(name => sidebarBtn(taskSidebarAssignee === name, () => setTaskSidebarAssignee(name), <>{assigneeChip(name, true)}</>))}
+                              </>}
                             </>}
 
                             {properties.length > 0 && <>
-                              <div style={{ fontSize: '10px', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '6px', marginTop: '12px' }}>Property</div>
-                              {sidebarBtn(taskSidebarProperty === 'all', () => setTaskSidebarProperty('all'), <>Any property</>)}
-                              {properties.filter(p => allTasksNorm.some(t => t.linkedId === p.id)).map(p => (
-                                sidebarBtn(taskSidebarProperty === String(p.id), () => setTaskSidebarProperty(String(p.id)), <span style={{ fontSize: '11px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.dealName || p.address?.split(',')[0]}</span>)
-                              ))}
+                              {sidebarSection('property', 'Property')}
+                              {!taskSidebarCollapsed.property && <>
+                                {sidebarBtn(taskSidebarProperty === 'all', () => setTaskSidebarProperty('all'), <>Any property</>)}
+                                {properties.filter(p => allTasksNorm.some(t => t.linkedId === p.id)).map(p => (
+                                  sidebarBtn(taskSidebarProperty === String(p.id), () => setTaskSidebarProperty(String(p.id)), <span style={{ fontSize: '11px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.dealName || p.address?.split(',')[0]}</span>)
+                                ))}
+                              </>}
                             </>}
                           </div>
                         )}
