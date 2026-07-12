@@ -4530,7 +4530,13 @@ async function handleApiRoutes(request, env, url, ctx) {
       if (!session) return new Response('Unauthorized', { status: 401 });
       const docRateOk = await checkRateLimit(env, `docs:${session.userId}`, 120);
       if (!docRateOk) return new Response('Too many requests', { status: 429 });
-      const key = url.pathname.slice('/api/documents/'.length);
+      // R2 keys are stored with the literal filename (spaces, punctuation and
+      // all), but url.pathname arrives percent-encoded (space -> %20), so a raw
+      // slice would look up a key that doesn't exist and 404. Decode back to the
+      // literal key; fall back to the raw slice if the sequence is malformed.
+      const rawKey = url.pathname.slice('/api/documents/'.length);
+      let key = rawKey;
+      try { key = decodeURIComponent(rawKey); } catch {}
       const object = await env.CRM_DOCS.get(key);
       if (!object) return new Response('Not found', { status: 404 });
       const headers = new Headers();
