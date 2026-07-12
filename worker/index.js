@@ -33,7 +33,11 @@ const AUCTION_HOUSES_CONFIG = [
   { id: 'pugh', name: 'Pugh Auctions', shortName: 'Pugh', diaryUrl: 'https://www.pugh-auctions.com/auction-diary' },
   { id: 'allsop', name: 'Allsop Residential', shortName: 'Allsop', diaryUrl: 'https://www.allsop.co.uk/auctions/property-for-auction-in-sheffield/' },
   { id: 'mchugh', name: 'McHugh & Co', shortName: 'McHugh', diaryUrl: 'https://www.mchughandco.com/' },
+  { id: 'eig', name: 'EIG (mixed auctioneers)', shortName: 'EIG', diaryUrl: 'https://www.eigpropertyauctions.co.uk/search/property/south-yorkshire?view=1&order=0' },
 ];
+
+const EIG_BASE_URL = 'https://www.eigpropertyauctions.co.uk';
+const EIG_HOUSE_NAME = 'EIG (mixed auctioneers)';
 
 const SY_KEYWORDS = ['sheffield', 'doncaster', 'rotherham', 'barnsley', 'south yorkshire', ', s1 ', ', s2 ', ', s3 ', ', s4 ', ', s5 ', ', s6 ', ', s7 ', ', s8 ', ', s9 ', ', s10', ', s11', ', s12', ', s13', ', s14', ', s20', ', s21', ', s60', ', s61', ', s62', ', s63', ', s64', ', s65', ', s66', ', dn1', ', dn2', ', dn3', ', dn4', ', dn5'];
 
@@ -1143,6 +1147,104 @@ async function enrichLotFromDetailPage(lot) {
   return lot;
 }
 
+// EIG (eigpropertyauctions.co.uk) aggregates ~24 auctioneers but hides the
+// auctioneer name and per-lot deep link behind a login. Its search pages are
+// plain server-rendered HTML (no Browser Rendering needed): one lot per
+// `<div class="card overflow-hidden">`, so we slice on that boundary and reuse
+// the shared field extractors. The lot GUID lives in the card image src.
+function parseEigCatalogue(html, baseUrl) {
+  const lots = [];
+  // Split on card boundaries; index 0 is the page chrome before the first card.
+  const chunks = String(html || '').split(/<div class="card overflow-hidden/i).slice(1);
+  for (const chunk of chunks) {
+    const guidM = chunk.match(/lots\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i)
+      || chunk.match(/%2Flot%2F([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+    const guid = guidM ? guidM[1] : null;
+
+    const titleM = chunk.match(/property-title[\s\S]*?<h3[^>]*>([\s\S]*?)<\/h3>/i);
+    const address = titleM ? stripHtml(titleM[1]).replace(/\n+/g, ' ').trim() : null;
+
+    const h4M = chunk.match(/<h4[^>]*>([\s\S]*?)<\/h4>/i);
+    // EIG encodes £ as the hex entity &#xA3;, which stripHtml doesn't decode.
+    const h4Text = h4M ? stripHtml(h4M[1]).replace(/&#xA3;|&#0*163;|&pound;/gi, '£') : '';
+    const guidePrice = parseGuidePrice(h4Text);
+    const lotNumber = extractLotNumber(h4Text);
+
+    const descM = chunk.match(/property-description[\s\S]*?<p[^>]*>([\s\S]*?)<\/p>/i);
+    const descText = descM ? stripHtml(descM[1]) : '';
+
+    const cardText = stripHtml(chunk);
+    const auctionDate = extractAuctionDate(cardText);
+
+    let imageUrl = null;
+    const imgM = chunk.match(/<img[^>]+src=["']([^"']+)["']/i);
+    if (imgM && !/\.svg|logo|icon|sprite|^data:/i.test(imgM[1])) {
+      try { imageUrl = new URL(imgM[1], baseUrl).href; } catch { imageUrl = null; }
+    }
+    const lotUrl = guid ? `${EIG_BASE_URL}/lot/${guid}` : null;
+
+    if (!address && guidePrice == null) continue;
+    lots.push({
+      address,
+      guidePrice,
+      lotNumber,
+      propertyType: extractPropertyType(descText || cardText),
+      bedrooms: extractBedrooms(descText || cardText),
+      auctionDate,
+      imageUrl,
+      lotUrl,
+      eigGuid: guid,
+    });
+  }
+  return lots;
+}
+
+// Crawl EIG's South Yorkshire future-auctions search over its numbered pages.
+// Plain fetch (server-rendered), capped, stops when a page yields no lots.
+// Never throws — failures surface via the returned error field.
+async function scrapeEigLots(opts = {}) {
+  const result = { lots: [], pagesFetched: 0, error: null };
+  const maxPages = opts.maxPages || 8;
+  try {
+    const seen = new Set();
+    for (let page = 1; page <= maxPages; page++) {
+      const url = `${EIG_BASE_URL}/search/property/south-yorkshire?page=${page}&view=1&order=0`;
+      let html;
+      try {
+        const res = await fetch(url, { headers: { 'User-Agent': SCRAPER_UA, 'Accept': 'text/html' }, signal: AbortSignal.timeout(12000) });
+        if (!res.ok) { if (page === 1) result.error = `EIG HTTP ${res.status}`; break; }
+        html = await res.text();
+      } catch (err) {
+        if (page === 1) result.error = err.message;
+        break;
+      }
+      result.pagesFetched++;
+      const pageLots = parseEigCatalogue(html, EIG_BASE_URL);
+      if (!pageLots.length) break;
+      for (const lot of pageLots) {
+        const key = lot.eigGuid || `${(lot.address || '').toLowerCase()}|${lot.guidePrice ?? ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.lots.push(lot);
+      }
+    }
+  } catch (err) {
+    result.error = err.message;
+  }
+  return result;
+}
+
+// Trailing postcode token for cross-source matching. EIG addresses carry only a
+// district (e.g. "Sheffield, South Yorkshire, S2"), so extractOutcode (which
+// needs a full postcode) returns null; fall back to the full-postcode outcode
+// for direct-house addresses.
+function extractDistrict(address) {
+  const m = String(address || '').toUpperCase().match(/\b([A-Z]{1,2}\d{1,2}[A-Z]?)\b\s*$/);
+  if (m) return m[1];
+  const oc = extractOutcode(address);
+  return oc ? oc.outcode : null;
+}
+
 function lotScraperConfigs() {
   return [
     {
@@ -1470,18 +1572,209 @@ async function runLotScan(env, settings, opts = {}) {
 async function runScheduledLotScan(env) {
   await ensureAuctionMigratedToD1(env);
   const settings = await getScanSettings(env);
-  return await runLotScan(env, settings, {
-    onNewLot: async (lot) => {
-      await d1InsertAlert(env, {
-        id: `newlot-${lot.id}`,
-        type: 'listing_change',
-        title: `New auction lot: ${lot.address || lot.id}`,
-        body: `${lot.houseName} — ${lot.guidePrice ? `guide £${Number(lot.guidePrice).toLocaleString()}` : 'guide TBC'}${lot.auctionDate ? ` · ${lot.auctionDate}` : ''}`,
-        targetType: 'lot',
-        targetId: lot.id,
-      });
-    },
-  });
+  const onNewLot = async (lot) => {
+    await d1InsertAlert(env, {
+      id: `newlot-${lot.id}`,
+      type: 'listing_change',
+      title: `New auction lot: ${lot.address || lot.id}`,
+      body: `${lot.houseName} — ${lot.guidePrice ? `guide £${Number(lot.guidePrice).toLocaleString()}` : 'guide TBC'}${lot.auctionDate ? ` · ${lot.auctionDate}` : ''}`,
+      targetType: 'lot',
+      targetId: lot.id,
+    });
+  };
+  const direct = await runLotScan(env, settings, { onNewLot });
+  // EIG runs after the direct houses so it can tag lots they just refreshed.
+  const eig = await runEigScan(env, settings, { onNewLot });
+  return { ...direct, results: [...(direct.results || []), ...(eig.results || [])], lots: [...(direct.lots || []), ...(eig.lots || [])] };
+}
+
+function houseIdForName(name) {
+  const h = AUCTION_HOUSES_CONFIG.find(x => x.name === name);
+  return h ? h.id : 'direct';
+}
+
+// EIG's own scan pass: scrape the aggregated SY search, then for each lot either
+// TAG an existing direct-house lot that matches (same date + guide + postcode
+// district) with an 'eig' source — so both origins are visible — or, when no
+// match, upsert it as its own EIG-sourced lot. Kept entirely separate from the
+// 6-house runLotScan loop so that shared machinery is untouched. Never throws.
+async function runEigScan(env, settings, opts = {}) {
+  const now = new Date().toISOString();
+  const today = now.split('T')[0];
+  const summary = { houseId: 'eig', name: EIG_HOUSE_NAME, lotsFound: 0, matched: 0, tagged: 0, newLots: 0, updated: 0, withdrawn: 0, error: null };
+  const matchedLotRecords = [];
+
+  const scrape = await scrapeEigLots({});
+  summary.lotsFound = scrape.lots.length;
+  summary.error = scrape.error;
+
+  // Same region/price/type filters the 6 houses use.
+  let matched = scrape.lots.filter(l => matchesRegion(l.address, settings) && (l.guidePrice == null || l.guidePrice <= settings.maxGuidePrice));
+  if (settings.propertyTypes === 'houses') matched = matched.filter(l => !isExcludedFromHouses(l.propertyType));
+  summary.matched = matched.length;
+
+  if (opts.dryRun) {
+    return { success: true, results: [summary], lots: matched.slice(0, 100), scrapedAt: now, dryRun: true };
+  }
+  // A failed scrape that returned nothing must never withdraw the catalogue.
+  if (scrape.error && !scrape.lots.length) {
+    return { success: true, results: [summary], lots: [], scrapedAt: now };
+  }
+
+  // One read of every lot: direct-house lots become match candidates, existing
+  // EIG lots feed the upsert + withdrawal detection.
+  const allLots = await d1GetAuctionLots(env);
+  const candidateIndex = new Map();
+  for (const l of allLots) {
+    if (l.houseName === EIG_HOUSE_NAME || l.isWithdrawn || l.guidePrice == null || !l.auctionDate) continue;
+    const d = extractDistrict(l.address);
+    if (!d) continue;
+    // Keyed by date+district only; guide is matched with tolerance below so a
+    // small guide difference between EIG and the direct house still merges.
+    const key = `${l.auctionDate}|${d}`;
+    if (!candidateIndex.has(key)) candidateIndex.set(key, []);
+    candidateIndex.get(key).push(l);
+  }
+  const eigExistingById = new Map(allLots.filter(l => l.houseName === EIG_HOUSE_NAME).map(l => [String(l.id), l]));
+
+  const ensuredDates = new Set();
+  const touchedDateIds = new Set();
+  const scrapedEigIds = new Set();
+  const taggedExistingIds = new Set();
+
+  for (const raw of matched) {
+    // 1) Tag a matching direct-house lot rather than duplicating it. Requires a
+    // numeric guide + date so "Refer"/POA lots never match spuriously.
+    if (raw.guidePrice != null && raw.auctionDate) {
+      const d = extractDistrict(raw.address);
+      const cands = (d && candidateIndex.get(`${raw.auctionDate}|${d}`)) || [];
+      // EIG addresses are locality-only (auctioneer hidden), so match on guide
+      // proximity (exact, or within 5%/£2.5k) and use address/locality overlap
+      // to disambiguate when several direct lots share the date+district.
+      let existing = null, bestScore = -1;
+      for (const c of cands) {
+        if (taggedExistingIds.has(String(c.id))) continue;
+        const cg = Number(c.guidePrice), rg = Number(raw.guidePrice);
+        const exact = cg === rg;
+        const guideClose = exact || Math.abs(cg - rg) <= Math.max(2500, rg * 0.05);
+        if (!guideClose) continue;
+        const sim = addressSimilarity(raw.address, c.address);
+        // Exact guide can merge on locality alone; a tolerated guide gap needs
+        // some locality overlap so we don't merge two different cheap terraces.
+        if (!exact && sim < 0.15) continue;
+        const score = (exact ? 1 : 1 - Math.abs(cg - rg) / rg) + sim;
+        if (score > bestScore) { bestScore = score; existing = c; }
+      }
+      if (existing) {
+        taggedExistingIds.add(String(existing.id));
+        const sources = Array.isArray(existing.sources) && existing.sources.length ? existing.sources : [houseIdForName(existing.houseName)];
+        if (!sources.includes('eig')) {
+          const updated = { ...existing, sources: [...sources, 'eig'], alsoOnEig: true, lastUpdatedAt: now };
+          await d1PutAuctionLot(env, updated);
+          summary.tagged++;
+          matchedLotRecords.push(updated);
+        }
+        continue;
+      }
+    }
+
+    // 2) No match — upsert as an EIG-sourced lot.
+    const lotId = stableLotId('eig', raw);
+    scrapedEigIds.add(lotId);
+    const auctionDate = raw.auctionDate || null;
+    const dateId = `eig-${auctionDate || 'tbc'}`;
+    if (!ensuredDates.has(dateId)) {
+      ensuredDates.add(dateId);
+      const dRow = await env.CRM_DB.prepare('SELECT data FROM auction_dates WHERE id = ?').bind(String(dateId)).first();
+      if (dRow) {
+        await d1PutAuctionDate(env, { ...JSON.parse(dRow.data), lastScannedAt: now });
+      } else {
+        await d1PutAuctionDate(env, { id: dateId, houseId: 'eig', houseName: EIG_HOUSE_NAME, auctionDate, diaryUrl: `${EIG_BASE_URL}/search/property/south-yorkshire?view=1&order=0`, totalLots: 0, reviewedCount: 0, shortlistedCount: 0, rejectedCount: 0, watchingCount: 0, isNew: true, firstSeenAt: now, lastScannedAt: now });
+      }
+    }
+    touchedDateIds.add(dateId);
+
+    const existing = eigExistingById.get(lotId);
+    if (!existing) {
+      const newLot = {
+        id: lotId, dateId, origin: 'scraped', status: 'unreviewed', isNew: true,
+        guidePriceChanged: false, isWithdrawn: false, firstSeenAt: now, lastUpdatedAt: now,
+        address: raw.address, guidePrice: raw.guidePrice, bedrooms: raw.bedrooms || 0,
+        propertyType: raw.propertyType || 'Unknown', lotNumber: raw.lotNumber,
+        auctionDate, auctionTime: '', houseName: EIG_HOUSE_NAME, houseId: 'eig', sources: ['eig'],
+        lotUrl: raw.lotUrl || '', imageUrl: raw.imageUrl || null, notes: '',
+      };
+      await d1PutAuctionLot(env, newLot);
+      summary.newLots++;
+      matchedLotRecords.push(newLot);
+      if (opts.onNewLot) { try { await opts.onNewLot(newLot); } catch {} }
+    } else {
+      const updatedLot = {
+        ...existing,
+        address: raw.address || existing.address,
+        propertyType: raw.propertyType || existing.propertyType,
+        bedrooms: raw.bedrooms || existing.bedrooms,
+        lotNumber: raw.lotNumber || existing.lotNumber,
+        lotUrl: raw.lotUrl || existing.lotUrl,
+        imageUrl: raw.imageUrl || existing.imageUrl,
+        auctionDate: auctionDate || existing.auctionDate,
+        sources: Array.isArray(existing.sources) && existing.sources.includes('eig') ? existing.sources : ['eig'],
+        isWithdrawn: false,
+        lastUpdatedAt: now,
+      };
+      const priceChanged = raw.guidePrice != null && existing.guidePrice != null && Number(raw.guidePrice) !== Number(existing.guidePrice);
+      if (priceChanged) {
+        updatedLot.previousGuidePrice = existing.guidePrice;
+        updatedLot.guidePrice = raw.guidePrice;
+        updatedLot.guidePriceChanged = true;
+        try {
+          await d1InsertAlert(env, {
+            id: `lotchange-${lotId}-${today}`,
+            type: 'listing_change',
+            title: `Listing changed: ${updatedLot.address || lotId}`,
+            body: `${EIG_HOUSE_NAME} — guide ${Number(existing.guidePrice || 0).toLocaleString()} → ${Number(raw.guidePrice || 0).toLocaleString()}`,
+            targetType: 'lot',
+            targetId: lotId,
+          });
+        } catch {}
+      } else if (raw.guidePrice != null && existing.guidePrice == null) {
+        updatedLot.guidePrice = raw.guidePrice;
+      }
+      await d1PutAuctionLot(env, updatedLot);
+      summary.updated++;
+      matchedLotRecords.push(updatedLot);
+    }
+  }
+
+  // Withdrawals — only within EIG dates we touched, and only when the scrape
+  // actually returned lots, mirroring runLotScan's guard.
+  if (matched.length > 0) {
+    for (const dateId of touchedDateIds) {
+      const dateLots = await d1GetAuctionLots(env, dateId);
+      for (const lot of dateLots) {
+        if (lot.origin !== 'scraped' || lot.isWithdrawn) continue;
+        if (scrapedEigIds.has(String(lot.id))) continue;
+        await d1PutAuctionLot(env, { ...lot, isWithdrawn: true, lastUpdatedAt: now });
+        summary.withdrawn++;
+        try {
+          await d1InsertAlert(env, {
+            id: `lotchange-${lot.id}-${today}`,
+            type: 'listing_change',
+            title: `Listing changed: ${lot.address || lot.id}`,
+            body: `${EIG_HOUSE_NAME} — withdrawn`,
+            targetType: 'lot',
+            targetId: lot.id,
+          });
+        } catch {}
+      }
+    }
+  }
+
+  for (const dateId of touchedDateIds) {
+    try { await recomputeAuctionDateCounts(env, dateId); } catch {}
+  }
+
+  return { success: true, results: [summary], lots: matchedLotRecords, scrapedAt: now };
 }
 
 // ============================================================
@@ -3939,7 +4232,9 @@ async function handleApiRoutes(request, env, url) {
 
       await ensureAuctionMigratedToD1(env);
       try {
-        const result = await runLotScan(env, settings, { dryRun: !!body.dryRun, houseId: body.house || null });
+        const result = body.house === 'eig'
+          ? await runEigScan(env, settings, { dryRun: !!body.dryRun })
+          : await runLotScan(env, settings, { dryRun: !!body.dryRun, houseId: body.house || null });
         return corsResponse(result);
       } catch (err) {
         return corsResponse({ success: false, message: `Lot scan failed: ${err.message}` });

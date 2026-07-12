@@ -6569,7 +6569,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     // One request per house — a single request can't scrape all
                     // houses before Cloudflare's time limit, which was starving
                     // the later houses. Fastest/most-reliable houses go first.
-                    const scanOrder = ['ah_sy', 'pugh', 'mj', 'sdl', 'allsop', 'mchugh'];
+                    const scanOrder = ['ah_sy', 'pugh', 'mj', 'sdl', 'allsop', 'mchugh', 'eig'];
                     const allResults = [];
                     for (const houseId of scanOrder) {
                       try {
@@ -6876,6 +6876,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                     {lot.isNew && lot.status === 'unreviewed' && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#fef3c7', color: '#92400e', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>New</span>}
                                     {lot.guidePriceChanged && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#fee2e2', color: '#991b1b', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>Price</span>}
                                     {lot.isWithdrawn && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#f1f5f9', color: '#64748b', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>Withdrawn</span>}
+                                    {Array.isArray(lot.sources) && lot.sources.includes('eig') && lot.houseName !== 'EIG (mixed auctioneers)' && <span title="Also listed on EIG" style={{ fontSize: '10px', padding: '1px 4px', background: '#dbeafe', color: '#1e40af', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>EIG</span>}
                                   </div>
                                   <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '1px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                     {lot.houseName || 'Manual'}
@@ -6938,7 +6939,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                           <span style={{ fontSize: '10px', color: '#64748b' }}>Last scan:</span>
                           {auctionScanResults.map((r, i) => (
                             <span key={i} style={{ fontSize: '10px', padding: '2px 7px', background: r.error ? '#f59e0b20' : '#05966920', color: r.error ? '#f59e0b' : '#4ade80', borderRadius: '5px' }}>
-                              {r.name?.split(' ').slice(0, 2).join(' ')}: {r.error ? 'blocked' : r.matched != null ? `${r.matched} matched · ${r.newLots || 0} new` : `~${r.estimatedLots || 0} lots`}
+                              {r.name?.split(' ').slice(0, 2).join(' ')}: {r.error ? 'blocked' : r.matched != null ? `${r.matched} matched · ${r.newLots || 0} new${r.tagged ? ` · ${r.tagged} on EIG` : ''}` : `~${r.estimatedLots || 0} lots`}
                             </span>
                           ))}
                           <button onClick={() => setAuctionScanResults(null)} style={{ marginLeft: 'auto', fontSize: '11px', color: '#475569', background: 'transparent', border: 'none', cursor: 'pointer' }}>✕</button>
