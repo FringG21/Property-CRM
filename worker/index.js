@@ -1,5 +1,5 @@
 import puppeteer from '@cloudflare/puppeteer';
-import { handleMarketIntelRoutes, runMarketIntelTick, maybeSeedWeeklyRefresh } from './marketIntel.js';
+import { handleMarketIntelRoutes, runMarketIntelTick, maybeSeedWeeklyRefresh, extractPostcodeParts } from './marketIntel.js';
 
 // ============================================================
 // Property CRM — Cloudflare Worker
@@ -3086,6 +3086,55 @@ async function callWorkersAI({ system, prompt, schema, env }) {
   return { text, provider: 'workers-ai' };
 }
 
+// Shared framing appended to every AI-insight system prompt so the model
+// reasons like a UK auction buyer, not a naive reader of the guide price.
+const AUCTION_ANALYST_FRAMING = 'Critical auction context: a UK auction GUIDE PRICE is a marketing minimum set deliberately below expected value — it is NOT the likely purchase price, and lots routinely sell WELL ABOVE guide. Never treat the guide as the buy price; reason instead about a realistic hammer price and a disciplined maximum bid, and judge margin/profit against THAT, not against the guide. Where area auction stats (a guide-to-sold ratio) are supplied, use them to estimate how far above guide this lot is likely to go; otherwise assume a meaningful premium over guide and lower your confidence. Reason beyond the deal sheet: use the public and area signals provided (Land Registry sold comps, EPC, planning, flood, crime, local price trends, area auction stats) to infer what the figures imply and to surface what is missing — explicitly flag the blind spots and unknowns the investor should verify before bidding.';
+
+// Reads the user's own Market Intel aggregates for the property's outcode so
+// the AI can ground "sells above guide" in scraped auction data, not just
+// general knowledge. Returns null when the outcode has no data (common for
+// pre-auction lots with locality-only addresses) so callers degrade gracefully.
+async function getAreaMarketStats(env, postcodeOrAddress) {
+  try {
+    const { outcode } = extractPostcodeParts(postcodeOrAddress);
+    if (!outcode || !env.CRM_DB) return null;
+    const row = await env.CRM_DB.prepare(
+      `SELECT m.guide_to_sold_ratio, m.sold_confirmed, m.sample_size, m.price_median,
+              s.score, s.confidence
+       FROM mi_area_metrics m
+       LEFT JOIN mi_area_scores s ON s.area_type = m.area_type AND s.area_id = m.area_id
+         AND s.model_id = (SELECT id FROM mi_scoring_models WHERE is_default = 1 LIMIT 1)
+       WHERE m.area_type = 'outcode' AND m.area_id = ? AND m.window = '24m'
+       LIMIT 1`
+    ).bind(outcode).first();
+    if (!row || row.guide_to_sold_ratio == null) return null;
+    return {
+      outcode,
+      guideToSoldRatio: row.guide_to_sold_ratio,
+      soldConfirmed: row.sold_confirmed,
+      sampleSize: row.sample_size,
+      priceMedian: row.price_median,
+      areaScore: row.score,
+      areaConfidence: row.confidence,
+    };
+  } catch (err) {
+    console.error('getAreaMarketStats failed:', err.message);
+    return null;
+  }
+}
+
+// One-line context string from getAreaMarketStats output (or a graceful
+// fallback line when no stats exist) for injecting into AI prompt context.
+function areaMarketStatsLine(stats) {
+  if (!stats) {
+    return 'Area auction stats (your Market Intel): none available for this outcode — rely on the general rule that lots sell above guide, and lower your confidence accordingly.';
+  }
+  const pctAbove = Math.round((stats.guideToSoldRatio - 1) * 100);
+  const dir = pctAbove >= 0 ? `~${pctAbove}% above guide` : `~${Math.abs(pctAbove)}% below guide`;
+  const score = stats.areaScore != null ? ` Area flip score ${Math.round(stats.areaScore)}/100 (confidence ${stats.areaConfidence ?? 'n/a'}).` : '';
+  return `Area auction stats (your Market Intel, outcode ${stats.outcode}): guide-to-sold ratio ${stats.guideToSoldRatio.toFixed(2)} — the average lot sells ${dir} across ${stats.soldConfirmed ?? stats.sampleSize ?? 0} confirmed sales.${score} Use this as the local signal for how far above guide to expect.`;
+}
+
 const AI_PROVIDER_CHAIN = [callAnthropic, callGroq, callGemini, callOpenRouter, callWorkersAI];
 
 // Tries each configured provider in priority order; validates the parsed JSON
@@ -4970,11 +5019,13 @@ async function handleApiRoutes(request, env, url, ctx) {
       if (!property || !property.address) return corsResponse({ success: false, message: 'Missing property' }, 400);
 
       // Compact, bounded context — never ship whole blobs to the model
+      const areaStats = await getAreaMarketStats(env, property.postcode || property.address);
       const clip = (obj) => JSON.stringify(obj ?? null).slice(0, 6000);
       const context = [
         `Address: ${property.address}${property.dealName ? ` (${property.dealName})` : ''}`,
         `Status: ${property.status || 'Sourced'} · Guide price: £${Number(property.guidePrice || 0).toLocaleString()} · Auction: ${property.auctionDate || 'unknown'}`,
         `Type: ${property.propertyType || 'unknown'} · Beds: ${property.bedrooms || 'unknown'}`,
+        areaMarketStatsLine(areaStats),
         `Report analytics: ${clip(property.analytics)}`,
         `Area intelligence highlights: ${clip(property.intelligenceSummary)}`,
         `Refurb position: ${clip(property.refurbSummary)}`,
@@ -4991,6 +5042,8 @@ async function handleApiRoutes(request, env, url, ctx) {
           strengths: { type: 'array', items: { type: 'string' }, description: 'Specific strengths of the deal grounded in the data.' },
           dealScore: { type: 'integer', description: 'Deal quality score from 0 (avoid at any price) to 100 (exceptional opportunity)' },
           verdict: { type: 'string', enum: ['strong_buy', 'buy', 'conditional', 'avoid'] },
+          bidGuidance: { type: 'string', description: "One or two sentences on the realistic hammer price and a disciplined maximum bid for this lot, given the guide is a floor and lots sell above it. Reference the area guide-to-sold ratio when supplied." },
+          blindSpots: { type: 'array', items: { type: 'string' }, description: 'Things NOT in the deal sheet that the investor should independently verify before bidding — e.g. tenure/lease, condition/structural, planning constraints, true local sold comps, service charges, vacant possession. Empty only if genuinely nothing is missing.' },
           reportComparison: {
             type: 'object',
             additionalProperties: false,
@@ -5006,7 +5059,7 @@ async function handleApiRoutes(request, env, url, ctx) {
 
       try {
         const { result: review, provider } = await generateInsight({
-          system: 'You are a UK property investment analyst reviewing auction flip deals for a small investment partnership in South Yorkshire. Be direct and specific: ground every claim in the numbers provided, flag what is missing, and never invent figures. Margins under 15% are tight for a flip; under 5% are usually not worth the risk. A prior assessment report may already have scored this deal — its verdict, maxBid, netProfit, margin and GDV are in the report analytics. Act as an independent second opinion: validate those figures against the comparables and area intelligence, and in reportComparison state clearly whether you agree, partly agree, or disagree with the report and why. Do not simply restate the report.',
+          system: 'You are a UK property investment analyst reviewing auction flip deals for a small investment partnership in South Yorkshire. Be direct and specific: ground every claim in the numbers provided, flag what is missing, and never invent figures. Margins under 15% are tight for a flip; under 5% are usually not worth the risk. A prior assessment report may already have scored this deal — its verdict, maxBid, netProfit, margin and GDV are in the report analytics. Act as an independent second opinion: validate those figures against the comparables and area intelligence, and in reportComparison state clearly whether you agree, partly agree, or disagree with the report and why. Do not simply restate the report. ' + AUCTION_ANALYST_FRAMING,
           prompt: `Review this auction deal and score it. If report analytics are present, cross-check your conclusion against them.\n\n${context}`,
           schema,
           requiredFields: ['summary', 'riskFlags', 'strengths', 'dealScore', 'verdict'],
@@ -5036,11 +5089,13 @@ async function handleApiRoutes(request, env, url, ctx) {
 
       const searchQuery = `recent sold property prices near ${property.postcode || property.address}${property.propertyType ? ` ${property.propertyType}` : ''}`;
       const searchResults = await webSearch(searchQuery, env, 6);
+      const areaStats = await getAreaMarketStats(env, property.postcode || property.address);
 
       const clip = (obj) => JSON.stringify(obj ?? null).slice(0, 4000);
       const context = [
         `Address: ${property.address}${property.dealName ? ` (${property.dealName})` : ''}`,
         `Guide price: £${Number(property.guidePrice || 0).toLocaleString()}`,
+        areaMarketStatsLine(areaStats),
         `Analytics (GDV/margin/costs): ${clip(property.analytics)}`,
         searchResults.length
           ? `Live web search results for local market context:\n${searchResults.map((r, i) => `${i + 1}. ${r.title} — ${r.snippet} (${r.url})`).join('\n')}`
@@ -5070,7 +5125,7 @@ async function handleApiRoutes(request, env, url, ctx) {
 
       try {
         const { result: analysis, provider } = await generateInsight({
-          system: 'You are a UK property market analyst. Ground every claim in the search results and CRM data provided — never invent comparable prices or addresses. If search results are thin or absent, say so and lower your confidence rather than guessing.',
+          system: 'You are a UK property market analyst. Ground every claim in the search results and CRM data provided — never invent comparable prices or addresses. If search results are thin or absent, say so and lower your confidence rather than guessing. ' + AUCTION_ANALYST_FRAMING,
           prompt: `Assess this deal against current local market conditions.\n\n${context}`,
           schema,
           requiredFields: ['marketSummary', 'comparables', 'positioning', 'confidence'],
@@ -5105,12 +5160,14 @@ async function handleApiRoutes(request, env, url, ctx) {
       // district-only, so a full street address is often unavailable here.
       const searchQuery = `recent sold property prices near ${lot.address || ''}${lot.propertyType ? ` ${lot.propertyType}` : ''}`.trim();
       const searchResults = lot.address ? await webSearch(searchQuery, env, 5) : [];
+      const areaStats = lot.address ? await getAreaMarketStats(env, lot.address) : null;
 
       const context = [
         `Address/locality: ${lot.address || 'unknown'}`,
         `Guide price: £${Number(lot.guidePrice || 0).toLocaleString()}`,
         `Type: ${lot.propertyType || 'unknown'} · Beds: ${lot.bedrooms || 'unknown'}`,
         `Auction house: ${lot.houseName || 'unknown'} · Auction date: ${lot.auctionDate || 'unknown'}`,
+        areaMarketStatsLine(areaStats),
         searchResults.length
           ? `Live web search results for local market context:\n${searchResults.map((r, i) => `${i + 1}. ${r.title} — ${r.snippet} (${r.url})`).join('\n')}`
           : 'No live web search results were available for this locality.',
@@ -5129,7 +5186,7 @@ async function handleApiRoutes(request, env, url, ctx) {
 
       try {
         const { result: insight, provider } = await generateInsight({
-          system: 'You are triaging UK property auction lots for a South Yorkshire flip investor, working from thin pre-auction data. Be conservative — only flag strong_interest when the guide price looks genuinely favourable against the evidence given; use insufficient_data rather than guessing when evidence is thin.',
+          system: 'You are triaging UK property auction lots for a South Yorkshire flip investor, working from thin pre-auction data. Be conservative — only flag strong_interest when the lot looks genuinely favourable against the evidence given once a realistic above-guide sale price is assumed; use insufficient_data rather than guessing when evidence is thin. For guidePriceAssessment, judge the guide against the realistic hammer/market price (not against itself): below_market means the realistic sale price is well above guide. ' + AUCTION_ANALYST_FRAMING,
           prompt: `Triage this auction lot.\n\n${context}`,
           schema,
           requiredFields: ['flag', 'note', 'guidePriceAssessment'],

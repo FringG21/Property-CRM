@@ -2130,7 +2130,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
       const payload = {
         property: {
           address: prop.address, dealName: prop.dealName, status: prop.status,
-          guidePrice: prop.guidePrice, auctionDate: prop.auctionDate,
+          postcode: prop.postcode, guidePrice: prop.guidePrice, auctionDate: prop.auctionDate,
           propertyType: prop.propertyType, bedrooms: prop.bedrooms,
           analytics: prop.analytics || {},
           intelligenceSummary: {
@@ -2165,14 +2165,18 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
       const data = await res.json();
       if (!data.success) { alert(data.message || 'AI review failed.'); return; }
       const r = data.review;
+      if (!r || !r.summary) { console.error('AI deal review: unexpected response shape', data); alert('AI review returned no summary — please try again.'); return; }
+      const verdictLabel = (r.verdict || 'reviewed').replace('_', ' ');
+      const scoreLabel = r.dealScore != null ? `score ${r.dealScore}/100` : 'no score';
       const updated = withActivity({
         ...prop,
-        analytics: { ...(prop.analytics || {}), aiSummary: r.summary, aiRiskFlags: r.riskFlags, aiStrengths: r.strengths, aiDealScore: r.dealScore, aiVerdict: r.verdict, aiReviewedAt: data.reviewedAt, aiProvider: data.provider, aiReportAgreement: r.reportComparison?.agreement || null, aiReportCrossCheck: r.reportComparison?.note || null },
-      }, 'intelligence', `AI deal review — score ${r.dealScore}/100 (${r.verdict.replace('_', ' ')})`);
+        analytics: { ...(prop.analytics || {}), aiSummary: r.summary, aiRiskFlags: r.riskFlags, aiStrengths: r.strengths, aiBlindSpots: r.blindSpots, aiBidGuidance: r.bidGuidance, aiDealScore: r.dealScore, aiVerdict: r.verdict, aiReviewedAt: data.reviewedAt, aiProvider: data.provider, aiReportAgreement: r.reportComparison?.agreement || null, aiReportCrossCheck: r.reportComparison?.note || null },
+      }, 'intelligence', `AI deal review — ${scoreLabel} (${verdictLabel})`);
       setProperties(prev => prev.map(p => p.id === prop.id ? updated : p));
       if (currentViewProperty?.id === prop.id) setCurrentViewProperty(updated);
-    } catch {
-      alert('AI review failed — network error.');
+    } catch (err) {
+      console.error('AI deal review failed:', err);
+      alert('AI review failed — please try again.');
     } finally {
       setAiReviewLoadingId(null);
     }
@@ -4207,7 +4211,8 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                   )}
 
                   {/* AI deal review — Overview tab (same card as the Deal Analysis tab) */}
-                  {propCanvasTab === 'overview' && an.aiSummary && an.aiDealScore != null && (() => {
+                  {propCanvasTab === 'overview' && an.aiSummary && (() => {
+                    const hasScore = an.aiDealScore != null;
                     const score = an.aiDealScore ?? 0;
                     const scoreCol = score >= 70 ? '#059669' : score >= 45 ? '#d97706' : '#dc2626';
                     const verdictLabel = { strong_buy: 'Strong buy', buy: 'Buy', conditional: 'Conditional', avoid: 'Avoid' }[an.aiVerdict] || an.aiVerdict;
@@ -4215,7 +4220,9 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                       <div style={{ margin: '14px 20px 0', backgroundColor: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: '10px', padding: '14px 16px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '10px', flexWrap: 'wrap' }}>
                           <div style={{ fontSize: '12px', fontWeight: '700', color: '#6d28d9' }}>🤖 AI deal review</div>
-                          <span style={{ fontSize: '11px', padding: '2px 10px', borderRadius: '12px', background: '#fff', border: `1px solid ${scoreCol}`, color: scoreCol, fontWeight: '700' }}>{score}/100 · {verdictLabel}</span>
+                          {(hasScore || verdictLabel) && (
+                            <span style={{ fontSize: '11px', padding: '2px 10px', borderRadius: '12px', background: '#fff', border: `1px solid ${scoreCol}`, color: scoreCol, fontWeight: '700' }}>{hasScore ? `${score}/100` : ''}{hasScore && verdictLabel ? ' · ' : ''}{verdictLabel || ''}</span>
+                          )}
                           {(an.aiReviewedAt || an.aiProvider) && (
                             <span style={{ fontSize: '10px', color: '#a78bfa', marginLeft: 'auto' }}>
                               {an.aiProvider ? `via ${AI_PROVIDER_LABELS[an.aiProvider] || an.aiProvider} · ` : ''}
@@ -4223,10 +4230,18 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                             </span>
                           )}
                         </div>
-                        <div style={{ height: '6px', background: '#ede9fe', borderRadius: '3px', overflow: 'hidden', marginBottom: '10px' }}>
-                          <div style={{ width: `${score}%`, height: '100%', background: scoreCol }}></div>
-                        </div>
-                        <div style={{ fontSize: '12px', color: '#3b0764', lineHeight: 1.6, marginBottom: (an.aiReportCrossCheck || an.aiRiskFlags?.length || an.aiStrengths?.length) ? '10px' : 0 }}>{an.aiSummary}</div>
+                        {hasScore && (
+                          <div style={{ height: '6px', background: '#ede9fe', borderRadius: '3px', overflow: 'hidden', marginBottom: '10px' }}>
+                            <div style={{ width: `${score}%`, height: '100%', background: scoreCol }}></div>
+                          </div>
+                        )}
+                        <div style={{ fontSize: '12px', color: '#3b0764', lineHeight: 1.6, marginBottom: (an.aiBidGuidance || an.aiReportCrossCheck || an.aiRiskFlags?.length || an.aiStrengths?.length || an.aiBlindSpots?.length) ? '10px' : 0 }}>{an.aiSummary}</div>
+                        {an.aiBidGuidance && (
+                          <div style={{ marginBottom: (an.aiReportCrossCheck || an.aiRiskFlags?.length || an.aiStrengths?.length || an.aiBlindSpots?.length) ? '10px' : 0, padding: '8px 10px', background: '#fff', border: '1px solid #ddd6fe', borderLeft: '3px solid #7c3aed', borderRadius: '6px' }}>
+                            <span style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.05em', color: '#6d28d9' }}>Bid guidance</span>
+                            <div style={{ fontSize: '11px', color: '#3b0764', lineHeight: 1.5, marginTop: '2px' }}>{an.aiBidGuidance}</div>
+                          </div>
+                        )}
                         {an.aiReportCrossCheck && (() => {
                           const agr = an.aiReportAgreement || 'agree';
                           const c = agr === 'agree' ? '#059669' : agr === 'partial' ? '#d97706' : '#dc2626';
@@ -4252,6 +4267,12 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                             </div>
                           )}
                         </div>
+                        {(an.aiBlindSpots || []).length > 0 && (
+                          <div style={{ marginTop: '10px' }}>
+                            <div style={{ fontSize: '10px', fontWeight: '700', color: '#92400e', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' }}>Blind spots — verify before bidding</div>
+                            {an.aiBlindSpots.map((b, i) => <div key={i} style={{ fontSize: '11px', color: '#78350f', padding: '3px 0', display: 'flex', gap: '6px' }}><span>🔎</span><span>{b}</span></div>)}
+                          </div>
+                        )}
                       </div>
                     );
                   })()}
@@ -9100,6 +9121,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
 
                             {/* AI review */}
                             {an.aiSummary && (() => {
+                              const hasScore = an.aiDealScore != null;
                               const score = an.aiDealScore ?? 0;
                               const scoreCol = score >= 70 ? '#059669' : score >= 45 ? '#d97706' : '#dc2626';
                               const verdictLabel = { strong_buy: 'Strong buy', buy: 'Buy', conditional: 'Conditional', avoid: 'Avoid' }[an.aiVerdict] || an.aiVerdict;
@@ -9107,7 +9129,9 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                 <div style={{ backgroundColor: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: '10px', padding: '14px 16px' }}>
                                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '10px', flexWrap: 'wrap' }}>
                                     <div style={{ fontSize: '12px', fontWeight: '700', color: '#6d28d9' }}>🤖 AI deal review</div>
-                                    <span style={{ fontSize: '11px', padding: '2px 10px', borderRadius: '12px', background: '#fff', border: `1px solid ${scoreCol}`, color: scoreCol, fontWeight: '700' }}>{score}/100 · {verdictLabel}</span>
+                                    {(hasScore || verdictLabel) && (
+                                      <span style={{ fontSize: '11px', padding: '2px 10px', borderRadius: '12px', background: '#fff', border: `1px solid ${scoreCol}`, color: scoreCol, fontWeight: '700' }}>{hasScore ? `${score}/100` : ''}{hasScore && verdictLabel ? ' · ' : ''}{verdictLabel || ''}</span>
+                                    )}
                                     {(an.aiReviewedAt || an.aiProvider) && (
                                       <span style={{ fontSize: '10px', color: '#a78bfa', marginLeft: 'auto' }}>
                                         {an.aiProvider ? `via ${AI_PROVIDER_LABELS[an.aiProvider] || an.aiProvider} · ` : ''}
@@ -9115,10 +9139,18 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                       </span>
                                     )}
                                   </div>
-                                  <div style={{ height: '6px', background: '#ede9fe', borderRadius: '3px', overflow: 'hidden', marginBottom: '10px' }}>
-                                    <div style={{ width: `${score}%`, height: '100%', background: scoreCol }}></div>
-                                  </div>
-                                  <div style={{ fontSize: '12px', color: '#3b0764', lineHeight: 1.6, marginBottom: (an.aiReportCrossCheck || an.aiRiskFlags?.length || an.aiStrengths?.length) ? '10px' : 0 }}>{an.aiSummary}</div>
+                                  {hasScore && (
+                                    <div style={{ height: '6px', background: '#ede9fe', borderRadius: '3px', overflow: 'hidden', marginBottom: '10px' }}>
+                                      <div style={{ width: `${score}%`, height: '100%', background: scoreCol }}></div>
+                                    </div>
+                                  )}
+                                  <div style={{ fontSize: '12px', color: '#3b0764', lineHeight: 1.6, marginBottom: (an.aiBidGuidance || an.aiReportCrossCheck || an.aiRiskFlags?.length || an.aiStrengths?.length || an.aiBlindSpots?.length) ? '10px' : 0 }}>{an.aiSummary}</div>
+                                  {an.aiBidGuidance && (
+                                    <div style={{ marginBottom: (an.aiReportCrossCheck || an.aiRiskFlags?.length || an.aiStrengths?.length || an.aiBlindSpots?.length) ? '10px' : 0, padding: '8px 10px', background: '#fff', border: '1px solid #ddd6fe', borderLeft: '3px solid #7c3aed', borderRadius: '6px' }}>
+                                      <span style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.05em', color: '#6d28d9' }}>Bid guidance</span>
+                                      <div style={{ fontSize: '11px', color: '#3b0764', lineHeight: 1.5, marginTop: '2px' }}>{an.aiBidGuidance}</div>
+                                    </div>
+                                  )}
                                   {an.aiReportCrossCheck && (() => {
                                     const agr = an.aiReportAgreement || 'agree';
                                     const c = agr === 'agree' ? '#059669' : agr === 'partial' ? '#d97706' : '#dc2626';
@@ -9144,6 +9176,12 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                       </div>
                                     )}
                                   </div>
+                                  {(an.aiBlindSpots || []).length > 0 && (
+                                    <div style={{ marginTop: '10px' }}>
+                                      <div style={{ fontSize: '10px', fontWeight: '700', color: '#92400e', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' }}>Blind spots — verify before bidding</div>
+                                      {an.aiBlindSpots.map((b, i) => <div key={i} style={{ fontSize: '11px', color: '#78350f', padding: '3px 0', display: 'flex', gap: '6px' }}><span>🔎</span><span>{b}</span></div>)}
+                                    </div>
+                                  )}
                                 </div>
                               );
                             })()}
