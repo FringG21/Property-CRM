@@ -31,7 +31,16 @@ Every field it sets MUST be present in the `reportFields` array inside `applyRep
 - `matrixConservative`, `matrixBase`, `matrixOptimistic`, `matrixHeaders` (GDV matrix display)
 - `buyersPremium`, `sdlt`, `acquisitionFeesTotal`, `holdingTotal`, `exitTotal`
 - `refurbLight`, `refurbMedium`, `refurbHeavy`
-- `completionDate`, `auctionHouseFromReport`, `propertyTypeFromReport`, `comps`
+- `completionDate`, `auctionHouseFromReport`, `propertyTypeFromReport`, `comps`, `compsList`
+- `reportSummary`, `redFlags` — the report's OWN written summary and risk flags
+
+### Report vs AI ownership of analytics — DO NOT re-merge these
+The report parser and the AI deal review write **disjoint** keys so a re-parse never
+wipes an AI review and vice versa. Keep them separate:
+- **Report owns:** `reportSummary`, `redFlags` (set by `parseFullReportAnalytics`, whitelisted in `reportFields`).
+- **AI deal review owns:** `aiSummary`, `aiRiskFlags`, `aiStrengths`, `aiDealScore`, `aiVerdict`, `aiReviewedAt`, `aiProvider`, and the cross-check `aiReportAgreement` (`agree`|`partial`|`disagree`) + `aiReportCrossCheck` (note). Set by `runAiDealReview`; NOT in `reportFields`.
+- The AI review already receives `prop.analytics` (incl. `reportSummary`) as context and returns `reportComparison` — its explicit second-opinion cross-check of the report. Never add any `ai*` key to `reportFields`.
+- Legacy fallback: older properties stored the report summary in `aiSummary` (with `aiDealScore == null`); the Report-summary card falls back to that when `reportSummary` is absent.
 
 ### Property-level fields (stored directly on property, NOT in analytics)
 - `guidePrice` — applied in applyReportToProperty extraUpdates, not merged into analytics

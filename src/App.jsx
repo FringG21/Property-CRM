@@ -1004,8 +1004,10 @@ export default function App({ user = {}, onLogout }) {
       'completionDate', 'auctionHouseFromReport', 'propertyTypeFromReport', 'comps',
       // Parsed comparable sales rows (report's own confirmed-sold picks)
       'compsList',
-      // AI / risk summary
-      'aiSummary', 'redFlags',
+      // Report's own summary + risk flags (distinct from the AI review's
+      // aiSummary/aiRiskFlags — kept separate so a re-parse never clobbers a
+      // previously-run AI review, and vice versa).
+      'reportSummary', 'redFlags',
     ];
     for (const f of reportFields) {
       if (analytics[f] != null) merged[f] = analytics[f];
@@ -1479,7 +1481,7 @@ export default function App({ user = {}, onLogout }) {
         || $(/class="insight-box"[^>]*>\s*<p[^>]*>([\s\S]{50,700}?)<\/p>/i);
       if (summaryRaw) summaryText = summaryRaw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
     }
-    if (summaryText) a.aiSummary = summaryText.substring(0, 800);
+    if (summaryText) a.reportSummary = summaryText.substring(0, 800);
 
     // Red flags — try flag-title cards first (Deal Analyser format), then <ul>, then generic block
     const flagTitles = [...htmlText.matchAll(/class="flag-title"[^>]*>([\s\S]*?)<\/div>/gi)]
@@ -1719,14 +1721,14 @@ export default function App({ user = {}, onLogout }) {
       fetch('/api/crm-data', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks }) })
         .then(() => { setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); }).catch(() => setSaveStatus('idle'));
       const got = [];
-      if (analytics.aiSummary) got.push('AI summary');
+      if (analytics.reportSummary) got.push('report summary');
       if (analytics.redFlags?.length) got.push(`${analytics.redFlags.length} red flags`);
       if (analytics.gdvConservative || analytics.gdvBase || analytics.gdvOptimistic) got.push('GDV scenarios');
       if (analytics.matrixBase || analytics.matrixConservative || analytics.matrixOptimistic) got.push('profit matrix');
       if (analytics.maxBid) got.push('max bid');
       if (analytics.netProfit) got.push('net profit');
       const missing = [];
-      if (!analytics.aiSummary) missing.push('AI summary');
+      if (!analytics.reportSummary) missing.push('report summary');
       if (!analytics.redFlags?.length) missing.push('red flags');
       if (!(analytics.gdvConservative || analytics.gdvBase || analytics.gdvOptimistic)) missing.push('GDV scenarios');
       alert(`Re-parsed "${rec.name}".\n\nFound: ${got.join(', ') || 'basic figures only'}.${missing.length ? `\n\nNOT detected: ${missing.join(', ')} — these sections weren't found in the report HTML. If the report does contain them, send it to me and I'll adjust the parser.` : ''}`);
@@ -2102,7 +2104,9 @@ ${intelRows.length ? `<h2>Area intelligence</h2><table>${intelRows.map(([l, v]) 
 
 ${comps.length ? `<h2>Comparable sales</h2><table><tr><th>Address</th><th>Sold</th><th>Price</th><th>Notes</th></tr>${comps.map(c => `<tr><td>${esc(c.address)}</td><td>${esc(c.soldDate || c.date || '—')}</td><td>${f(c.soldPrice ?? c.price)}</td><td>${esc(c.notes || c.propertyType || '')}</td></tr>`).join('')}</table>` : ''}
 
-${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRiskFlags || []).length ? `<div class="sub" style="font-weight:bold;margin-top:6px">Risk flags</div><ul>${an.aiRiskFlags.map(r => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}` : ''}
+${(an.reportSummary || (an.aiSummary && an.aiDealScore == null)) ? `<h2>Report summary</h2><p>${esc(an.reportSummary || an.aiSummary)}</p>` : ''}
+
+${an.aiSummary && an.aiDealScore != null ? `<h2>AI review (second opinion)</h2><p>${esc(an.aiSummary)}</p>${an.aiReportCrossCheck ? `<p class="sub"><strong>vs report:</strong> ${esc(an.aiReportCrossCheck)}</p>` : ''}${(an.aiRiskFlags || []).length ? `<div class="sub" style="font-weight:bold;margin-top:6px">Risk flags</div><ul>${an.aiRiskFlags.map(r => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}` : ''}
 
 ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSummary)}</p><p class="sub">Positioning: ${esc((an.dealAnalysisPositioning || '').replace('_', ' '))} · Confidence: ${esc(an.dealAnalysisConfidence || '—')}</p>${(an.dealAnalysisComparables || []).length ? `<table><tr><th>Address</th><th>Price</th><th>Date</th><th>Source</th></tr>${an.dealAnalysisComparables.map(c => `<tr><td>${esc(c.address || '')}</td><td>${esc(c.price || '')}</td><td>${esc(c.date || '')}</td><td>${esc(c.source || '')}</td></tr>`).join('')}</table>` : ''}` : ''}
 
@@ -2163,7 +2167,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
       const r = data.review;
       const updated = withActivity({
         ...prop,
-        analytics: { ...(prop.analytics || {}), aiSummary: r.summary, aiRiskFlags: r.riskFlags, aiStrengths: r.strengths, aiDealScore: r.dealScore, aiVerdict: r.verdict, aiReviewedAt: data.reviewedAt, aiProvider: data.provider },
+        analytics: { ...(prop.analytics || {}), aiSummary: r.summary, aiRiskFlags: r.riskFlags, aiStrengths: r.strengths, aiDealScore: r.dealScore, aiVerdict: r.verdict, aiReviewedAt: data.reviewedAt, aiProvider: data.provider, aiReportAgreement: r.reportComparison?.agreement || null, aiReportCrossCheck: r.reportComparison?.note || null },
       }, 'intelligence', `AI deal review — score ${r.dealScore}/100 (${r.verdict.replace('_', ' ')})`);
       setProperties(prev => prev.map(p => p.id === prop.id ? updated : p));
       if (currentViewProperty?.id === prop.id) setCurrentViewProperty(updated);
@@ -4188,13 +4192,16 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     return <div style={{ padding: '14px 20px', fontSize: '12px', color: '#b91c1c' }}>Couldn't render comparables — {String(e?.message || e)}</div>;
                   } })()}
 
-                  {/* AI deal summary — Overview tab (report-parsed summaries without full review fields) */}
-                  {propCanvasTab === 'overview' && an.aiSummary && an.aiDealScore == null && (
+                  {/* Report summary — Overview tab (the report's own written summary).
+                      Coexists with the AI review card below. Legacy fallback: older
+                      properties stored the report summary in aiSummary before an AI
+                      review had ever run (aiDealScore still null). */}
+                  {propCanvasTab === 'overview' && (an.reportSummary || (an.aiSummary && an.aiDealScore == null)) && (
                     <div style={{ margin: '14px 20px 0', borderRadius: '8px', border: '1px solid #fde68a', background: '#fffbeb', padding: '10px 12px', display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
-                      <span style={{ fontSize: '14px', flexShrink: 0 }}>🤖</span>
+                      <span style={{ fontSize: '14px', flexShrink: 0 }}>📄</span>
                       <div>
-                        <div style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.07em', color: '#92400e', marginBottom: '3px' }}>AI deal summary</div>
-                        <div style={{ fontSize: '11px', color: '#451a03', lineHeight: '1.5' }}>{an.aiSummary}</div>
+                        <div style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.07em', color: '#92400e', marginBottom: '3px' }}>Report summary</div>
+                        <div style={{ fontSize: '11px', color: '#451a03', lineHeight: '1.5' }}>{an.reportSummary || an.aiSummary}</div>
                       </div>
                     </div>
                   )}
@@ -4219,7 +4226,18 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         <div style={{ height: '6px', background: '#ede9fe', borderRadius: '3px', overflow: 'hidden', marginBottom: '10px' }}>
                           <div style={{ width: `${score}%`, height: '100%', background: scoreCol }}></div>
                         </div>
-                        <div style={{ fontSize: '12px', color: '#3b0764', lineHeight: 1.6, marginBottom: (an.aiRiskFlags?.length || an.aiStrengths?.length) ? '10px' : 0 }}>{an.aiSummary}</div>
+                        <div style={{ fontSize: '12px', color: '#3b0764', lineHeight: 1.6, marginBottom: (an.aiReportCrossCheck || an.aiRiskFlags?.length || an.aiStrengths?.length) ? '10px' : 0 }}>{an.aiSummary}</div>
+                        {an.aiReportCrossCheck && (() => {
+                          const agr = an.aiReportAgreement || 'agree';
+                          const c = agr === 'agree' ? '#059669' : agr === 'partial' ? '#d97706' : '#dc2626';
+                          const lbl = { agree: 'Agrees with report', partial: 'Partly agrees', disagree: 'Disagrees with report' }[agr] || agr;
+                          return (
+                            <div style={{ marginBottom: (an.aiRiskFlags?.length || an.aiStrengths?.length) ? '10px' : 0, padding: '8px 10px', background: '#fff', border: `1px solid ${c}44`, borderLeft: `3px solid ${c}`, borderRadius: '6px' }}>
+                              <span style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.05em', color: c }}>vs report · {lbl}</span>
+                              <div style={{ fontSize: '11px', color: '#3b0764', lineHeight: 1.5, marginTop: '2px' }}>{an.aiReportCrossCheck}</div>
+                            </div>
+                          );
+                        })()}
                         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '10px' }}>
                           {(an.aiRiskFlags || []).length > 0 && (
                             <div>
@@ -9100,7 +9118,18 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                   <div style={{ height: '6px', background: '#ede9fe', borderRadius: '3px', overflow: 'hidden', marginBottom: '10px' }}>
                                     <div style={{ width: `${score}%`, height: '100%', background: scoreCol }}></div>
                                   </div>
-                                  <div style={{ fontSize: '12px', color: '#3b0764', lineHeight: 1.6, marginBottom: (an.aiRiskFlags?.length || an.aiStrengths?.length) ? '10px' : 0 }}>{an.aiSummary}</div>
+                                  <div style={{ fontSize: '12px', color: '#3b0764', lineHeight: 1.6, marginBottom: (an.aiReportCrossCheck || an.aiRiskFlags?.length || an.aiStrengths?.length) ? '10px' : 0 }}>{an.aiSummary}</div>
+                                  {an.aiReportCrossCheck && (() => {
+                                    const agr = an.aiReportAgreement || 'agree';
+                                    const c = agr === 'agree' ? '#059669' : agr === 'partial' ? '#d97706' : '#dc2626';
+                                    const lbl = { agree: 'Agrees with report', partial: 'Partly agrees', disagree: 'Disagrees with report' }[agr] || agr;
+                                    return (
+                                      <div style={{ marginBottom: (an.aiRiskFlags?.length || an.aiStrengths?.length) ? '10px' : 0, padding: '8px 10px', background: '#fff', border: `1px solid ${c}44`, borderLeft: `3px solid ${c}`, borderRadius: '6px' }}>
+                                        <span style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.05em', color: c }}>vs report · {lbl}</span>
+                                        <div style={{ fontSize: '11px', color: '#3b0764', lineHeight: 1.5, marginTop: '2px' }}>{an.aiReportCrossCheck}</div>
+                                      </div>
+                                    );
+                                  })()}
                                   <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '10px' }}>
                                     {(an.aiRiskFlags || []).length > 0 && (
                                       <div>

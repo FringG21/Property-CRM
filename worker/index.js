@@ -4984,20 +4984,30 @@ async function handleApiRoutes(request, env, url, ctx) {
       const schema = {
         type: 'object',
         additionalProperties: false,
-        required: ['summary', 'riskFlags', 'strengths', 'dealScore', 'verdict'],
+        required: ['summary', 'riskFlags', 'strengths', 'dealScore', 'verdict', 'reportComparison'],
         properties: {
           summary: { type: 'string', description: '3-5 sentence plain-English assessment of this deal for a UK property flip investor' },
           riskFlags: { type: 'array', items: { type: 'string' }, description: 'Specific risks found in the data — thin margin, low comps, flood/planning/crime issues, missing information, over-guide pressure. Empty if genuinely none.' },
           strengths: { type: 'array', items: { type: 'string' }, description: 'Specific strengths of the deal grounded in the data.' },
           dealScore: { type: 'integer', description: 'Deal quality score from 0 (avoid at any price) to 100 (exceptional opportunity)' },
           verdict: { type: 'string', enum: ['strong_buy', 'buy', 'conditional', 'avoid'] },
+          reportComparison: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['agreement', 'note'],
+            description: 'Your cross-check against the prior assessment report already in the analytics (its verdict, maxBid, netProfit, margin and GDV).',
+            properties: {
+              agreement: { type: 'string', enum: ['agree', 'partial', 'disagree'], description: "How well your view matches the report's conclusion. Use 'agree' if none was supplied." },
+              note: { type: 'string', description: "1-2 sentences: where you agree or diverge from the report's figures/verdict and why. Empty string if no report figures were supplied to compare against." },
+            },
+          },
         },
       };
 
       try {
         const { result: review, provider } = await generateInsight({
-          system: 'You are a UK property investment analyst reviewing auction flip deals for a small investment partnership in South Yorkshire. Be direct and specific: ground every claim in the numbers provided, flag what is missing, and never invent figures. Margins under 15% are tight for a flip; under 5% are usually not worth the risk.',
-          prompt: `Review this auction deal and score it.\n\n${context}`,
+          system: 'You are a UK property investment analyst reviewing auction flip deals for a small investment partnership in South Yorkshire. Be direct and specific: ground every claim in the numbers provided, flag what is missing, and never invent figures. Margins under 15% are tight for a flip; under 5% are usually not worth the risk. A prior assessment report may already have scored this deal — its verdict, maxBid, netProfit, margin and GDV are in the report analytics. Act as an independent second opinion: validate those figures against the comparables and area intelligence, and in reportComparison state clearly whether you agree, partly agree, or disagree with the report and why. Do not simply restate the report.',
+          prompt: `Review this auction deal and score it. If report analytics are present, cross-check your conclusion against them.\n\n${context}`,
           schema,
           requiredFields: ['summary', 'riskFlags', 'strengths', 'dealScore', 'verdict'],
           env,
