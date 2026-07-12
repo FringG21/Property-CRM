@@ -34,10 +34,14 @@ const AUCTION_HOUSES_CONFIG = [
   { id: 'allsop', name: 'Allsop Residential', shortName: 'Allsop', diaryUrl: 'https://www.allsop.co.uk/auctions/property-for-auction-in-sheffield/' },
   { id: 'mchugh', name: 'McHugh & Co', shortName: 'McHugh', diaryUrl: 'https://www.mchughandco.com/' },
   { id: 'eig', name: 'EIG (mixed auctioneers)', shortName: 'EIG', diaryUrl: 'https://www.eigpropertyauctions.co.uk/search/property/south-yorkshire?view=1&order=0' },
+  { id: 'otm', name: 'OnTheMarket (mixed auctioneers)', shortName: 'OnTheMarket', diaryUrl: 'https://www.onthemarket.com/auction/property/south-yorkshire/' },
 ];
 
 const EIG_BASE_URL = 'https://www.eigpropertyauctions.co.uk';
 const EIG_HOUSE_NAME = 'EIG (mixed auctioneers)';
+
+const OTM_BASE_URL = 'https://www.onthemarket.com';
+const OTM_HOUSE_NAME = 'OnTheMarket (mixed auctioneers)';
 
 const SY_KEYWORDS = ['sheffield', 'doncaster', 'rotherham', 'barnsley', 'south yorkshire', ', s1 ', ', s2 ', ', s3 ', ', s4 ', ', s5 ', ', s6 ', ', s7 ', ', s8 ', ', s9 ', ', s10', ', s11', ', s12', ', s13', ', s14', ', s20', ', s21', ', s60', ', s61', ', s62', ', s63', ', s64', ', s65', ', s66', ', dn1', ', dn2', ', dn3', ', dn4', ', dn5'];
 
@@ -788,6 +792,12 @@ async function d1PutAuctionLot(env, lot) {
   ).bind(String(lot.id), lot.dateId != null ? String(lot.dateId) : null, lot.status || 'unreviewed', lot.isWithdrawn ? 1 : 0, lot.firstSeenAt || null, lot.lastUpdatedAt || lot.firstSeenAt || null, JSON.stringify(lot)).run();
 }
 
+async function d1GetAuctionLotById(env, id) {
+  const row = await env.CRM_DB.prepare('SELECT data FROM auction_lots WHERE id = ?').bind(String(id)).first();
+  if (!row) return null;
+  try { return JSON.parse(row.data); } catch { return null; }
+}
+
 // ============================================================
 // SCRAPER HELPERS
 // ============================================================
@@ -1234,6 +1244,76 @@ async function scrapeEigLots(opts = {}) {
   return result;
 }
 
+// OnTheMarket (onthemarket.com) auction search results are server-rendered
+// Next.js: the full listings array is embedded as JSON in a
+// <script id="__NEXT_DATA__"> tag, so no HTML slicing/regex fields are needed
+// — just parse the JSON and read props.initialReduxState.results.list. Unlike
+// EIG this is mostly individual agent listings (Modern Method of Auction /
+// online bidding), so there's no shared auction event date or lot number.
+function parseOtmCatalogue(html) {
+  const m = String(html || '').match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/i);
+  if (!m) return [];
+  let data;
+  try { data = JSON.parse(m[1]); } catch { return []; }
+  const list = data?.props?.initialReduxState?.results?.list;
+  if (!Array.isArray(list)) return [];
+  const lots = [];
+  for (const item of list) {
+    const address = item.address || null;
+    const guidePrice = parseGuidePrice(item.price);
+    if (!address && guidePrice == null) continue;
+    const otmId = item.id != null ? String(item.id) : null;
+    const imageUrl = item['cover-image']?.default || item.images?.[0]?.default || null;
+    const lotUrl = item['details-url'] ? `${OTM_BASE_URL}${item['details-url']}` : null;
+    lots.push({
+      address, guidePrice,
+      lotNumber: null,
+      propertyType: item['humanised-property-type'] || null,
+      bedrooms: item.bedrooms || 0,
+      auctionDate: null,
+      imageUrl, lotUrl, otmId,
+    });
+  }
+  return lots;
+}
+
+// Crawl OTM's South Yorkshire auction search over its numbered pages. Plain
+// fetch (server-rendered), capped, stops when a page yields no lots. Never
+// throws — failures surface via the returned error field.
+async function scrapeOtmLots(opts = {}) {
+  const result = { lots: [], pagesFetched: 0, error: null };
+  const maxPages = opts.maxPages || 15;
+  try {
+    const seen = new Set();
+    for (let page = 1; page <= maxPages; page++) {
+      const url = page === 1
+        ? `${OTM_BASE_URL}/auction/property/south-yorkshire/`
+        : `${OTM_BASE_URL}/auction/property/south-yorkshire/?page=${page}`;
+      let html;
+      try {
+        const res = await fetch(url, { headers: { 'User-Agent': SCRAPER_UA, 'Accept': 'text/html' }, signal: AbortSignal.timeout(12000) });
+        if (!res.ok) { if (page === 1) result.error = `OTM HTTP ${res.status}`; break; }
+        html = await res.text();
+      } catch (err) {
+        if (page === 1) result.error = err.message;
+        break;
+      }
+      result.pagesFetched++;
+      const pageLots = parseOtmCatalogue(html);
+      if (!pageLots.length) break;
+      for (const lot of pageLots) {
+        const key = lot.otmId || `${(lot.address || '').toLowerCase()}|${lot.guidePrice ?? ''}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.lots.push(lot);
+      }
+    }
+  } catch (err) {
+    result.error = err.message;
+  }
+  return result;
+}
+
 // Trailing postcode token for cross-source matching. EIG addresses carry only a
 // district (e.g. "Sheffield, South Yorkshire, S2"), so extractOutcode (which
 // needs a full postcode) returns null; fall back to the full-postcode outcode
@@ -1585,7 +1665,9 @@ async function runScheduledLotScan(env) {
   const direct = await runLotScan(env, settings, { onNewLot });
   // EIG runs after the direct houses so it can tag lots they just refreshed.
   const eig = await runEigScan(env, settings, { onNewLot });
-  return { ...direct, results: [...(direct.results || []), ...(eig.results || [])], lots: [...(direct.lots || []), ...(eig.lots || [])] };
+  // OTM runs last so it can tag lots either of the above just refreshed.
+  const otm = await runOtmScan(env, settings, { onNewLot });
+  return { ...direct, results: [...(direct.results || []), ...(eig.results || []), ...(otm.results || [])], lots: [...(direct.lots || []), ...(eig.lots || []), ...(otm.lots || [])] };
 }
 
 function houseIdForName(name) {
@@ -1762,6 +1844,186 @@ async function runEigScan(env, settings, opts = {}) {
             type: 'listing_change',
             title: `Listing changed: ${lot.address || lot.id}`,
             body: `${EIG_HOUSE_NAME} — withdrawn`,
+            targetType: 'lot',
+            targetId: lot.id,
+          });
+        } catch {}
+      }
+    }
+  }
+
+  for (const dateId of touchedDateIds) {
+    try { await recomputeAuctionDateCounts(env, dateId); } catch {}
+  }
+
+  return { success: true, results: [summary], lots: matchedLotRecords, scrapedAt: now };
+}
+
+// OTM's own scan pass: same tag-or-upsert shape as runEigScan, but OTM listings
+// carry no auction event date (mostly rolling online-bidding sales, not a
+// scheduled lot catalogue), so candidates are keyed on postcode district alone
+// instead of date+district. To compensate for losing the date as a match
+// signal, the address-similarity bar required to accept a match is raised
+// versus EIG's (0.15) — 0.2 for an exact guide-price match, 0.35 for a
+// tolerated guide gap — so two different cheap properties in the same
+// district don't get wrongly merged into one lot. Never throws.
+async function runOtmScan(env, settings, opts = {}) {
+  const now = new Date().toISOString();
+  const today = now.split('T')[0];
+  const summary = { houseId: 'otm', name: OTM_HOUSE_NAME, lotsFound: 0, matched: 0, tagged: 0, newLots: 0, updated: 0, withdrawn: 0, error: null };
+  const matchedLotRecords = [];
+
+  const scrape = await scrapeOtmLots({});
+  summary.lotsFound = scrape.lots.length;
+  summary.error = scrape.error;
+
+  // Same region/price/type filters the 6 houses and EIG use.
+  let matched = scrape.lots.filter(l => matchesRegion(l.address, settings) && (l.guidePrice == null || l.guidePrice <= settings.maxGuidePrice));
+  if (settings.propertyTypes === 'houses') matched = matched.filter(l => !isExcludedFromHouses(l.propertyType));
+  summary.matched = matched.length;
+
+  if (opts.dryRun) {
+    return { success: true, results: [summary], lots: matched.slice(0, 100), scrapedAt: now, dryRun: true };
+  }
+  // A failed scrape that returned nothing must never withdraw the catalogue.
+  if (scrape.error && !scrape.lots.length) {
+    return { success: true, results: [summary], lots: [], scrapedAt: now };
+  }
+
+  // One read of every lot: direct-house/EIG lots become match candidates,
+  // existing OTM lots feed the upsert + withdrawal detection.
+  const allLots = await d1GetAuctionLots(env);
+  const candidateIndex = new Map();
+  for (const l of allLots) {
+    if (l.houseName === OTM_HOUSE_NAME || l.isWithdrawn || l.guidePrice == null) continue;
+    const d = extractDistrict(l.address);
+    if (!d) continue;
+    if (!candidateIndex.has(d)) candidateIndex.set(d, []);
+    candidateIndex.get(d).push(l);
+  }
+  const otmExistingById = new Map(allLots.filter(l => l.houseName === OTM_HOUSE_NAME).map(l => [String(l.id), l]));
+
+  const ensuredDates = new Set();
+  const touchedDateIds = new Set();
+  const scrapedOtmIds = new Set();
+  const taggedExistingIds = new Set();
+
+  for (const raw of matched) {
+    // 1) Tag a matching existing lot rather than duplicating it. Requires a
+    // numeric guide so "Refer"/POA lots never match spuriously.
+    if (raw.guidePrice != null) {
+      const d = extractDistrict(raw.address);
+      const cands = (d && candidateIndex.get(d)) || [];
+      let existing = null, bestScore = -1;
+      for (const c of cands) {
+        if (taggedExistingIds.has(String(c.id))) continue;
+        const cg = Number(c.guidePrice), rg = Number(raw.guidePrice);
+        const exact = cg === rg;
+        const guideClose = exact || Math.abs(cg - rg) <= Math.max(2500, rg * 0.05);
+        if (!guideClose) continue;
+        const sim = addressSimilarity(raw.address, c.address);
+        // No date signal available, so require more address overlap than EIG
+        // does before accepting a match, even on an exact guide-price hit.
+        if (exact && sim < 0.2) continue;
+        if (!exact && sim < 0.35) continue;
+        const score = (exact ? 1 : 1 - Math.abs(cg - rg) / rg) + sim;
+        if (score > bestScore) { bestScore = score; existing = c; }
+      }
+      if (existing) {
+        taggedExistingIds.add(String(existing.id));
+        const sources = Array.isArray(existing.sources) && existing.sources.length ? existing.sources : [houseIdForName(existing.houseName)];
+        if (!sources.includes('otm')) {
+          const updated = { ...existing, sources: [...sources, 'otm'], alsoOnOtm: true, lastUpdatedAt: now };
+          await d1PutAuctionLot(env, updated);
+          summary.tagged++;
+          matchedLotRecords.push(updated);
+        }
+        continue;
+      }
+    }
+
+    // 2) No match — upsert as an OTM-sourced lot.
+    const lotId = stableLotId('otm', raw);
+    scrapedOtmIds.add(lotId);
+    const auctionDate = raw.auctionDate || null;
+    const dateId = `otm-${auctionDate || 'tbc'}`;
+    if (!ensuredDates.has(dateId)) {
+      ensuredDates.add(dateId);
+      const dRow = await env.CRM_DB.prepare('SELECT data FROM auction_dates WHERE id = ?').bind(String(dateId)).first();
+      if (dRow) {
+        await d1PutAuctionDate(env, { ...JSON.parse(dRow.data), lastScannedAt: now });
+      } else {
+        await d1PutAuctionDate(env, { id: dateId, houseId: 'otm', houseName: OTM_HOUSE_NAME, auctionDate, diaryUrl: `${OTM_BASE_URL}/auction/property/south-yorkshire/`, totalLots: 0, reviewedCount: 0, shortlistedCount: 0, rejectedCount: 0, watchingCount: 0, isNew: true, firstSeenAt: now, lastScannedAt: now });
+      }
+    }
+    touchedDateIds.add(dateId);
+
+    const existing = otmExistingById.get(lotId);
+    if (!existing) {
+      const newLot = {
+        id: lotId, dateId, origin: 'scraped', status: 'unreviewed', isNew: true,
+        guidePriceChanged: false, isWithdrawn: false, firstSeenAt: now, lastUpdatedAt: now,
+        address: raw.address, guidePrice: raw.guidePrice, bedrooms: raw.bedrooms || 0,
+        propertyType: raw.propertyType || 'Unknown', lotNumber: raw.lotNumber,
+        auctionDate, auctionTime: '', houseName: OTM_HOUSE_NAME, houseId: 'otm', sources: ['otm'],
+        lotUrl: raw.lotUrl || '', imageUrl: raw.imageUrl || null, notes: '',
+      };
+      await d1PutAuctionLot(env, newLot);
+      summary.newLots++;
+      matchedLotRecords.push(newLot);
+      if (opts.onNewLot) { try { await opts.onNewLot(newLot); } catch {} }
+    } else {
+      const updatedLot = {
+        ...existing,
+        address: raw.address || existing.address,
+        propertyType: raw.propertyType || existing.propertyType,
+        bedrooms: raw.bedrooms || existing.bedrooms,
+        lotUrl: raw.lotUrl || existing.lotUrl,
+        imageUrl: raw.imageUrl || existing.imageUrl,
+        sources: Array.isArray(existing.sources) && existing.sources.includes('otm') ? existing.sources : ['otm'],
+        isWithdrawn: false,
+        lastUpdatedAt: now,
+      };
+      const priceChanged = raw.guidePrice != null && existing.guidePrice != null && Number(raw.guidePrice) !== Number(existing.guidePrice);
+      if (priceChanged) {
+        updatedLot.previousGuidePrice = existing.guidePrice;
+        updatedLot.guidePrice = raw.guidePrice;
+        updatedLot.guidePriceChanged = true;
+        try {
+          await d1InsertAlert(env, {
+            id: `lotchange-${lotId}-${today}`,
+            type: 'listing_change',
+            title: `Listing changed: ${updatedLot.address || lotId}`,
+            body: `${OTM_HOUSE_NAME} — guide ${Number(existing.guidePrice || 0).toLocaleString()} → ${Number(raw.guidePrice || 0).toLocaleString()}`,
+            targetType: 'lot',
+            targetId: lotId,
+          });
+        } catch {}
+      } else if (raw.guidePrice != null && existing.guidePrice == null) {
+        updatedLot.guidePrice = raw.guidePrice;
+      }
+      await d1PutAuctionLot(env, updatedLot);
+      summary.updated++;
+      matchedLotRecords.push(updatedLot);
+    }
+  }
+
+  // Withdrawals — only within OTM dates we touched, and only when the scrape
+  // actually returned lots, mirroring runEigScan's guard.
+  if (matched.length > 0) {
+    for (const dateId of touchedDateIds) {
+      const dateLots = await d1GetAuctionLots(env, dateId);
+      for (const lot of dateLots) {
+        if (lot.origin !== 'scraped' || lot.isWithdrawn) continue;
+        if (scrapedOtmIds.has(String(lot.id))) continue;
+        await d1PutAuctionLot(env, { ...lot, isWithdrawn: true, lastUpdatedAt: now });
+        summary.withdrawn++;
+        try {
+          await d1InsertAlert(env, {
+            id: `lotchange-${lot.id}-${today}`,
+            type: 'listing_change',
+            title: `Listing changed: ${lot.address || lot.id}`,
+            body: `${OTM_HOUSE_NAME} — withdrawn`,
             targetType: 'lot',
             targetId: lot.id,
           });
@@ -2184,17 +2446,40 @@ async function connectorBroadband(postcode, env) {
   };
 }
 
+// ── Area news & regeneration (Tavily web search, TAVILY_API_KEY required) ────
+// Raw search results only — no LLM call — so it stays fast and quota-free.
+async function connectorNews(postcode, laName, env) {
+  if (!env.TAVILY_API_KEY) throw new Error('TAVILY_API_KEY not configured');
+  const outcode = String(postcode || '').trim().split(/\s+/)[0];
+  const area = laName || outcode;
+  if (!area) throw new Error('No area to search news for');
+  const items = await webSearch(`${area} regeneration development investment news`, env, 6);
+  if (!items.length) throw new Error('No recent news found');
+  return {
+    area,
+    items: items.map(r => ({ title: r.title, url: r.url, snippet: r.snippet, publishedDate: r.publishedDate })),
+    note: `${items.length} recent news items for ${area}`,
+  };
+}
+
 // ── UK House Price Index (Land Registry linked data, free, no auth) ──────────
-async function connectorHPI(laCode) {
-  if (!laCode) throw new Error('No LA code');
+// UK HPI is keyed by region SLUG (not the GSS code — the old
+// `hpi/averagePrice.json?regionCode=<GSS>` form returns HTTP 400). The slug is
+// derived from the local-authority name; `refPeriodStart` is a human date
+// ('Sun, 01 Jan 1995') so it's parsed to ISO and sorted by refMonth desc.
+async function connectorHPI(laCode, laName) {
+  const slug = laName
+    ? laName.toLowerCase().replace(/['’.]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+    : null;
+  if (!slug) throw new Error('No LA name for HPI');
   const res = await fetch(
-    `https://landregistry.data.gov.uk/data/hpi/averagePrice.json?regionCode=${encodeURIComponent(laCode)}&_pageSize=24&_sort=-refPeriodStart`,
+    `https://landregistry.data.gov.uk/data/ukhpi/region/${encodeURIComponent(slug)}/month.json?_pageSize=80&_sort=-refMonth`,
     { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(12000) },
   );
   if (!res.ok) throw new Error(`HPI HTTP ${res.status}`);
   const data = await res.json();
   const items = (data.result?.items || [])
-    .map(i => ({ date: i.refPeriodStart || i.date || '', price: Number(i.value) || 0 }))
+    .map(i => ({ date: i.refPeriodStart ? new Date(i.refPeriodStart).toISOString().slice(0, 10) : '', price: Number(i.averagePrice) || 0 }))
     .filter(i => i.price > 0 && i.date)
     .sort((a, b) => b.date.localeCompare(a.date));
   if (!items.length) throw new Error('No HPI data');
@@ -2212,7 +2497,7 @@ async function connectorHPI(laCode) {
     growth1yr: pct(current, p1y),
     growth3yr: pct(current, p3y),
     growth5yr: pct(current, p5y),
-    area: data.result?.items?.[0]?.refRegion?.label || laCode,
+    area: laName || laCode,
     lastUpdated: items[0].date,
     priceHistory: items.slice(0, 20).map(i => ({ date: i.date, price: Math.round(i.price) })),
   };
@@ -2670,6 +2955,199 @@ async function indexDocumentForSearch(env, { key, name, propertyId, userId, blob
 }
 
 // ============================================================
+// AI PROVIDER CHAIN — multi-provider LLM insight generation
+// ============================================================
+// Tries providers in priority order (best-quality/paid first, guaranteed-free
+// fallback last) so every AI-insight route works with zero secrets set, and
+// upgrades automatically the moment a provider's secret is added — no route
+// code needs to change. Only Anthropic has native strict JSON-schema output;
+// the rest are asked for JSON via prompt (+ native JSON-mode where available)
+// and parsed with parseJsonLoose.
+
+function anyAiProviderConfigured(env) {
+  return !!(env.ANTHROPIC_API_KEY || env.GROQ_API_KEY || env.GOOGLE_AI_API_KEY || env.OPENROUTER_API_KEY || env.AI);
+}
+
+function parseJsonLoose(text) {
+  if (!text) return null;
+  let s = String(text).trim();
+  const fenced = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) s = fenced[1].trim();
+  try { return JSON.parse(s); } catch {}
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    try { return JSON.parse(s.slice(start, end + 1)); } catch {}
+  }
+  return null;
+}
+
+function schemaAsPromptInstructions(schema) {
+  return `Respond with ONLY a single valid JSON object (no markdown fences, no commentary) matching this schema:\n${JSON.stringify(schema, null, 2)}`;
+}
+
+async function callAnthropic({ system, prompt, schema, env }) {
+  if (!env.ANTHROPIC_API_KEY) return null;
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'claude-opus-4-8',
+      max_tokens: 8000,
+      thinking: { type: 'adaptive' },
+      system,
+      messages: [{ role: 'user', content: prompt }],
+      output_config: { format: { type: 'json_schema', schema } },
+    }),
+  });
+  if (!res.ok) throw new Error(`Anthropic HTTP ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+  if (data.stop_reason === 'refusal') throw new Error('Anthropic declined the request');
+  const textBlock = (data.content || []).find(b => b.type === 'text');
+  if (!textBlock) throw new Error('Anthropic returned no content');
+  return { text: textBlock.text, provider: 'anthropic' };
+}
+
+async function callGroq({ system, prompt, schema, env }) {
+  if (!env.GROQ_API_KEY) return null;
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${env.GROQ_API_KEY}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'llama-3.3-70b-versatile',
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: `${prompt}\n\n${schemaAsPromptInstructions(schema)}` },
+      ],
+      response_format: { type: 'json_object' },
+      max_tokens: 2000,
+    }),
+  });
+  if (!res.ok) throw new Error(`Groq HTTP ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new Error('Groq returned no content');
+  return { text, provider: 'groq' };
+}
+
+async function callGemini({ system, prompt, schema, env }) {
+  if (!env.GOOGLE_AI_API_KEY) return null;
+  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${env.GOOGLE_AI_API_KEY}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: system }] },
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { responseMimeType: 'application/json' },
+    }),
+  });
+  if (!res.ok) throw new Error(`Gemini HTTP ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+  const text = (data.candidates?.[0]?.content?.parts || []).map(p => p.text).join('');
+  if (!text) throw new Error('Gemini returned no content');
+  return { text, provider: 'gemini' };
+}
+
+async function callOpenRouter({ system, prompt, schema, env }) {
+  if (!env.OPENROUTER_API_KEY) return null;
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${env.OPENROUTER_API_KEY}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'meta-llama/llama-3.3-70b-instruct:free',
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: `${prompt}\n\n${schemaAsPromptInstructions(schema)}` },
+      ],
+      response_format: { type: 'json_object' },
+    }),
+  });
+  if (!res.ok) throw new Error(`OpenRouter HTTP ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new Error('OpenRouter returned no content');
+  return { text, provider: 'openrouter' };
+}
+
+async function callWorkersAI({ system, prompt, schema, env }) {
+  if (!env.AI) return null;
+  const res = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: `${prompt}\n\n${schemaAsPromptInstructions(schema)}` },
+    ],
+  });
+  const text = res?.response;
+  if (!text) throw new Error('Workers AI returned no content');
+  return { text, provider: 'workers-ai' };
+}
+
+const AI_PROVIDER_CHAIN = [callAnthropic, callGroq, callGemini, callOpenRouter, callWorkersAI];
+
+// Tries each configured provider in priority order; validates the parsed JSON
+// has every field in requiredFields before accepting it, so a provider that
+// silently drops a field falls through to the next one instead of shipping
+// incomplete data to the client.
+async function generateInsight({ system, prompt, schema, requiredFields = [], env }) {
+  let lastError = null;
+  for (const call of AI_PROVIDER_CHAIN) {
+    let outcome;
+    try {
+      outcome = await call({ system, prompt, schema, env });
+    } catch (err) {
+      lastError = err;
+      console.error(`AI provider ${call.name} failed:`, err.message);
+      continue;
+    }
+    if (!outcome) continue; // provider not configured
+    const parsed = parseJsonLoose(outcome.text);
+    if (!parsed || typeof parsed !== 'object') { lastError = new Error(`${outcome.provider} returned unparseable JSON`); continue; }
+    const missing = requiredFields.filter(f => !(f in parsed));
+    if (missing.length) { lastError = new Error(`${outcome.provider} response missing fields: ${missing.join(', ')}`); continue; }
+    return { result: parsed, provider: outcome.provider };
+  }
+  throw lastError || new Error('No AI provider is configured — set at least one of ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY, or bind Workers AI');
+}
+
+// ============================================================
+// WEB SEARCH — Tavily (LLM-oriented search, free tier)
+// ============================================================
+// Returns [] (not a throw) when TAVILY_API_KEY isn't set, so callers can
+// degrade gracefully rather than fail the whole AI request over a missing
+// optional secret.
+async function webSearch(query, env, maxResults = 5) {
+  if (!env.TAVILY_API_KEY || !query) return [];
+  try {
+    const res = await fetch('https://api.tavily.com/search', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        api_key: env.TAVILY_API_KEY,
+        query,
+        search_depth: 'basic',
+        max_results: maxResults,
+      }),
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) { console.error('Tavily search failed:', res.status, await res.text()); return []; }
+    const data = await res.json();
+    return (data.results || []).map(r => ({
+      title: r.title || '',
+      url: r.url || '',
+      snippet: r.content || '',
+      publishedDate: r.published_date || null,
+    }));
+  } catch (err) {
+    console.error('Web search failed:', err.message);
+    return [];
+  }
+}
+
+// ============================================================
 // MAIN WORKER EXPORT
 // ============================================================
 
@@ -2720,7 +3198,7 @@ export default {
     // malformed request.json() or any other unexpected throw anywhere below
     // returns a clean JSON error instead of a bare unhandled Worker exception.
     try {
-      return await handleApiRoutes(request, env, url);
+      return await handleApiRoutes(request, env, url, ctx);
     } catch (err) {
       console.error('Unhandled worker error:', err);
       if (url.pathname.startsWith('/api/')) {
@@ -2731,7 +3209,7 @@ export default {
   },
 };
 
-async function handleApiRoutes(request, env, url) {
+async function handleApiRoutes(request, env, url, ctx) {
     // --------------------------------------------------------
     // MARKET INTELLIGENCE — all /api/market/* routes live in
     // worker/marketIntel.js behind a single session check.
@@ -4240,6 +4718,8 @@ async function handleApiRoutes(request, env, url) {
       try {
         const result = body.house === 'eig'
           ? await runEigScan(env, settings, { dryRun: !!body.dryRun })
+          : body.house === 'otm'
+          ? await runOtmScan(env, settings, { dryRun: !!body.dryRun })
           : await runLotScan(env, settings, { dryRun: !!body.dryRun, houseId: body.house || null });
         return corsResponse(result);
       } catch (err) {
@@ -4278,6 +4758,7 @@ async function handleApiRoutes(request, env, url) {
       const lsoaCode = addrData?.lsoaCode || null;
       const msoaCode = addrData?.msoaCode || null;
       const laCode   = addrData?.laCode   || null;
+      const laName   = addrData?.localAuthority || null;
 
       // Step 2: All remaining connectors in parallel
       const tasks = [];
@@ -4348,7 +4829,7 @@ async function handleApiRoutes(request, env, url) {
         // UK HPI — official area-level price growth (local authority)
         if (laCode) {
           tasks.push(
-            connectorHPI(laCode)
+            connectorHPI(laCode, laName)
               .then(data => ({ key: 'hpi', status: 'success', data, source: 'Land Registry UK HPI' }))
               .catch(err => ({ key: 'hpi', status: 'error', error: err.message, source: 'Land Registry UK HPI' }))
           );
@@ -4397,6 +4878,11 @@ async function handleApiRoutes(request, env, url) {
       if (postcode && env.OFCOM_API_KEY) {
         tasks.push(
           connectorBroadband(postcode, env).then(data=>({ key:'broadband', status:'success', data, source:'Ofcom Connected Nations' })).catch(err=>({ key:'broadband', status:'error', error:err.message, source:'Ofcom Connected Nations' })),
+        );
+      }
+      if (postcode && env.TAVILY_API_KEY) {
+        tasks.push(
+          connectorNews(postcode, laName, env).then(data=>({ key:'news', status:'success', data, source:'Web search (Tavily)' })).catch(err=>({ key:'news', status:'error', error:err.message, source:'Web search (Tavily)' })),
         );
       }
 
@@ -4468,8 +4954,8 @@ async function handleApiRoutes(request, env, url) {
     if (url.pathname === '/api/ai/deal-review' && request.method === 'POST') {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
-      if (!env.ANTHROPIC_API_KEY) {
-        return corsResponse({ success: false, message: 'AI not configured — set the ANTHROPIC_API_KEY secret: npx wrangler secret put ANTHROPIC_API_KEY' }, 400);
+      if (!anyAiProviderConfigured(env)) {
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
       }
       const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
       if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
@@ -4503,38 +4989,149 @@ async function handleApiRoutes(request, env, url) {
       };
 
       try {
-        const aiRes = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'x-api-key': env.ANTHROPIC_API_KEY,
-            'anthropic-version': '2023-06-01',
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            model: 'claude-opus-4-8',
-            max_tokens: 8000,
-            thinking: { type: 'adaptive' },
-            system: 'You are a UK property investment analyst reviewing auction flip deals for a small investment partnership in South Yorkshire. Be direct and specific: ground every claim in the numbers provided, flag what is missing, and never invent figures. Margins under 15% are tight for a flip; under 5% are usually not worth the risk.',
-            messages: [{ role: 'user', content: `Review this auction deal and score it.\n\n${context}` }],
-            output_config: { format: { type: 'json_schema', schema } },
-          }),
+        const { result: review, provider } = await generateInsight({
+          system: 'You are a UK property investment analyst reviewing auction flip deals for a small investment partnership in South Yorkshire. Be direct and specific: ground every claim in the numbers provided, flag what is missing, and never invent figures. Margins under 15% are tight for a flip; under 5% are usually not worth the risk.',
+          prompt: `Review this auction deal and score it.\n\n${context}`,
+          schema,
+          requiredFields: ['summary', 'riskFlags', 'strengths', 'dealScore', 'verdict'],
+          env,
         });
-        if (!aiRes.ok) {
-          const errText = await aiRes.text();
-          console.error('Anthropic API error:', aiRes.status, errText);
-          return corsResponse({ success: false, message: `AI request failed (HTTP ${aiRes.status})` }, 502);
-        }
-        const aiData = await aiRes.json();
-        if (aiData.stop_reason === 'refusal') {
-          return corsResponse({ success: false, message: 'AI declined to review this content' }, 502);
-        }
-        const textBlock = (aiData.content || []).find(b => b.type === 'text');
-        if (!textBlock) return corsResponse({ success: false, message: 'AI returned no content' }, 502);
-        const review = JSON.parse(textBlock.text);
-        return corsResponse({ success: true, review, reviewedAt: new Date().toISOString() });
+        return corsResponse({ success: true, review, provider, reviewedAt: new Date().toISOString() });
       } catch (err) {
         console.error('AI deal review failed:', err);
         return corsResponse({ success: false, message: 'Could not complete AI review' }, 502);
+      }
+    }
+
+    // --------------------------------------------------------
+    // AI — deal analysis (live market comparison via web search)
+    // --------------------------------------------------------
+    if (url.pathname === '/api/ai/deal-analysis' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      if (!anyAiProviderConfigured(env)) {
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
+      }
+      const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
+      if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
+
+      const { property } = await request.json();
+      if (!property || !property.address) return corsResponse({ success: false, message: 'Missing property' }, 400);
+
+      const searchQuery = `recent sold property prices near ${property.postcode || property.address}${property.propertyType ? ` ${property.propertyType}` : ''}`;
+      const searchResults = await webSearch(searchQuery, env, 6);
+
+      const clip = (obj) => JSON.stringify(obj ?? null).slice(0, 4000);
+      const context = [
+        `Address: ${property.address}${property.dealName ? ` (${property.dealName})` : ''}`,
+        `Guide price: £${Number(property.guidePrice || 0).toLocaleString()}`,
+        `Analytics (GDV/margin/costs): ${clip(property.analytics)}`,
+        searchResults.length
+          ? `Live web search results for local market context:\n${searchResults.map((r, i) => `${i + 1}. ${r.title} — ${r.snippet} (${r.url})`).join('\n')}`
+          : 'No live web search results were available — reason over the CRM data alone, and set positioning to "insufficient_data" and confidence to "low".',
+      ].join('\n\n');
+
+      const schema = {
+        type: 'object',
+        additionalProperties: false,
+        required: ['marketSummary', 'comparables', 'positioning', 'confidence'],
+        properties: {
+          marketSummary: { type: 'string', description: '2-4 sentence assessment of this deal against current local market conditions' },
+          comparables: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                address: { type: 'string' }, price: { type: 'string' }, date: { type: 'string' }, source: { type: 'string' },
+              },
+            },
+            description: 'Comparable sold/listed properties grounded only in the provided search results — never invented. Empty if search results gave nothing usable.',
+          },
+          positioning: { type: 'string', enum: ['underpriced', 'fair', 'overpriced', 'insufficient_data'] },
+          confidence: { type: 'string', enum: ['low', 'medium', 'high'], description: 'How much live search data was actually available to ground this assessment' },
+        },
+      };
+
+      try {
+        const { result: analysis, provider } = await generateInsight({
+          system: 'You are a UK property market analyst. Ground every claim in the search results and CRM data provided — never invent comparable prices or addresses. If search results are thin or absent, say so and lower your confidence rather than guessing.',
+          prompt: `Assess this deal against current local market conditions.\n\n${context}`,
+          schema,
+          requiredFields: ['marketSummary', 'comparables', 'positioning', 'confidence'],
+          env,
+        });
+        return corsResponse({ success: true, analysis, provider, generatedAt: new Date().toISOString() });
+      } catch (err) {
+        console.error('AI deal analysis failed:', err);
+        return corsResponse({ success: false, message: 'Could not complete deal analysis' }, 502);
+      }
+    }
+
+    // --------------------------------------------------------
+    // AI — auction triage insight (on-demand, per lot)
+    // --------------------------------------------------------
+    if (url.pathname === '/api/ai/triage-insight' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      if (!anyAiProviderConfigured(env)) {
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
+      }
+      const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
+      if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
+
+      const { lotId } = await request.json();
+      if (!lotId) return corsResponse({ success: false, message: 'Missing lotId' }, 400);
+      await ensureAuctionMigratedToD1(env);
+      const lot = await d1GetAuctionLotById(env, lotId);
+      if (!lot) return corsResponse({ success: false, message: 'Lot not found' }, 404);
+
+      // Triage lots are pre-promotion — EIG addresses are locality-only and OTM
+      // district-only, so a full street address is often unavailable here.
+      const searchQuery = `recent sold property prices near ${lot.address || ''}${lot.propertyType ? ` ${lot.propertyType}` : ''}`.trim();
+      const searchResults = lot.address ? await webSearch(searchQuery, env, 5) : [];
+
+      const context = [
+        `Address/locality: ${lot.address || 'unknown'}`,
+        `Guide price: £${Number(lot.guidePrice || 0).toLocaleString()}`,
+        `Type: ${lot.propertyType || 'unknown'} · Beds: ${lot.bedrooms || 'unknown'}`,
+        `Auction house: ${lot.houseName || 'unknown'} · Auction date: ${lot.auctionDate || 'unknown'}`,
+        searchResults.length
+          ? `Live web search results for local market context:\n${searchResults.map((r, i) => `${i + 1}. ${r.title} — ${r.snippet} (${r.url})`).join('\n')}`
+          : 'No live web search results were available for this locality.',
+      ].join('\n');
+
+      const schema = {
+        type: 'object',
+        additionalProperties: false,
+        required: ['flag', 'note', 'guidePriceAssessment'],
+        properties: {
+          flag: { type: 'string', enum: ['strong_interest', 'worth_reviewing', 'low_priority', 'insufficient_data'] },
+          note: { type: 'string', description: '1-2 sentence rationale for the flag' },
+          guidePriceAssessment: { type: 'string', enum: ['below_market', 'in_line', 'above_market', 'unknown'] },
+        },
+      };
+
+      try {
+        const { result: insight, provider } = await generateInsight({
+          system: 'You are triaging UK property auction lots for a South Yorkshire flip investor, working from thin pre-auction data. Be conservative — only flag strong_interest when the guide price looks genuinely favourable against the evidence given; use insufficient_data rather than guessing when evidence is thin.',
+          prompt: `Triage this auction lot.\n\n${context}`,
+          schema,
+          requiredFields: ['flag', 'note', 'guidePriceAssessment'],
+          env,
+        });
+        const updatedLot = {
+          ...lot,
+          aiFlag: insight.flag,
+          aiNote: insight.note,
+          aiGuideAssessment: insight.guidePriceAssessment,
+          aiInsightProvider: provider,
+          aiInsightGeneratedAt: new Date().toISOString(),
+        };
+        await d1PutAuctionLot(env, updatedLot);
+        return corsResponse({ success: true, insight, provider, lot: updatedLot });
+      } catch (err) {
+        console.error('AI triage insight failed:', err);
+        return corsResponse({ success: false, message: 'Could not complete triage insight' }, 502);
       }
     }
 

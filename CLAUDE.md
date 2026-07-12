@@ -121,6 +121,24 @@ Always build and deploy after changes. The chunk size warning is expected and ha
 - **New pipelines don't touch old data.** Documents uploaded before indexing existed need a one-off backfill (`POST /api/search/reindex`, "Index docs" button). Assume any "process on write" feature needs a matching reindex/backfill path for existing records.
 - **Workers AI + Vectorize are billed beyond free daily allowances** — keep chunk counts bounded (we cap at 80 chunks/doc).
 
+## AI insights — multi-provider LLM chain (worker/index.js)
+
+`generateInsight({ system, prompt, schema, requiredFields, env })` powers every AI-insight route
+(`/api/ai/deal-review`, `/api/ai/deal-analysis`, `/api/ai/triage-insight`). It tries providers in priority
+order and returns the first one that responds with valid JSON containing every field in `requiredFields`:
+
+1. **Claude (Anthropic)** — `ANTHROPIC_API_KEY` — best quality, paid, native JSON-schema output.
+2. **Groq** — `GROQ_API_KEY` — free tier, Llama 3.3 70B.
+3. **Google Gemini** — `GOOGLE_AI_API_KEY` — free tier, large context.
+4. **OpenRouter** — `OPENROUTER_API_KEY` — free-model aggregator.
+5. **Cloudflare Workers AI** — `env.AI` binding (already provisioned, same one used for doc-search embeddings) —
+   zero setup, guaranteed fallback, so every AI-insight route works today with no secrets set.
+
+All secrets are optional — set any via `npx wrangler secret put <NAME>` and the chain upgrades to it
+automatically, no code changes. `webSearch(query, env)` (Tavily, `TAVILY_API_KEY`) grounds `/api/ai/deal-analysis`
+and `/api/ai/triage-insight` in live local market data; it returns `[]` (not an error) when unset, so those
+routes still run on CRM data alone rather than failing outright.
+
 ## Rules
 1. Read a function fully before editing it
 2. Do not remove existing fields from any list (reportFields, connector results, etc.)

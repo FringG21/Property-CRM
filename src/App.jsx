@@ -21,6 +21,7 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
 });
 
+const AI_PROVIDER_LABELS = { anthropic: 'Claude', groq: 'Groq', gemini: 'Gemini', openrouter: 'OpenRouter', 'workers-ai': 'Workers AI' };
 const NOTE_TYPE_COLORS = { Review: '#7f77dd', 'Survey update': '#1d9e75', Legal: '#ba7517', Finance: '#378add', Task: '#8b5cf6', Flag: '#e24b4a', Call: '#0ea5e9', Meeting: '#7c3aed', Email: '#d97706' };
 const NOTE_TYPE_BG     = { Review: '#eeedfe', 'Survey update': '#e1f5ee', Legal: '#faeeda', Finance: '#e6f1fb', Task: '#ede9fe', Flag: '#fcebeb', Call: '#e0f2fe', Meeting: '#ede9fe', Email: '#fefce8' };
 const NOTE_TYPE_TEXT   = { Review: '#3c3489', 'Survey update': '#085041', Legal: '#633806', Finance: '#0c447c', Task: '#5b21b6', Flag: '#791f1f', Call: '#0c4a6e', Meeting: '#4c1d95', Email: '#713f12' };
@@ -1863,6 +1864,28 @@ export default function App({ user = {}, onLogout }) {
     } catch (e) { console.error('Bulk triage persist failed', e); }
   };
 
+  // ── AI triage insight — on-demand, per lot ──────────────────
+  const [aiTriageLoadingId, setAiTriageLoadingId] = useState(null);
+  const runTriageInsight = async (lot) => {
+    if (!lot || aiTriageLoadingId) return;
+    setAiTriageLoadingId(lot.id);
+    try {
+      const token = localStorage.getItem('crm_session');
+      const res = await fetch('/api/ai/triage-insight', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ lotId: lot.id }),
+      });
+      const data = await res.json();
+      if (!data.success) { alert(data.message || 'Triage insight failed.'); return; }
+      setAuctionLots(prev => prev.map(l => l.id === lot.id ? { ...l, ...data.lot } : l));
+    } catch {
+      alert('Triage insight failed — network error.');
+    } finally {
+      setAiTriageLoadingId(null);
+    }
+  };
+
   const sendLotToPipeline = (lot) => {
     setProperties(prev => [...prev, {
       id: Date.now(), address: lot.address, guidePrice: lot.guidePrice || 0, auctionDate: lot.auctionDate, auctionTime: '12:00', maxBid: 0, refurb: 0, bedrooms: lot.bedrooms || 0, propertyType: lot.propertyType || 'Unknown', sourcePlatform: lot.houseName || 'Auction', listingUrl: lot.lotUrl || reconstructLotUrl({ sourceLotId: lot.id, sourceOrigin: lot.origin }), isConsideration: false, isStrongBid: false, planningToBid: true, surveyorStatus: 'called', surveyorDate: '', checklist: { legalReviewed: false, financeApproved: false, costsPriced: false }, notesList: [], files: { mainReport: null, spriftReport: null, surveyFile: null, legalPack: null }, status: 'Sourced', hammerPrice: null, outcome: '',
@@ -2081,6 +2104,8 @@ ${comps.length ? `<h2>Comparable sales</h2><table><tr><th>Address</th><th>Sold</
 
 ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRiskFlags || []).length ? `<div class="sub" style="font-weight:bold;margin-top:6px">Risk flags</div><ul>${an.aiRiskFlags.map(r => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}` : ''}
 
+${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSummary)}</p><p class="sub">Positioning: ${esc((an.dealAnalysisPositioning || '').replace('_', ' '))} · Confidence: ${esc(an.dealAnalysisConfidence || '—')}</p>${(an.dealAnalysisComparables || []).length ? `<table><tr><th>Address</th><th>Price</th><th>Date</th><th>Source</th></tr>${an.dealAnalysisComparables.map(c => `<tr><td>${esc(c.address || '')}</td><td>${esc(c.price || '')}</td><td>${esc(c.date || '')}</td><td>${esc(c.source || '')}</td></tr>`).join('')}</table>` : ''}` : ''}
+
 <div class="disclaimer">Prepared by A&amp;A Investment Partners for lending assessment purposes. Figures are estimates derived from the assessment report, public records (HM Land Registry, EPC register, Environment Agency, Police.uk) and quotes received; they do not constitute a formal valuation. E&amp;OE.</div>
 </body></html>`;
     const win = window.open('', '_blank');
@@ -2119,6 +2144,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
             baseRate: intel.rates?.data ? `${intel.rates.data.baseRate}% (${intel.rates.data.trend})` : null,
             broadband: intel.broadband?.data?.note || null,
             epcImprovements: (intel.epc?.data?.recommendations || []).slice(0, 5).map(r => `${r.text}${r.indicativeCost ? ` (${r.indicativeCost})` : ''}`),
+            localNews: (intel.news?.data?.items || []).slice(0, 4).map(n => n.title),
           },
           refurbSummary: {
             quotes: propQuotes.length,
@@ -2137,7 +2163,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
       const r = data.review;
       const updated = withActivity({
         ...prop,
-        analytics: { ...(prop.analytics || {}), aiSummary: r.summary, aiRiskFlags: r.riskFlags, aiStrengths: r.strengths, aiDealScore: r.dealScore, aiVerdict: r.verdict, aiReviewedAt: data.reviewedAt },
+        analytics: { ...(prop.analytics || {}), aiSummary: r.summary, aiRiskFlags: r.riskFlags, aiStrengths: r.strengths, aiDealScore: r.dealScore, aiVerdict: r.verdict, aiReviewedAt: data.reviewedAt, aiProvider: data.provider },
       }, 'intelligence', `AI deal review — score ${r.dealScore}/100 (${r.verdict.replace('_', ' ')})`);
       setProperties(prev => prev.map(p => p.id === prop.id ? updated : p));
       if (currentViewProperty?.id === prop.id) setCurrentViewProperty(updated);
@@ -2145,6 +2171,46 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
       alert('AI review failed — network error.');
     } finally {
       setAiReviewLoadingId(null);
+    }
+  };
+
+  // ── AI deal analysis — live market comparison via web search ──
+  const [aiAnalysisLoadingId, setAiAnalysisLoadingId] = useState(null);
+  const runDealAnalysis = async (prop) => {
+    if (!prop || aiAnalysisLoadingId) return;
+    setAiAnalysisLoadingId(prop.id);
+    try {
+      const token = localStorage.getItem('crm_session');
+      const payload = {
+        property: {
+          address: prop.address, dealName: prop.dealName, postcode: prop.postcode,
+          guidePrice: prop.guidePrice, propertyType: prop.propertyType,
+          analytics: prop.analytics || {},
+        },
+      };
+      const res = await fetch('/api/ai/deal-analysis', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!data.success) { alert(data.message || 'Market comparison failed.'); return; }
+      const a = data.analysis;
+      const updated = withActivity({
+        ...prop,
+        analytics: {
+          ...(prop.analytics || {}),
+          dealAnalysisSummary: a.marketSummary, dealAnalysisComparables: a.comparables,
+          dealAnalysisPositioning: a.positioning, dealAnalysisConfidence: a.confidence,
+          dealAnalysisProvider: data.provider, dealAnalysisGeneratedAt: data.generatedAt,
+        },
+      }, 'intelligence', `AI market comparison — ${a.positioning.replace('_', ' ')} (${a.confidence} confidence)`);
+      setProperties(prev => prev.map(p => p.id === prop.id ? updated : p));
+      if (currentViewProperty?.id === prop.id) setCurrentViewProperty(updated);
+    } catch {
+      alert('Market comparison failed — network error.');
+    } finally {
+      setAiAnalysisLoadingId(null);
     }
   };
 
@@ -3509,6 +3575,22 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       >
                         {intelligenceRunning ? '⏳' : '🔍'}
                       </button>
+                      <button
+                        onClick={() => runAiDealReview(currentViewProperty)}
+                        disabled={aiReviewLoadingId === currentViewProperty.id}
+                        title={an.aiSummary ? 'Re-run AI deal review' : 'Run AI deal review'}
+                        style={{ display: 'flex', alignItems: 'center', fontSize: '11px', padding: '4px 8px', borderRadius: '6px', border: '1px solid', cursor: aiReviewLoadingId === currentViewProperty.id ? 'wait' : 'pointer', whiteSpace: 'nowrap', background: an.aiDealScore != null ? '#2e1065' : 'transparent', borderColor: an.aiDealScore != null ? '#6d28d9' : '#334155', color: an.aiDealScore != null ? '#c4b5fd' : '#94a3b8', fontFamily: 'inherit' }}
+                      >
+                        {aiReviewLoadingId === currentViewProperty.id ? '⏳' : '🤖'}
+                      </button>
+                      <button
+                        onClick={() => runDealAnalysis(currentViewProperty)}
+                        disabled={aiAnalysisLoadingId === currentViewProperty.id}
+                        title={an.dealAnalysisSummary ? 'Re-run market comparison' : 'Run market comparison (live web search)'}
+                        style={{ display: 'flex', alignItems: 'center', fontSize: '11px', padding: '4px 8px', borderRadius: '6px', border: '1px solid', cursor: aiAnalysisLoadingId === currentViewProperty.id ? 'wait' : 'pointer', whiteSpace: 'nowrap', background: an.dealAnalysisSummary ? '#172554' : 'transparent', borderColor: an.dealAnalysisSummary ? '#1d4ed8' : '#334155', color: an.dealAnalysisSummary ? '#93c5fd' : '#94a3b8', fontFamily: 'inherit' }}
+                      >
+                        {aiAnalysisLoadingId === currentViewProperty.id ? '⏳' : '🌐'}
+                      </button>
                       {propLotLink && (
                         <a href={propLotLink} target="_blank" rel="noreferrer" title="Open listing" style={{ display: 'flex', alignItems: 'center', fontSize: '11px', color: '#38bdf8', padding: '4px 8px', border: '1px solid #0c4a6e', borderRadius: '6px', background: '#0c2a3d', textDecoration: 'none', whiteSpace: 'nowrap' }}>
                           <ExternalLink size={11} />
@@ -3557,6 +3639,20 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                         style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', padding: '5px 10px', borderRadius: '6px', border: '1px solid', cursor: intelligenceRunning || !propPostcode ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap', opacity: !propPostcode ? 0.45 : 1, background: intel.lastRun ? '#052e16' : 'transparent', borderColor: intel.lastRun ? '#166534' : '#334155', color: intel.lastRun ? '#86efac' : '#94a3b8', fontFamily: 'inherit' }}
                       >
                         {intelligenceRunning ? '⏳ Running…' : intel.lastRun ? '🔍 Refresh Intel' : '🔍 Run Intelligence'}
+                      </button>
+                      <button
+                        onClick={() => runAiDealReview(currentViewProperty)}
+                        disabled={aiReviewLoadingId === currentViewProperty.id}
+                        style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', padding: '5px 10px', borderRadius: '6px', border: '1px solid', cursor: aiReviewLoadingId === currentViewProperty.id ? 'wait' : 'pointer', whiteSpace: 'nowrap', background: an.aiDealScore != null ? '#2e1065' : 'transparent', borderColor: an.aiDealScore != null ? '#6d28d9' : '#334155', color: an.aiDealScore != null ? '#c4b5fd' : '#94a3b8', fontFamily: 'inherit' }}
+                      >
+                        {aiReviewLoadingId === currentViewProperty.id ? '⏳ Reviewing…' : an.aiDealScore != null ? '🤖 Re-run AI review' : '🤖 AI review'}
+                      </button>
+                      <button
+                        onClick={() => runDealAnalysis(currentViewProperty)}
+                        disabled={aiAnalysisLoadingId === currentViewProperty.id}
+                        style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', padding: '5px 10px', borderRadius: '6px', border: '1px solid', cursor: aiAnalysisLoadingId === currentViewProperty.id ? 'wait' : 'pointer', whiteSpace: 'nowrap', background: an.dealAnalysisSummary ? '#172554' : 'transparent', borderColor: an.dealAnalysisSummary ? '#1d4ed8' : '#334155', color: an.dealAnalysisSummary ? '#93c5fd' : '#94a3b8', fontFamily: 'inherit' }}
+                      >
+                        {aiAnalysisLoadingId === currentViewProperty.id ? '⏳ Analysing…' : an.dealAnalysisSummary ? '🌐 Re-run comparison' : '🌐 Market comparison'}
                       </button>
                       {propLotLink && (
                         <a href={propLotLink} target="_blank" rel="noreferrer" style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: '#38bdf8', padding: '5px 10px', border: '1px solid #0c4a6e', borderRadius: '6px', background: '#0c2a3d', textDecoration: 'none', whiteSpace: 'nowrap' }}>
@@ -4092,8 +4188,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     return <div style={{ padding: '14px 20px', fontSize: '12px', color: '#b91c1c' }}>Couldn't render comparables — {String(e?.message || e)}</div>;
                   } })()}
 
-                  {/* AI deal summary — Overview tab */}
-                  {propCanvasTab === 'overview' && an.aiSummary && (
+                  {/* AI deal summary — Overview tab (report-parsed summaries without full review fields) */}
+                  {propCanvasTab === 'overview' && an.aiSummary && an.aiDealScore == null && (
                     <div style={{ margin: '14px 20px 0', borderRadius: '8px', border: '1px solid #fde68a', background: '#fffbeb', padding: '10px 12px', display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
                       <span style={{ fontSize: '14px', flexShrink: 0 }}>🤖</span>
                       <div>
@@ -4102,6 +4198,77 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       </div>
                     </div>
                   )}
+
+                  {/* AI deal review — Overview tab (same card as the Deal Analysis tab) */}
+                  {propCanvasTab === 'overview' && an.aiSummary && an.aiDealScore != null && (() => {
+                    const score = an.aiDealScore ?? 0;
+                    const scoreCol = score >= 70 ? '#059669' : score >= 45 ? '#d97706' : '#dc2626';
+                    const verdictLabel = { strong_buy: 'Strong buy', buy: 'Buy', conditional: 'Conditional', avoid: 'Avoid' }[an.aiVerdict] || an.aiVerdict;
+                    return (
+                      <div style={{ margin: '14px 20px 0', backgroundColor: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: '10px', padding: '14px 16px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '10px', flexWrap: 'wrap' }}>
+                          <div style={{ fontSize: '12px', fontWeight: '700', color: '#6d28d9' }}>🤖 AI deal review</div>
+                          <span style={{ fontSize: '11px', padding: '2px 10px', borderRadius: '12px', background: '#fff', border: `1px solid ${scoreCol}`, color: scoreCol, fontWeight: '700' }}>{score}/100 · {verdictLabel}</span>
+                          {(an.aiReviewedAt || an.aiProvider) && (
+                            <span style={{ fontSize: '10px', color: '#a78bfa', marginLeft: 'auto' }}>
+                              {an.aiProvider ? `via ${AI_PROVIDER_LABELS[an.aiProvider] || an.aiProvider} · ` : ''}
+                              {an.aiReviewedAt && new Date(an.aiReviewedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ height: '6px', background: '#ede9fe', borderRadius: '3px', overflow: 'hidden', marginBottom: '10px' }}>
+                          <div style={{ width: `${score}%`, height: '100%', background: scoreCol }}></div>
+                        </div>
+                        <div style={{ fontSize: '12px', color: '#3b0764', lineHeight: 1.6, marginBottom: (an.aiRiskFlags?.length || an.aiStrengths?.length) ? '10px' : 0 }}>{an.aiSummary}</div>
+                        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '10px' }}>
+                          {(an.aiRiskFlags || []).length > 0 && (
+                            <div>
+                              <div style={{ fontSize: '10px', fontWeight: '700', color: '#991b1b', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' }}>Risk flags</div>
+                              {an.aiRiskFlags.map((r, i) => <div key={i} style={{ fontSize: '11px', color: '#7f1d1d', padding: '3px 0', display: 'flex', gap: '6px' }}><span>⚠</span><span>{r}</span></div>)}
+                            </div>
+                          )}
+                          {(an.aiStrengths || []).length > 0 && (
+                            <div>
+                              <div style={{ fontSize: '10px', fontWeight: '700', color: '#166534', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' }}>Strengths</div>
+                              {an.aiStrengths.map((s, i) => <div key={i} style={{ fontSize: '11px', color: '#14532d', padding: '3px 0', display: 'flex', gap: '6px' }}><span>✓</span><span>{s}</span></div>)}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Market comparison — Overview tab (same card as the Deal Analysis tab) */}
+                  {propCanvasTab === 'overview' && an.dealAnalysisSummary && (() => {
+                    const posCol = { underpriced: '#059669', fair: '#2563eb', overpriced: '#dc2626', insufficient_data: '#64748b' }[an.dealAnalysisPositioning] || '#64748b';
+                    const posLabel = { underpriced: 'Underpriced', fair: 'Fair value', overpriced: 'Overpriced', insufficient_data: 'Insufficient data' }[an.dealAnalysisPositioning] || an.dealAnalysisPositioning;
+                    const comps = an.dealAnalysisComparables || [];
+                    return (
+                      <div style={{ margin: '14px 20px 0', backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '14px 16px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '10px', flexWrap: 'wrap' }}>
+                          <div style={{ fontSize: '12px', fontWeight: '700', color: '#1d4ed8' }}>🌐 Market comparison</div>
+                          <span style={{ fontSize: '11px', padding: '2px 10px', borderRadius: '12px', background: '#fff', border: `1px solid ${posCol}`, color: posCol, fontWeight: '700' }}>{posLabel} · {an.dealAnalysisConfidence} confidence</span>
+                          {(an.dealAnalysisGeneratedAt || an.dealAnalysisProvider) && (
+                            <span style={{ fontSize: '10px', color: '#60a5fa', marginLeft: 'auto' }}>
+                              {an.dealAnalysisProvider ? `via ${AI_PROVIDER_LABELS[an.dealAnalysisProvider] || an.dealAnalysisProvider} · ` : ''}
+                              {an.dealAnalysisGeneratedAt && new Date(an.dealAnalysisGeneratedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: '12px', color: '#1e3a8a', lineHeight: 1.6, marginBottom: comps.length ? '10px' : 0 }}>{an.dealAnalysisSummary}</div>
+                        {comps.length > 0 && (
+                          <div>
+                            <div style={{ fontSize: '10px', fontWeight: '700', color: '#1d4ed8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' }}>Comparables found</div>
+                            {comps.map((c, i) => (
+                              <div key={i} style={{ fontSize: '11px', color: '#1e3a8a', padding: '3px 0', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                                <span>📍</span><span>{c.address || '—'}{c.price ? ` — ${c.price}` : ''}{c.date ? ` (${c.date})` : ''}{c.source ? ` · ${c.source}` : ''}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* ══ THE TERMINAL — intel power view ══ */}
                   {propCanvasTab === 'intel' && intel.lastRun && (() => {
@@ -4125,6 +4292,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     const pAppsD  = ic.planApps?.data || {};
                     const ratesD  = ic.rates?.data || {};
                     const bbD     = ic.broadband?.data || {};
+                    const newsD   = ic.news?.data || {};
                     const fmtAge = iso => { const d = new Date(iso); const h = Math.floor((Date.now() - d) / 3600000); return h < 1 ? 'just now' : h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`; };
                     const connCount = Object.values(ic).filter(c => c?.status === 'success').length;
                     const totalConn = Object.keys(ic).length;
@@ -4212,6 +4380,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                       { icon: '📋', l: 'Plan apps', v: ic.planApps ? ((pAppsD.apps || []).length > 0 ? `${pAppsD.totalNearby || (pAppsD.apps || []).length} <250m · ${pAppsD.permitted || 0} OK’d` : 'None <250m') : 'Run intel', ok: pAppsD.rejected > 0 ? 'warn' : ic.planApps ? 'ok' : 'neutral' },
                       { icon: '📶', l: 'Broadband', v: bbD.maxDownMbps != null ? `${Math.round(bbD.maxDownMbps)} Mbps max` : ic.broadband ? 'No data' : 'Needs Ofcom key', ok: bbD.maxDownMbps != null ? (bbD.maxDownMbps >= 80 ? 'ok' : bbD.maxDownMbps >= 30 ? 'warn' : 'bad') : 'neutral' },
                       { icon: '🏦', l: 'Base rate', v: ratesD.baseRate != null ? `${ratesD.baseRate}% · ${ratesD.trend}` : ic.rates ? 'No data' : 'Run intel', ok: ratesD.baseRate != null ? (ratesD.trend === 'rising' ? 'warn' : 'ok') : 'neutral' },
+                      { icon: '📰', l: 'Area news', v: (newsD.items || []).length ? `${newsD.items.length} items · ${newsD.area || ''}` : ic.news ? 'None found' : 'Run intel', ok: (newsD.items || []).length ? 'ok' : 'neutral' },
                     ];
 
                     return (
@@ -4300,6 +4469,22 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                             })}
                           </div>
                         </div>
+
+                        {/* Row 3 — Area news & regeneration (Tavily web search) */}
+                        {(newsD.items || []).length > 0 && (
+                          <div style={{ padding: '11px 14px', borderTop: '0.5px solid #e2e8f0' }}>
+                            <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8', marginBottom: '7px' }}>
+                              📰 Area news & regeneration · {newsD.area || ''}
+                            </div>
+                            {newsD.items.slice(0, 6).map((n, ni) => (
+                              <div key={ni} style={{ padding: '5px 0', borderBottom: ni < Math.min(newsD.items.length, 6) - 1 ? '0.5px solid #f1f5f9' : 'none' }}>
+                                <a href={n.url} target="_blank" rel="noreferrer" style={{ fontSize: '11px', fontWeight: '500', color: '#0369a1', textDecoration: 'underline', textDecorationColor: '#7dd3fc', textUnderlineOffset: '2px' }}>{n.title || n.url}</a>
+                                {n.snippet && <div style={{ fontSize: '10px', color: '#64748b', marginTop: '2px', overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' }}>{n.snippet}</div>}
+                                {n.publishedDate && <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '1px' }}>{n.publishedDate}</div>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
 
                       </div>
                     );
@@ -6553,6 +6738,8 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                   { id: 'pugh', name: 'Pugh Auctions', shortName: 'Pugh', diaryUrl: 'https://www.pugh-auctions.com/auction-diary' },
                   { id: 'allsop', name: 'Allsop Residential', shortName: 'Allsop', diaryUrl: 'https://www.allsop.co.uk/auctions/property-for-auction-in-sheffield/' },
                   { id: 'mchugh', name: 'McHugh & Co', shortName: 'McHugh', diaryUrl: 'https://www.mchughandco.com/' },
+                  { id: 'eig', name: 'EIG (mixed auctioneers)', shortName: 'EIG', diaryUrl: 'https://www.eigpropertyauctions.co.uk/search/property/south-yorkshire?view=1&order=0' },
+                  { id: 'otm', name: 'OnTheMarket (mixed auctioneers)', shortName: 'OnTheMarket', diaryUrl: 'https://www.onthemarket.com/auction/property/south-yorkshire/' },
                 ];
                 const scanLots = async () => {
                   setAuctionScanLoading(true); setAuctionScanResults(null);
@@ -6569,7 +6756,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                     // One request per house — a single request can't scrape all
                     // houses before Cloudflare's time limit, which was starving
                     // the later houses. Fastest/most-reliable houses go first.
-                    const scanOrder = ['ah_sy', 'pugh', 'mj', 'sdl', 'allsop', 'mchugh', 'eig'];
+                    const scanOrder = ['ah_sy', 'pugh', 'mj', 'sdl', 'allsop', 'mchugh', 'eig', 'otm'];
                     const allResults = [];
                     for (const houseId of scanOrder) {
                       try {
@@ -6629,6 +6816,9 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                 const LOT_STATUS_COLORS = { unreviewed: '#e2e8f0', shortlisted: '#dcfce7', watching: '#fef9c3', rejected: '#fee2e2', deal_analysis: '#ede9fe', promoted: '#ede9fe', bid_candidate: '#dbeafe', withdrawn: '#f1f5f9', sold_prior: '#fef2f2' };
                 const LOT_STATUS_TEXT_COLORS = { unreviewed: '#64748b', shortlisted: '#166534', watching: '#854d0e', rejected: '#991b1b', deal_analysis: '#6d28d9', promoted: '#6d28d9', bid_candidate: '#1e40af', withdrawn: '#64748b', sold_prior: '#64748b' };
                 const LOT_STATUS_LABELS = { unreviewed: 'Unreviewed', shortlisted: 'Shortlisted', watching: 'Watching', rejected: 'Rejected', deal_analysis: 'In analysis', promoted: 'Promoted ✓', bid_candidate: 'Bid candidate', withdrawn: 'Withdrawn', sold_prior: 'Sold prior' };
+                const TRIAGE_FLAG_LABELS = { strong_interest: 'Strong', worth_reviewing: 'Review', low_priority: 'Low', insufficient_data: '?' };
+                const TRIAGE_FLAG_BG = { strong_interest: '#dcfce7', worth_reviewing: '#fef3c7', low_priority: '#f1f5f9', insufficient_data: '#f1f5f9' };
+                const TRIAGE_FLAG_COLOR = { strong_interest: '#166534', worth_reviewing: '#92400e', low_priority: '#64748b', insufficient_data: '#94a3b8' };
                 const allVisibleIds = visibleLots.map(l => l.id);
                 const allSelected = allVisibleIds.length > 0 && allVisibleIds.every(id => auctionSelectedLotIds.has(id));
                 const colHeaders = ['Lot', 'Address', 'Type', 'Beds', 'Guide', 'Days', 'Action'];
@@ -6877,6 +7067,10 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                     {lot.guidePriceChanged && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#fee2e2', color: '#991b1b', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>Price</span>}
                                     {lot.isWithdrawn && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#f1f5f9', color: '#64748b', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>Withdrawn</span>}
                                     {Array.isArray(lot.sources) && lot.sources.includes('eig') && lot.houseName !== 'EIG (mixed auctioneers)' && <span title="Also listed on EIG" style={{ fontSize: '10px', padding: '1px 4px', background: '#dbeafe', color: '#1e40af', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>EIG</span>}
+                                    {Array.isArray(lot.sources) && lot.sources.includes('otm') && lot.houseName !== 'OnTheMarket (mixed auctioneers)' && <span title="Also listed on OnTheMarket" style={{ fontSize: '10px', padding: '1px 4px', background: '#ede9fe', color: '#5b21b6', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>OTM</span>}
+                                    {lot.aiFlag
+                                      ? <span title={lot.aiNote ? `${lot.aiNote}${lot.aiGuideAssessment ? ` (guide: ${lot.aiGuideAssessment.replace('_', ' ')})` : ''}` : ''} style={{ fontSize: '10px', padding: '1px 4px', background: TRIAGE_FLAG_BG[lot.aiFlag], color: TRIAGE_FLAG_COLOR[lot.aiFlag], borderRadius: '4px', fontWeight: '500', marginLeft: '4px', cursor: 'help' }}>🤖 {TRIAGE_FLAG_LABELS[lot.aiFlag]}</span>
+                                      : <button onClick={(e) => { e.stopPropagation(); runTriageInsight(lot); }} disabled={aiTriageLoadingId === lot.id} title="AI triage insight" style={{ fontSize: '10px', padding: '1px 4px', marginLeft: '4px', background: 'transparent', border: '0.5px solid #e2e8f0', borderRadius: '4px', cursor: aiTriageLoadingId === lot.id ? 'wait' : 'pointer', color: '#64748b' }}>{aiTriageLoadingId === lot.id ? '…' : '🤖'}</button>}
                                   </div>
                                   <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '1px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                     {lot.houseName || 'Manual'}
@@ -6939,7 +7133,7 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                           <span style={{ fontSize: '10px', color: '#64748b' }}>Last scan:</span>
                           {auctionScanResults.map((r, i) => (
                             <span key={i} style={{ fontSize: '10px', padding: '2px 7px', background: r.error ? '#f59e0b20' : '#05966920', color: r.error ? '#f59e0b' : '#4ade80', borderRadius: '5px' }}>
-                              {r.name?.split(' ').slice(0, 2).join(' ')}: {r.error ? 'blocked' : r.matched != null ? `${r.matched} matched · ${r.newLots || 0} new${r.tagged ? ` · ${r.tagged} on EIG` : ''}` : `~${r.estimatedLots || 0} lots`}
+                              {r.name?.split(' ').slice(0, 2).join(' ')}: {r.error ? 'blocked' : r.matched != null ? `${r.matched} matched · ${r.newLots || 0} new${r.tagged ? ` · ${r.tagged} on ${r.houseId === 'otm' ? 'OTM' : 'EIG'}` : ''}` : `~${r.estimatedLots || 0} lots`}
                             </span>
                           ))}
                           <button onClick={() => setAuctionScanResults(null)} style={{ marginLeft: 'auto', fontSize: '11px', color: '#475569', background: 'transparent', border: 'none', cursor: 'pointer' }}>✕</button>
@@ -8873,6 +9067,9 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                               <button onClick={() => runAiDealReview(activeDeal)} disabled={aiReviewLoadingId === activeDeal.id} style={{ padding: '8px 16px', backgroundColor: aiReviewLoadingId === activeDeal.id ? '#c4b5fd' : '#7C3AED', color: '#fff', border: 'none', borderRadius: '7px', fontSize: '12px', fontWeight: '600', cursor: aiReviewLoadingId === activeDeal.id ? 'wait' : 'pointer' }}>
                                 {aiReviewLoadingId === activeDeal.id ? '⏳ Reviewing… (can take a minute)' : an.aiSummary ? '🤖 Re-run AI review' : '🤖 AI deal review'}
                               </button>
+                              <button onClick={() => runDealAnalysis(activeDeal)} disabled={aiAnalysisLoadingId === activeDeal.id} style={{ padding: '8px 16px', backgroundColor: aiAnalysisLoadingId === activeDeal.id ? '#93c5fd' : '#2563eb', color: '#fff', border: 'none', borderRadius: '7px', fontSize: '12px', fontWeight: '600', cursor: aiAnalysisLoadingId === activeDeal.id ? 'wait' : 'pointer' }}>
+                                {aiAnalysisLoadingId === activeDeal.id ? '⏳ Analysing… (can take a minute)' : an.dealAnalysisSummary ? '🌐 Re-run market comparison' : '🌐 Market comparison'}
+                              </button>
                             </div>
 
                             {/* Verdict */}
@@ -8893,7 +9090,12 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                   <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '10px', flexWrap: 'wrap' }}>
                                     <div style={{ fontSize: '12px', fontWeight: '700', color: '#6d28d9' }}>🤖 AI deal review</div>
                                     <span style={{ fontSize: '11px', padding: '2px 10px', borderRadius: '12px', background: '#fff', border: `1px solid ${scoreCol}`, color: scoreCol, fontWeight: '700' }}>{score}/100 · {verdictLabel}</span>
-                                    {an.aiReviewedAt && <span style={{ fontSize: '10px', color: '#a78bfa', marginLeft: 'auto' }}>{new Date(an.aiReviewedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>}
+                                    {(an.aiReviewedAt || an.aiProvider) && (
+                                      <span style={{ fontSize: '10px', color: '#a78bfa', marginLeft: 'auto' }}>
+                                        {an.aiProvider ? `via ${AI_PROVIDER_LABELS[an.aiProvider] || an.aiProvider} · ` : ''}
+                                        {an.aiReviewedAt && new Date(an.aiReviewedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                                      </span>
+                                    )}
                                   </div>
                                   <div style={{ height: '6px', background: '#ede9fe', borderRadius: '3px', overflow: 'hidden', marginBottom: '10px' }}>
                                     <div style={{ width: `${score}%`, height: '100%', background: scoreCol }}></div>
@@ -8913,6 +9115,38 @@ ${an.aiSummary ? `<h2>Analyst review</h2><p>${esc(an.aiSummary)}</p>${(an.aiRisk
                                       </div>
                                     )}
                                   </div>
+                                </div>
+                              );
+                            })()}
+
+                            {/* Market comparison — live web-search-grounded market comparison */}
+                            {an.dealAnalysisSummary && (() => {
+                              const posCol = { underpriced: '#059669', fair: '#2563eb', overpriced: '#dc2626', insufficient_data: '#64748b' }[an.dealAnalysisPositioning] || '#64748b';
+                              const posLabel = { underpriced: 'Underpriced', fair: 'Fair value', overpriced: 'Overpriced', insufficient_data: 'Insufficient data' }[an.dealAnalysisPositioning] || an.dealAnalysisPositioning;
+                              const comps = an.dealAnalysisComparables || [];
+                              return (
+                                <div style={{ backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '14px 16px' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '10px', flexWrap: 'wrap' }}>
+                                    <div style={{ fontSize: '12px', fontWeight: '700', color: '#1d4ed8' }}>🌐 Market comparison</div>
+                                    <span style={{ fontSize: '11px', padding: '2px 10px', borderRadius: '12px', background: '#fff', border: `1px solid ${posCol}`, color: posCol, fontWeight: '700' }}>{posLabel} · {an.dealAnalysisConfidence} confidence</span>
+                                    {(an.dealAnalysisGeneratedAt || an.dealAnalysisProvider) && (
+                                      <span style={{ fontSize: '10px', color: '#60a5fa', marginLeft: 'auto' }}>
+                                        {an.dealAnalysisProvider ? `via ${AI_PROVIDER_LABELS[an.dealAnalysisProvider] || an.dealAnalysisProvider} · ` : ''}
+                                        {an.dealAnalysisGeneratedAt && new Date(an.dealAnalysisGeneratedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div style={{ fontSize: '12px', color: '#1e3a8a', lineHeight: 1.6, marginBottom: comps.length ? '10px' : 0 }}>{an.dealAnalysisSummary}</div>
+                                  {comps.length > 0 && (
+                                    <div>
+                                      <div style={{ fontSize: '10px', fontWeight: '700', color: '#1d4ed8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' }}>Comparables found</div>
+                                      {comps.map((c, i) => (
+                                        <div key={i} style={{ fontSize: '11px', color: '#1e3a8a', padding: '3px 0', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                                          <span>📍</span><span>{c.address || '—'}{c.price ? ` — ${c.price}` : ''}{c.date ? ` (${c.date})` : ''}{c.source ? ` · ${c.source}` : ''}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
                                 </div>
                               );
                             })()}
