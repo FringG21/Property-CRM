@@ -52,6 +52,17 @@ Active connectors: address, landRegistry, epc, police, flood, planning, osm, imd
 
 EPC enrichment: after allSettled, enrichCompsWithEPC() cross-references LR comps with EPC records by address similarity.
 
+## Market Intelligence module (worker/marketIntel.js + src/views/MarketIntel.jsx)
+Self-contained "Auction Area Intelligence" — national Auction House UK results → area flip ranking, South Yorkshire as the benchmark. Separate from the pre-auction Auction Triage scraper. Data in `mi_*` D1 tables (migration 0004). Full phase notes in `docs/market-intel/phase-0..7.md`.
+
+- **UI**: top-level `marketintel` tab, 6 sub-tabs — Overview, National Ranking, Results Explorer, Area Detail, Compare Areas, Data Health & Settings.
+- **Two passes**: Pass A = national scrape/normalise/aggregate/score (all areas). Pass B = per-selected-outcode deep enrichment (lot detail → beds/tenure/exclusions; LR comps + HPI growth + per-lot GDV). Enrich an outcode from Data Health, or `POST /api/market/jobs/seed {type:'passB_lots'|'passB_context', outcode}`.
+- **Jobs**: `mi_jobs` queue drained one-per-tick by the `7-57/10` cron (`runMarketIntelTick`). Types: passA_index, passA_refresh, passB_lots, passB_context, aggregate. Idempotent + checkpointed.
+- **Scoring**: 6 factors + combined, Bayesian shrinkage confidence; weights in `mi_scoring_models` (editable + copy-on-edit versioned via the weights editor). `runAggregation` recomputes all scores and preserves Pass B factors via the `score_factors` join.
+- **Settings**: KV `market:settings` (editable flip cost model + `refreshDays`); `getMarketSettings` merges over `DEFAULT_MARKET_SETTINGS`.
+- **Phase 7 steady state**: `maybeSeedWeeklyRefresh` (cron + `POST /api/market/refresh-check`) auto-seeds a light national refresh (pages 1–2/branch) + aggregate once per `refreshDays`, only when idle.
+- **Contracts**: confirmed sale = printed price only (`sold_for`/`sold_prior_for`/`sold_after_for`); `last_bid` is never a sale. GDV is matched on LR property *type* (no beds in LR). All `/api/market/*` routes are session-checked at one entry (`handleMarketIntelRoutes`). Parser fixtures + `npm test` (39 tests) — keep them green.
+
 ## Responsive Design & Device Optimisation
 
 ### Breakpoints

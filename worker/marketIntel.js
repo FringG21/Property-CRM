@@ -1265,6 +1265,40 @@ function chunkBatches(env, stmts, size = 90) {
   return batches;
 }
 
+// Phase 7 steady-state: once per settings.refreshDays (default 7), and only when
+// the queue is idle, seed a light national refresh — pages 1–2 of every active
+// branch (catches finalised prices/status = recent-auction re-reconciliation)
+// plus a trailing aggregate. The existing tick drains them; never piles work
+// onto a live backlog. Called from the 10-min cron and the refresh-check route.
+export async function maybeSeedWeeklyRefresh(env, opts = {}) {
+  const now = Date.now();
+  const { refreshDays } = await getMarketSettings(env);
+  const marker = await env.SCRAPER_KV.get('market:last-refresh');
+  if (!opts.force && marker && now - Number(marker) < (refreshDays || 7) * 86400000) return { skipped: 'not-due', nextDueAt: new Date(Number(marker) + (refreshDays || 7) * 86400000).toISOString() };
+  const active = await env.CRM_DB.prepare("SELECT COUNT(*) n FROM mi_jobs WHERE status IN ('queued','running')").first();
+  if (active && active.n > 0) return { skipped: 'busy', active: active.n };
+
+  const { results: branches } = await env.CRM_DB.prepare('SELECT id FROM mi_branches WHERE active = 1').all();
+  if (!branches.length) { await env.SCRAPER_KV.put('market:last-refresh', String(now)); return { skipped: 'no-branches' }; }
+  const iso = new Date(now).toISOString();
+  const cursor = JSON.stringify({ nextPage: 1, maxPages: 2 });
+  const stmts = branches.map(b => env.CRM_DB.prepare(
+    `INSERT INTO mi_jobs (id, type, target, status, cursor, attempts, stats, created_at, updated_at)
+     VALUES (?, 'passA_refresh', ?, 'queued', ?, 0, '{}', ?, ?)
+     ON CONFLICT(id) DO UPDATE SET status='queued', cursor=excluded.cursor, attempts=0, last_error=NULL, updated_at=excluded.updated_at`
+  ).bind(`passA_refresh:${b.id}`, b.id, cursor, iso, iso));
+  // Trailing aggregate — later created_at so the tick runs it after every refresh.
+  const aggIso = new Date(now + 1000).toISOString();
+  stmts.push(env.CRM_DB.prepare(
+    `INSERT INTO mi_jobs (id, type, target, status, cursor, attempts, stats, created_at, updated_at)
+     VALUES ('aggregate:weekly', 'aggregate', NULL, 'queued', '{}', 0, '{}', ?, ?)
+     ON CONFLICT(id) DO UPDATE SET status='queued', attempts=0, last_error=NULL, created_at=excluded.created_at, updated_at=excluded.updated_at`
+  ).bind(aggIso, aggIso));
+  await env.CRM_DB.batch(stmts);
+  await env.SCRAPER_KV.put('market:last-refresh', String(now));
+  return { seeded: branches.length, aggregate: true };
+}
+
 // Free-plan subrequest budget shapes this: 3 GROUP BY queries + 1 bulk
 // confirmed-price fetch + 1 repeat-lot query cover every area, then
 // ~90-statement batches write metrics and scores (~35 subrequests total).
@@ -1548,6 +1582,11 @@ export async function handleMarketIntelRoutes(request, env, url) {
 
   if (path === '/api/market/aggregate' && method === 'POST') {
     return json({ success: true, ...(await runAggregation(env)) });
+  }
+
+  if (path === '/api/market/refresh-check' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    return json({ success: true, ...(await maybeSeedWeeklyRefresh(env, { force: !!body?.force })) });
   }
 
   if (path === '/api/market/scoring-model' && method === 'GET') {

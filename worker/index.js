@@ -1,5 +1,5 @@
 import puppeteer from '@cloudflare/puppeteer';
-import { handleMarketIntelRoutes, runMarketIntelTick } from './marketIntel.js';
+import { handleMarketIntelRoutes, runMarketIntelTick, maybeSeedWeeklyRefresh } from './marketIntel.js';
 
 // ============================================================
 // Property CRM — Cloudflare Worker
@@ -2689,7 +2689,13 @@ export default {
       const nearHeavySlot = (d.getUTCDay() === 3 || d.getUTCDay() === 6)
         && ((d.getUTCHours() === 21 && d.getUTCMinutes() >= 55) || (d.getUTCHours() === 22 && d.getUTCMinutes() <= 30));
       if (!nearHeavySlot) {
-        ctx.waitUntil(runMarketIntelTick(env).catch(err => console.error('Market intel tick failed:', err)));
+        // Seed the weekly refresh if due (idle-only), then drain one job.
+        ctx.waitUntil(
+          maybeSeedWeeklyRefresh(env)
+            .catch(err => console.error('Market weekly refresh seed failed:', err))
+            .then(() => runMarketIntelTick(env))
+            .catch(err => console.error('Market intel tick failed:', err))
+        );
       }
       return;
     }
