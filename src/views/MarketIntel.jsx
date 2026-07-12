@@ -12,6 +12,39 @@ async function api(path) {
   return res.json();
 }
 
+async function apiPost(path, body) {
+  const token = localStorage.getItem('crm_session');
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok || j.success === false) throw new Error(j.message || `API ${res.status}`);
+  return j;
+}
+
+const SCORE_FACTORS = [
+  ['sub100kSupply', 'Sub-£100k supply'],
+  ['demandLiquidity', 'Demand & liquidity'],
+  ['flipSpread', 'Flip spread'],
+  ['compQuality', 'Comparable quality'],
+  ['growthResilience', 'Growth resilience'],
+  ['risk', 'Risk / confidence'],
+];
+const COST_FIELDS = [
+  ['buyersPremiumPct', "Buyer's premium %", 'pct'],
+  ['sdltSurchargePct', 'SDLT surcharge %', 'pct'],
+  ['legalBuy', 'Legal (buy) £', 'gbp'],
+  ['legalSell', 'Legal (sell) £', 'gbp'],
+  ['holdingMonths', 'Holding months', 'num'],
+  ['holdingPerMonth', 'Holding £/mo', 'gbp'],
+  ['agentPct', 'Agent fee %', 'pct'],
+  ['refurbLight', 'Refurb light £', 'gbp'],
+  ['refurbHeavy', 'Refurb heavy £', 'gbp'],
+  ['targetReturn', 'Target return %', 'pct'],
+];
+
 const STATUS_META = {
   sold_for: { label: 'Sold for', fg: '#059669', bg: '#d1fae5' },
   sold_prior_for: { label: 'Sold prior for', fg: '#059669', bg: '#d1fae5' },
@@ -63,6 +96,21 @@ function BandChip({ band, thin }) {
 
 const fmtPct1 = n => n == null ? '—' : (n >= 0 ? '+' : '') + n.toFixed(1) + '%';
 const fmtRoi = n => n == null ? '—' : (n >= 0 ? '+' : '') + (n * 100).toFixed(1) + '%';
+
+// The South Yorkshire benchmark, shown on every area screen so alternatives are
+// always read against the flagship area.
+function SyStrip({ syBench, isMobile }) {
+  if (!syBench) return null;
+  return (
+    <div style={{ ...card, background: '#f0fdf4', borderColor: '#bbf7d0', display: 'flex', gap: isMobile ? '12px' : '24px', flexWrap: 'wrap', alignItems: 'center', padding: '10px 14px' }}>
+      <div style={{ fontSize: '11px', fontWeight: 700, color: '#059669', letterSpacing: '0.4px' }}>SOUTH YORKSHIRE BENCHMARK</div>
+      <div style={{ fontSize: '13px', color: '#334155' }}>Score <ScoreChip score={syBench.score} /></div>
+      <div style={{ fontSize: '13px', color: '#334155' }}>≤£100k: <b>{syBench.sub100k_confirmed}</b></div>
+      <div style={{ fontSize: '13px', color: '#334155' }}>Median: <b>{fmtGBP(syBench.price_median)}</b></div>
+      <div style={{ fontSize: '13px', color: '#334155' }}>Sell-through: <b>{syBench.sell_through_pct != null ? syBench.sell_through_pct + '%' : '—'}</b></div>
+    </div>
+  );
+}
 
 // Mirrors worker/marketIntel.js MI_FLIP_COSTS — display-only, no backend call.
 // Kept in sync manually; this is the labelled default cost model, not a live value.
@@ -135,7 +183,42 @@ export default function MarketIntel({ isMobile, isTablet }) {
   const [compareData, setCompareData] = useState({});
   const [compareLoading, setCompareLoading] = useState(false);
 
+  // Data Health & Settings
+  const [jobs, setJobs] = useState([]);
+  const [storage, setStorage] = useState(null);
+  const [weightsForm, setWeightsForm] = useState(null);
+  const [costsForm, setCostsForm] = useState(null);
+  const [refreshDaysForm, setRefreshDaysForm] = useState(7);
+  const [enrichOutcode, setEnrichOutcode] = useState('');
+  const [dataBusy, setDataBusy] = useState('');
+  const [dataMsg, setDataMsg] = useState(null);
+
   const openAreaDetail = id => { setView('detail'); setDetailInput(id); };
+
+  const loadDataHealth = () => {
+    api('/api/market/jobs').then(d => setJobs(d.jobs || [])).catch(e => setError(String(e)));
+    api('/api/market/storage-estimate').then(setStorage).catch(() => {});
+    api('/api/market/scoring-model').then(d => setWeightsForm(d.model?.weights || null)).catch(() => {});
+    api('/api/market/settings').then(d => { setCostsForm(d.settings?.costs || null); setRefreshDaysForm(d.settings?.refreshDays ?? 7); }).catch(() => {});
+    api('/api/market/overview').then(setOverview).catch(() => {});
+  };
+
+  useEffect(() => { if (view === 'data') loadDataHealth(); /* eslint-disable-next-line */ }, [view]);
+
+  // Runs a POST action, shows a transient message, reloads the dashboard.
+  const runAction = async (key, path, body, okMsg) => {
+    setDataBusy(key); setDataMsg(null);
+    try {
+      const r = await apiPost(path, body);
+      setDataMsg({ ok: true, text: okMsg || 'Done' });
+      loadDataHealth();
+      return r;
+    } catch (e) {
+      setDataMsg({ ok: false, text: String(e.message || e) });
+    } finally {
+      setDataBusy('');
+    }
+  };
 
   useEffect(() => {
     api('/api/market/overview').then(setOverview).catch(e => setError(String(e)));
@@ -250,6 +333,7 @@ export default function MarketIntel({ isMobile, isTablet }) {
     { k: 'explorer', l: 'Results Explorer' },
     { k: 'detail', l: 'Area Detail' },
     { k: 'compare', l: 'Compare Areas' },
+    { k: 'data', l: 'Data Health & Settings' },
   ];
 
   const kpis = overview ? [
@@ -519,6 +603,8 @@ export default function MarketIntel({ isMobile, isTablet }) {
             {!detailInput.trim() && <span style={{ fontSize: '12px', color: '#94a3b8' }}>Enter a postcode district (e.g. S63), or click an outcode row in National Ranking / the South Yorkshire card on Overview.</span>}
           </div>
 
+          <SyStrip syBench={syBench} isMobile={isMobile} />
+
           {detailAreaId && detailContext && (
             <>
               {/* Header */}
@@ -784,6 +870,8 @@ export default function MarketIntel({ isMobile, isTablet }) {
             {compareLoading && <RefreshCw size={15} style={{ color: '#94a3b8', animation: 'spin 1s linear infinite' }} />}
           </div>
 
+          <SyStrip syBench={syBench} isMobile={isMobile} />
+
           {compareIds.filter(id => id).length === 0 ? (
             <div style={{ fontSize: '12px', color: '#94a3b8' }}>Select two or three outcodes above to compare side-by-side.</div>
           ) : (
@@ -852,6 +940,145 @@ export default function MarketIntel({ isMobile, isTablet }) {
           )}
         </>
       )}
+
+      {/* ============ DATA HEALTH & SETTINGS ============ */}
+      {view === 'data' && (
+        <>
+          {dataMsg && (
+            <div style={{ ...card, padding: '10px 12px', fontSize: '12px', borderColor: dataMsg.ok ? '#bbf7d0' : '#fecaca', background: dataMsg.ok ? '#f0fdf4' : '#fef2f2', color: dataMsg.ok ? '#166534' : '#b91c1c' }}>{dataMsg.text}</div>
+          )}
+
+          {/* KPIs */}
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: '10px' }}>
+            {[
+              { l: 'Storage used', v: storage?.currentDbBytes != null ? (storage.currentDbBytes / 1048576).toFixed(1) + ' MB' : '…', sub: storage?.projection ? `${storage.projection.pctOfFreeDbLimit}% of free D1` : '' },
+              { l: 'Unknown statuses', v: overview?.totals?.unknown_status ?? '…', sub: 'should be 0' },
+              { l: 'Jobs', v: jobs.length, sub: `${jobs.filter(j => j.status === 'queued' || j.status === 'running').length} active · ${jobs.filter(j => j.status === 'error').length} error` },
+              { l: 'Last aggregated', v: overview?.lastAggregatedAt ? new Date(overview.lastAggregatedAt).toLocaleDateString('en-GB') : 'never', sub: overview?.lastAggregatedAt ? new Date(overview.lastAggregatedAt).toLocaleTimeString('en-GB') : '' },
+            ].map(k => (
+              <div key={k.l} style={card}>
+                <div style={label11}>{k.l}</div>
+                <div style={{ fontSize: isMobile ? '18px' : '22px', fontWeight: 800, color: '#0f172a', margin: '4px 0 2px' }}>{k.v}</div>
+                <div style={{ fontSize: '11px', color: '#94a3b8' }}>{k.sub}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Actions */}
+          <div style={card}>
+            <div style={{ ...label11, marginBottom: '10px' }}>Actions</div>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+              <button disabled={!!dataBusy} onClick={() => runAction('tick', '/api/market/jobs/tick', {}, 'Tick processed')} style={btnStyle(isMobile)}>{dataBusy === 'tick' ? '…' : 'Run one tick'}</button>
+              <button disabled={!!dataBusy} onClick={() => runAction('agg', '/api/market/aggregate', {}, 'Scores recomputed')} style={btnStyle(isMobile)}>{dataBusy === 'agg' ? '…' : 'Recompute scores'}</button>
+              <button disabled={!!dataBusy} onClick={() => runAction('refresh', '/api/market/jobs/seed', { type: 'passA_refresh', maxPages: 2 }, 'Refresh queued for all branches — runs via the tick/cron')} style={btnStyle(isMobile)}>{dataBusy === 'refresh' ? '…' : 'Refresh recent national results'}</button>
+            </div>
+            <div style={{ marginTop: '12px', display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' }}>
+              <span style={{ fontSize: '12px', color: '#64748b', fontWeight: 600 }}>Deep-enrich an area:</span>
+              <input value={enrichOutcode} onChange={e => setEnrichOutcode(e.target.value.toUpperCase())} placeholder="Outcode e.g. DN12"
+                style={{ padding: isMobile ? '11px 10px' : '8px 10px', borderRadius: '8px', border: '1px solid #e2e8f0', fontSize: '13px', width: '130px' }} />
+              <button disabled={!!dataBusy || !enrichOutcode.trim()} onClick={async () => {
+                const oc = enrichOutcode.trim();
+                await runAction('enrich', '/api/market/jobs/seed', { type: 'passB_lots', outcode: oc }, `Queued lot enrichment + comps for ${oc}`);
+                await apiPost('/api/market/jobs/seed', { type: 'passB_context', outcode: oc }).catch(() => {});
+                loadDataHealth();
+              }} style={btnStyle(isMobile, '#2563eb')}>{dataBusy === 'enrich' ? '…' : 'Enrich lots + comps'}</button>
+            </div>
+            <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '8px' }}>Enrichment + refresh run as background jobs (the cron drains them every ~10 min, or click “Run one tick” repeatedly).</div>
+          </div>
+
+          {/* Jobs table */}
+          <div style={{ ...card, padding: 0 }}>
+            <div style={{ ...label11, padding: '12px 14px 0' }}>Job queue</div>
+            <div className="crm-table-wrap">
+              <table style={{ borderCollapse: 'collapse', width: '100%', minWidth: '720px' }}>
+                <thead><tr>
+                  <th style={th}>Type</th><th style={th}>Target</th><th style={th}>Status</th><th style={th}>Att.</th><th style={th}>Progress / last error</th><th style={th}></th>
+                </tr></thead>
+                <tbody>
+                  {jobs.map(j => {
+                    let stats = {}; try { stats = JSON.parse(j.stats || '{}'); } catch {}
+                    const statColor = { done: '#059669', running: '#2563eb', queued: '#d97706', error: '#dc2626', paused: '#64748b' }[j.status] || '#64748b';
+                    return (
+                      <tr key={j.id}>
+                        <td style={td}>{j.type}</td>
+                        <td style={td}>{j.target || '—'}</td>
+                        <td style={{ ...td, color: statColor, fontWeight: 700 }}>{j.status}</td>
+                        <td style={td}>{j.attempts || 0}</td>
+                        <td style={{ ...td, whiteSpace: 'normal', maxWidth: '320px', color: j.last_error ? '#b91c1c' : '#64748b' }}>
+                          {j.last_error || Object.entries(stats).filter(([, v]) => typeof v !== 'object').map(([k, v]) => `${k}:${v}`).join(' · ') || '—'}
+                        </td>
+                        <td style={td}>
+                          {(j.status === 'queued' || j.status === 'error') && <button disabled={!!dataBusy} onClick={() => runAction('p' + j.id, `/api/market/jobs/${encodeURIComponent(j.id)}/pause`, {}, 'Paused')} style={miniBtn}>Pause</button>}
+                          {j.status === 'paused' && <button disabled={!!dataBusy} onClick={() => runAction('r' + j.id, `/api/market/jobs/${encodeURIComponent(j.id)}/resume`, {}, 'Resumed')} style={miniBtn}>Resume</button>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {!jobs.length && <tr><td style={{ ...td, padding: '18px', color: '#94a3b8' }} colSpan={6}>No jobs. Seed one above, or the cron is idle (all done).</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Scoring weights editor */}
+          {weightsForm && (
+            <div style={card}>
+              <div style={{ ...label11, marginBottom: '4px' }}>Scoring weights (versioned)</div>
+              <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '10px' }}>Saving creates a new default model and recomputes every area’s score. Weights are normalised to sum to 1.</div>
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(3, 1fr)', gap: '10px' }}>
+                {SCORE_FACTORS.map(([k, lbl]) => (
+                  <label key={k} style={{ fontSize: '12px', color: '#334155' }}>
+                    <div style={{ marginBottom: '3px', color: '#64748b' }}>{lbl}</div>
+                    <input type="number" step="0.01" min="0" value={weightsForm[k] ?? 0}
+                      onChange={e => setWeightsForm(w => ({ ...w, [k]: e.target.value === '' ? '' : Number(e.target.value) }))}
+                      style={{ width: '100%', padding: isMobile ? '11px 8px' : '8px', borderRadius: '8px', border: '1px solid #e2e8f0', fontSize: '13px' }} />
+                  </label>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginTop: '12px', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: '12px', color: '#64748b' }}>Sum: <b>{SCORE_FACTORS.reduce((s, [k]) => s + (Number(weightsForm[k]) || 0), 0).toFixed(2)}</b> (auto-normalised)</span>
+                <button disabled={!!dataBusy} onClick={() => runAction('weights', '/api/market/scoring-model', { weights: weightsForm }, 'Weights saved + scores recomputed')} style={btnStyle(isMobile, '#2563eb')}>{dataBusy === 'weights' ? 'Saving…' : 'Save weights & recompute'}</button>
+              </div>
+            </div>
+          )}
+
+          {/* Flip cost model editor */}
+          {costsForm && (
+            <div style={card}>
+              <div style={{ ...label11, marginBottom: '4px' }}>Flip cost model</div>
+              <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '10px' }}>Assumptions behind the GDV bands / flip calculator. Changes apply the next time an area is enriched (re-run “Enrich lots + comps”).</div>
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(3, 1fr)', gap: '10px' }}>
+                {COST_FIELDS.map(([k, lbl, kind]) => (
+                  <label key={k} style={{ fontSize: '12px', color: '#334155' }}>
+                    <div style={{ marginBottom: '3px', color: '#64748b' }}>{lbl}</div>
+                    <input type="number" step={kind === 'pct' ? '0.1' : '1'} min="0"
+                      value={kind === 'pct' ? +(Number(costsForm[k] || 0) * 100).toFixed(2) : (costsForm[k] ?? 0)}
+                      onChange={e => { const raw = Number(e.target.value); setCostsForm(c => ({ ...c, [k]: kind === 'pct' ? raw / 100 : raw })); }}
+                      style={{ width: '100%', padding: isMobile ? '11px 8px' : '8px', borderRadius: '8px', border: '1px solid #e2e8f0', fontSize: '13px' }} />
+                  </label>
+                ))}
+              </div>
+              <div style={{ display: 'flex', gap: '10px', alignItems: 'center', marginTop: '12px', flexWrap: 'wrap' }}>
+                <label style={{ fontSize: '12px', color: '#64748b', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  Auto-refresh cadence (days)
+                  <input type="number" min="1" value={refreshDaysForm} onChange={e => setRefreshDaysForm(Number(e.target.value) || 7)}
+                    style={{ width: '64px', padding: isMobile ? '11px 8px' : '8px', borderRadius: '8px', border: '1px solid #e2e8f0', fontSize: '13px' }} />
+                </label>
+                <button disabled={!!dataBusy} onClick={() => runAction('costs', '/api/market/settings', { costs: costsForm, refreshDays: refreshDaysForm }, 'Settings saved')} style={btnStyle(isMobile, '#2563eb')}>{dataBusy === 'costs' ? 'Saving…' : 'Save settings'}</button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
+
+const btnStyle = (isMobile, accent) => ({
+  display: 'inline-flex', alignItems: 'center', gap: '6px',
+  padding: isMobile ? '11px 14px' : '8px 14px', minHeight: isMobile ? '44px' : undefined,
+  borderRadius: '8px', border: '1px solid ' + (accent || '#e2e8f0'),
+  background: accent || '#fff', color: accent ? '#fff' : '#334155',
+  fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+});
+const miniBtn = { padding: '5px 10px', borderRadius: '6px', border: '1px solid #e2e8f0', background: '#fff', color: '#334155', fontSize: '11px', fontWeight: 600, cursor: 'pointer' };

@@ -761,6 +761,7 @@ async function runPassBContextJob(env, job, opts) {
     `SELECT id, address, property_type, sold_price, price_confirmed, guide_min, guide_max, raw FROM mi_lots WHERE outcode = ? AND excluded = 0 AND enrichment_level = 1`
   ).bind(outcode).all();
   const streetKeys = Object.keys(comps.sameStreet);
+  const settings = await getMarketSettings(env);
   const expectedGdvs = [], purchases = [];
   const updates = [];
   let withEconomics = 0;
@@ -772,7 +773,7 @@ async function runPassBContextJob(env, job, opts) {
     let purchase = null, basis = null;
     if (lot.price_confirmed && lot.sold_price) { purchase = lot.sold_price; basis = 'confirmed_sale'; }
     else if (lot.guide_min) { purchase = lot.guide_max ? Math.round((lot.guide_min + lot.guide_max) / 2) : lot.guide_min; basis = 'guide_midpoint'; }
-    const g = computeGdv(purchase, comps, lrClass, { streetCeiling });
+    const g = computeGdv(purchase, comps, lrClass, { streetCeiling, costs: settings.costs });
     if (g.gdvExpected != null) { expectedGdvs.push(g.gdvExpected); if (purchase) purchases.push(purchase); }
     if (g.band) withEconomics++;
     let raw; try { raw = JSON.parse(lot.raw || '{}'); } catch { raw = {}; }
@@ -854,6 +855,11 @@ export async function runMarketIntelTick(env, opts = {}) {
     }
     if (job.type === 'passB_context') {
       return await runPassBContextJob(env, job, opts);
+    }
+    if (job.type === 'aggregate') {
+      const agg = await runAggregation(env);
+      await saveJob(env, job, { status: 'done', attempts: 0, last_error: null, stats: JSON.stringify(agg) });
+      return { jobId: job.id, status: 'done', ...agg };
     }
     await saveJob(env, job, { status: 'error', last_error: `Job type not implemented yet: ${job.type}` });
     return { jobId: job.id, error: 'not implemented' };
@@ -1018,6 +1024,39 @@ export const MI_FLIP_COSTS = {
   refurbHeavy: 35000,
   targetReturn: 0.15,
 };
+
+// Editable Market Intel settings (KV `market:settings`, merged over these).
+// The cost model mirrors MI_FLIP_COSTS so the flip calculator/GDV can be tuned
+// without a redeploy; refreshDays drives the Phase 7 steady-state cadence.
+export const DEFAULT_MARKET_SETTINGS = {
+  costs: { ...MI_FLIP_COSTS },
+  refreshDays: 7,
+};
+
+export async function getMarketSettings(env) {
+  const stored = await env.SCRAPER_KV.get('market:settings', 'json');
+  return {
+    ...DEFAULT_MARKET_SETTINGS,
+    ...(stored || {}),
+    costs: { ...MI_FLIP_COSTS, ...(stored?.costs || {}) },
+  };
+}
+
+// Normalise scoring weights to sum to 1 over the known factors; drops non-finite
+// / negative values and rejects an all-zero model (caller returns 400).
+export function normalizeWeights(input) {
+  const factors = ['demandLiquidity', 'flipSpread', 'sub100kSupply', 'compQuality', 'growthResilience', 'risk'];
+  const clean = {};
+  let sum = 0;
+  for (const f of factors) {
+    const v = Number(input?.[f]);
+    if (Number.isFinite(v) && v > 0) { clean[f] = v; sum += v; }
+  }
+  if (sum <= 0) return null;
+  const out = {};
+  for (const f of factors) out[f] = +((clean[f] || 0) / sum).toFixed(4);
+  return out;
+}
 
 // Banded SDLT (England residential) + optional additional-dwelling surcharge on
 // the whole price. Labelled assumption — user can zero the surcharge in settings.
@@ -1509,6 +1548,42 @@ export async function handleMarketIntelRoutes(request, env, url) {
 
   if (path === '/api/market/aggregate' && method === 'POST') {
     return json({ success: true, ...(await runAggregation(env)) });
+  }
+
+  if (path === '/api/market/scoring-model' && method === 'GET') {
+    const model = await env.CRM_DB.prepare('SELECT id, name, weights, updated_at FROM mi_scoring_models WHERE is_default = 1 LIMIT 1').first();
+    return json({ success: true, model: model ? { ...model, weights: JSON.parse(model.weights) } : null });
+  }
+
+  if (path === '/api/market/scoring-model' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const weights = normalizeWeights(body?.weights);
+    if (!weights) return json({ success: false, message: 'weights must be positive and not all zero' }, 400);
+    const id = `v${Date.now()}`;
+    const now = nowIso();
+    await env.CRM_DB.batch([
+      env.CRM_DB.prepare('UPDATE mi_scoring_models SET is_default = 0'),
+      env.CRM_DB.prepare('INSERT INTO mi_scoring_models (id, name, weights, is_default, updated_at) VALUES (?, ?, ?, 1, ?)')
+        .bind(id, body?.name || `Custom weights ${now.slice(0, 10)}`, JSON.stringify(weights), now),
+    ]);
+    const agg = await runAggregation(env);
+    return json({ success: true, model: { id, weights }, reaggregated: agg.scored });
+  }
+
+  if (path === '/api/market/settings' && method === 'GET') {
+    return json({ success: true, settings: await getMarketSettings(env), defaults: DEFAULT_MARKET_SETTINGS });
+  }
+
+  if (path === '/api/market/settings' && method === 'POST') {
+    const body = await request.json().catch(() => ({}));
+    const current = await getMarketSettings(env);
+    const merged = {
+      ...current,
+      ...(Number.isFinite(Number(body?.refreshDays)) && Number(body.refreshDays) > 0 ? { refreshDays: Math.round(Number(body.refreshDays)) } : {}),
+      costs: { ...current.costs, ...(body?.costs || {}) },
+    };
+    await env.SCRAPER_KV.put('market:settings', JSON.stringify(merged));
+    return json({ success: true, settings: merged });
   }
 
   if (path === '/api/market/overview' && method === 'GET') {

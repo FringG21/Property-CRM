@@ -30,6 +30,8 @@ import {
   flipSpreadScore,
   compQualityScore,
   growthResilienceScore,
+  normalizeWeights,
+  DEFAULT_MARKET_SETTINGS,
 } from './marketIntel.js';
 
 // A synthetic LR PPD comp set (dates relative to now so the 24m window holds).
@@ -323,6 +325,27 @@ test('parseSitemapRegions extracts only past-auctions slugs', () => {
     <loc>https://www.auctionhouse.co.uk/london/company/about-us</loc>`;
   assert.deepEqual(parseSitemapRegions(xml).sort(), ['london', 'southyorkshire']);
   assert.equal(MI_KNOWN_REGIONS.length, 23);
+});
+
+// --- settings + scoring weights editor ------------------------------------
+
+test('normalizeWeights: sums to 1, drops junk, rejects all-zero', () => {
+  const r = normalizeWeights({ demandLiquidity: 2, flipSpread: 2, sub100kSupply: 0, compQuality: 0, growthResilience: 0, risk: 0 });
+  assert.ok(Math.abs(r.demandLiquidity + r.flipSpread + r.sub100kSupply + r.compQuality + r.growthResilience + r.risk - 1) < 0.001);
+  assert.ok(Math.abs(r.demandLiquidity - 0.5) < 0.001);
+  assert.equal(r.sub100kSupply, 0);
+  // negatives / non-finite dropped
+  const r2 = normalizeWeights({ demandLiquidity: -5, flipSpread: 'x', sub100kSupply: 3, compQuality: 1, growthResilience: 0, risk: 0 });
+  assert.ok(Math.abs(r2.sub100kSupply - 0.75) < 0.001);
+  // all-zero / empty rejected
+  assert.equal(normalizeWeights({}), null);
+  assert.equal(normalizeWeights({ risk: 0 }), null);
+});
+
+test('DEFAULT_MARKET_SETTINGS carries the flip cost model + refresh cadence', () => {
+  assert.ok(DEFAULT_MARKET_SETTINGS.costs.targetReturn > 0);
+  assert.ok(DEFAULT_MARKET_SETTINGS.costs.refurbLight < DEFAULT_MARKET_SETTINGS.costs.refurbHeavy);
+  assert.equal(DEFAULT_MARKET_SETTINGS.refreshDays, 7);
 });
 
 // --- Pass B 6b: comps, growth, GDV ----------------------------------------
