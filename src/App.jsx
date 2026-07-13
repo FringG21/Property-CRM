@@ -5007,9 +5007,9 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
 
                   {/* Cost stack — Overview tab */}
                   {propCanvasTab === 'financials' && (
-                  <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', borderBottom: '0.5px solid #e2e8f0' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr', borderBottom: '0.5px solid #e2e8f0' }}>
                     {/* Cost stack */}
-                    <div style={{ padding: '14px 20px', borderRight: '0.5px solid #e2e8f0' }}>
+                    <div style={{ padding: '14px 20px' }}>
                       <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8', marginBottom: '10px' }}>Cost stack</div>
                       {pp2 > 0 || refurbCost > 0 ? (
                         <div style={{ border: '0.5px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden' }}>
@@ -5037,85 +5037,6 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                       )}
                     </div>
 
-                    {/* Notes */}
-                    <div style={{ padding: '14px 20px' }}>
-                      <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <span>Notes</span>
-                        <span style={{ fontSize: '10px', color: '#94a3b8', fontWeight: '400', textTransform: 'none', letterSpacing: 0 }}>{currentViewProperty.notesList?.length || 0} notes</span>
-                      </div>
-                      {/* Composer */}
-                      <form onSubmit={handleAddPropertyNote} style={{ border: '0.5px solid #e2e8f0', borderRadius: '9px', overflow: 'hidden', marginBottom: '10px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '7px', padding: '8px 12px', borderBottom: '0.5px solid #f1f5f9', background: '#f8fafc', flexWrap: 'wrap' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                            <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: NOTE_TYPE_COLORS[noteType] || '#94a3b8', flexShrink: 0 }} />
-                            <select value={noteType} onChange={e => setNoteType(e.target.value)} style={{ padding: isMobile ? '8px 12px' : '4px 8px', border: '1px solid #e2e8f0', borderRadius: '5px', fontSize: '11px', fontFamily: 'inherit', background: '#fff', color: '#0f172a', cursor: 'pointer', fontWeight: '500', outline: 'none' }}>
-                              <option value="Review">Review</option>
-                              <option value="Survey update">Survey update</option>
-                              <option value="Legal">Legal</option>
-                              <option value="Finance">Finance</option>
-                              <option value="Task">Task / action</option>
-                              <option value="Flag">Flag / risk</option>
-                            </select>
-                          </div>
-                          <select value={noteAuthor} onChange={e => setNoteAuthor(e.target.value)} style={{ padding: '4px 8px', border: '1px solid #e2e8f0', borderRadius: '5px', fontSize: '11px', fontFamily: 'inherit', background: '#fff', color: '#64748b', outline: 'none' }}>
-                            <option value="Ashley">Ashley</option>
-                            <option value="Femi">Femi</option>
-                          </select>
-                          <div onClick={() => setNoteBookmark(!noteBookmark)} style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer', fontSize: '11px', color: noteBookmark ? '#0284c7' : '#94a3b8', marginLeft: 'auto', userSelect: 'none' }}>
-                            <Bookmark size={12} fill={noteBookmark ? '#0284c7' : 'none'} /> Pin
-                          </div>
-                        </div>
-                        <textarea
-                          value={noteText}
-                          onChange={e => setNoteText(e.target.value)}
-                          placeholder={NOTE_TYPE_PLACEHOLDERS[noteType] || 'Add a note…'}
-                          style={{ width: '100%', minHeight: '58px', padding: '9px 12px', border: 'none', fontSize: '12px', fontFamily: 'inherit', resize: 'none', color: '#0f172a', outline: 'none', lineHeight: '1.6', boxSizing: 'border-box' }}
-                        />
-                        <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '6px 12px', borderTop: '0.5px solid #f1f5f9', background: '#f8fafc' }}>
-                          <button type="submit" style={{ padding: '5px 14px', background: '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: '500', cursor: 'pointer', fontFamily: 'inherit' }}>Post note</button>
-                        </div>
-                      </form>
-                      {/* Notes list */}
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '7px', maxHeight: '340px', overflowY: 'auto' }}>
-                        {[...(currentViewProperty.notesList || [])].reverse().map(n => {
-                          const typeColor = NOTE_TYPE_COLORS[n.type] || '#94a3b8';
-                          const typeBg = NOTE_TYPE_BG[n.type] || '#f8fafc';
-                          const typeText = NOTE_TYPE_TEXT[n.type] || '#64748b';
-                          const isEditing = editingNoteId === n.id;
-                          return (
-                            <div key={n.id} style={{ borderRadius: '8px', border: '1px solid #e2e8f0', borderLeft: `3px solid ${typeColor}`, opacity: n.done ? 0.65 : 1 }}>
-                              <div style={{ padding: '7px 10px', display: 'flex', alignItems: 'center', gap: '6px', borderBottom: '1px solid #f8fafc' }}>
-                                <input type="checkbox" checked={!!n.done} onChange={() => toggleNoteTaskState(currentViewProperty.id, n.id)} style={{ cursor: 'pointer', flexShrink: 0 }} />
-                                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '2px', padding: '1px 6px', borderRadius: '10px', fontSize: '10px', fontWeight: '500', background: typeBg, color: typeText }}>{n.type}</span>
-                                <span style={{ fontSize: '11px', color: '#64748b' }}>{n.author}</span>
-                                {n.bookmarked && <Bookmark size={10} fill="#0284c7" color="#0284c7" />}
-                                <span style={{ fontSize: '10px', color: '#94a3b8', marginLeft: 'auto' }}>{n.date}</span>
-                              </div>
-                              {isEditing ? (
-                                <div style={{ padding: '7px 10px' }}>
-                                  <textarea value={editingNoteText} onChange={e => setEditingNoteText(e.target.value)} autoFocus style={{ width: '100%', minHeight: '52px', padding: '7px 9px', border: '1px solid #e2e8f0', borderRadius: '5px', fontSize: '12px', fontFamily: 'inherit', resize: 'none', outline: 'none', lineHeight: '1.5', boxSizing: 'border-box' }} />
-                                  <div style={{ display: 'flex', gap: '5px', marginTop: '5px' }}>
-                                    <button onClick={() => handleSaveEditPropertyNote(n.id)} style={{ padding: '3px 10px', background: '#059669', color: '#fff', border: 'none', borderRadius: '4px', fontSize: '11px', fontWeight: '500', cursor: 'pointer', fontFamily: 'inherit' }}>Save</button>
-                                    <button onClick={() => { setEditingNoteId(null); setEditingNoteText(''); }} style={{ padding: '3px 8px', background: 'transparent', border: '1px solid #e2e8f0', borderRadius: '4px', fontSize: '11px', color: '#64748b', cursor: 'pointer', fontFamily: 'inherit' }}>Cancel</button>
-                                  </div>
-                                </div>
-                              ) : (
-                                <p style={{ margin: 0, padding: '7px 10px', fontSize: '12px', lineHeight: '1.55', color: n.done ? '#94a3b8' : '#1f2937', textDecoration: n.done ? 'line-through' : 'none' }}>{n.text}</p>
-                              )}
-                              {!isEditing && (
-                                <div style={{ display: 'flex', gap: '2px', padding: '0 8px 6px' }}>
-                                  <button onClick={() => { setEditingNoteId(n.id); setEditingNoteText(n.text); }} style={{ display: 'flex', alignItems: 'center', gap: '3px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px', color: '#94a3b8', fontFamily: 'inherit', padding: '2px 5px', borderRadius: '3px' }}><Pencil size={10} /> Edit</button>
-                                  <button onClick={() => { const u = { ...currentViewProperty, notesList: currentViewProperty.notesList.filter(x => x.id !== n.id) }; setCurrentViewProperty(u); setProperties(prev => prev.map(p => p.id === u.id ? u : p)); if (editingNoteId === n.id) { setEditingNoteId(null); setEditingNoteText(''); } }} style={{ display: 'flex', alignItems: 'center', gap: '3px', background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px', color: '#e24b4a', fontFamily: 'inherit', padding: '2px 5px', borderRadius: '3px' }}><Trash2 size={10} /> Delete</button>
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })}
-                        {(!currentViewProperty.notesList || currentViewProperty.notesList.length === 0) && (
-                          <p style={{ fontSize: '12px', color: '#94a3b8', margin: 0, textAlign: 'center', padding: '12px 0' }}>No notes yet — use the form above.</p>
-                        )}
-                      </div>
-                    </div>
                   </div>
                   )}
 
