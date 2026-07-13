@@ -3491,7 +3491,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
             const consGDV = parseFloat(an.gdvConservative || an.conservativeGDV) || 0;
             const baseGDV = parseFloat(an.gdvBase) || 0;
             const maxGDV = parseFloat(an.gdvOptimistic || an.maxGDV) || 0;
-            const ourMaxBid = parseFloat(currentViewProperty.ourMaxBid) || parseFloat(currentViewProperty.maxBid) || 0;
+            const ourMaxBid = parseFloat(currentViewProperty.ourMaxBid) || 0;
             const reportMax = parseFloat(an.maxBid) || 0;
             const floorArea = parseFloat(an.floorArea) || parseFloat(currentViewProperty.floorArea) || 0;
             const buyInPsm = (floorArea && ourMaxBid) ? Math.round(ourMaxBid / floorArea) : 0;
@@ -3688,7 +3688,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                   {(() => { const act = ['Won', 'Refurb', 'For Sale', 'Completed'].includes(st) ? computeActuals(currentViewProperty) : null;
                   const kpis = [
                     { l: 'Guide', v: gp ? fmtNum(gp) : '—', vc: '#f1f5f9', editKey: 'guidePrice', src: gp ? 'Listing' : '' },
-                    { l: 'Our max bid', v: ourMaxBid ? fmtNum(ourMaxBid) : '—', vc: ourMaxBid ? '#4ade80' : '#f1f5f9', editKey: 'ourMaxBid', src: (currentViewProperty.ourMaxBid || currentViewProperty.maxBid) ? 'Manual' : '', est: (ourMaxBid && reportMax) ? `${Math.round(ourMaxBid / reportMax * 100)}% of report` : null },
+                    { l: 'Our max bid', v: ourMaxBid ? fmtNum(ourMaxBid) : '—', vc: ourMaxBid ? '#4ade80' : '#f1f5f9', editKey: 'ourMaxBid', src: currentViewProperty.ourMaxBid ? 'Manual' : '', est: (ourMaxBid && reportMax) ? `${Math.round(ourMaxBid / reportMax * 100)}% of report` : null },
                     { l: 'Report max', v: reportMax ? fmtNum(reportMax) : '—', vc: reportMax ? '#93c5fd' : '#f1f5f9', src: reportMax ? 'Report' : '' },
                     { l: 'Net profit', v: act ? fmtNum(act.netProfit) : (netProfit ? fmtNum(netProfit) : '—'), vc: act ? (act.netProfit >= 0 ? '#4ade80' : '#f87171') : (netProfit ? '#4ade80' : '#f1f5f9'), src: act ? 'Actual' : (an.netProfit ? 'Report' : ''), est: act && an.netProfit ? `est ${fmtNum(parseFloat(an.netProfit))}` : null },
                     { l: 'Margin', v: act && act.margin != null ? `${act.margin.toFixed(1)}%` : margin != null ? `${margin.toFixed(1)}%` : '—', vc: (() => { const m = act && act.margin != null ? act.margin : margin; return m >= 20 ? '#4ade80' : m >= 10 ? '#fbbf24' : m != null ? '#f87171' : '#f1f5f9'; })(), src: act && act.margin != null ? 'Actual' : (an.profitMargin != null || an.margin != null) ? 'Report' : '', est: act && act.margin != null && margin != null ? `est ${margin.toFixed(1)}%` : null },
@@ -4661,7 +4661,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                           </div>
                           <div>
                             <div style={lbl3}>Our max bid</div>
-                            <input type="number" value={currentViewProperty.ourMaxBid || currentViewProperty.maxBid || ''} onChange={e => updateFieldInView('ourMaxBid', parseInt(e.target.value) || 0)} placeholder="£" style={inpStyle3} />
+                            <input type="number" value={currentViewProperty.ourMaxBid || ''} onChange={e => updateFieldInView('ourMaxBid', parseInt(e.target.value) || 0)} placeholder="£" style={inpStyle3} />
                           </div>
                           <div>
                             <div style={lbl3}>Bids we placed</div>
