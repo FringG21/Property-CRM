@@ -628,6 +628,7 @@ export default function App({ user = {}, onLogout }) {
   const [fetchingLotResult, setFetchingLotResult] = useState(false);
   const [propCanvasTab, setPropCanvasTab] = useState('overview');
   const [compSort, setCompSort] = useState('default'); // 'default' | 'asc' | 'desc'
+  const [narrativeTab, setNarrativeTab] = useState(null); // null = auto (AI review when scored, else report)
   const [bidAmountInput, setBidAmountInput] = useState('');
   const [bidNoteInput, setBidNoteInput] = useState('');
   const [propSidebarCollapsed, setPropSidebarCollapsed] = useState(() => {
@@ -636,7 +637,7 @@ export default function App({ user = {}, onLogout }) {
   const togglePropSidebar = () => setPropSidebarCollapsed(c => { const n = !c; try { localStorage.setItem('propSidebarCollapsed', n ? '1' : '0'); } catch (e) {} return n; });
   const [propMapOpen, setPropMapOpen] = useState(false);
   const [propStreetOpen, setPropStreetOpen] = useState(false);
-  const openPropertyView = (p) => { setCurrentViewProperty(p); setPropCanvasTab('overview'); setPropMapOpen(false); };
+  const openPropertyView = (p) => { setCurrentViewProperty(p); setPropCanvasTab('overview'); setNarrativeTab(null); setPropMapOpen(false); };
 
   // Unified Note Creation Fields
   const [noteText, setNoteText] = useState('');
@@ -4326,12 +4327,40 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     );
                   })()}
 
-                  {/* Report summary — Overview tab (the report's own written summary).
-                      Coexists with the AI review card below. Legacy fallback: older
-                      properties stored the report summary in aiSummary before an AI
-                      review had ever run (aiDealScore still null). */}
-                  {propCanvasTab === 'overview' && (an.reportSummary || (an.aiSummary && an.aiDealScore == null)) && (
-                    <div style={{ margin: '14px 20px 0', borderRadius: '8px', border: '1px solid #fde68a', background: '#fffbeb', padding: '10px 12px', display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
+                  {/* Deal narrative — Report summary / AI review / Market comparison
+                      consolidated into one tabbed card. Presentation only: the three
+                      sources keep their disjoint storage (reportSummary vs ai* vs
+                      dealAnalysis*) per the ownership contract in CLAUDE.md.
+                      Legacy fallback: older properties stored the report summary in
+                      aiSummary before an AI review had ever run (aiDealScore still null). */}
+                  {propCanvasTab === 'overview' && (() => {
+                    const hasReport = !!(an.reportSummary || (an.aiSummary && an.aiDealScore == null));
+                    const hasAi = !!an.aiSummary;
+                    const hasMarket = !!an.dealAnalysisSummary;
+                    if (!hasReport && !hasAi && !hasMarket) return null;
+                    const tabs = [
+                      hasReport && { k: 'report', l: '📄 Report' },
+                      hasAi && { k: 'ai', l: '🤖 AI review' },
+                      hasMarket && { k: 'market', l: '🌐 Market' },
+                    ].filter(Boolean);
+                    const defaultTab = an.aiDealScore != null ? 'ai' : hasReport ? 'report' : hasAi ? 'ai' : 'market';
+                    const active = tabs.some(t => t.k === narrativeTab) ? narrativeTab : defaultTab;
+                    const agr = an.aiReportCrossCheck ? (an.aiReportAgreement || 'agree') : null;
+                    const agrC = agr === 'agree' ? '#059669' : agr === 'partial' ? '#d97706' : '#dc2626';
+                    const agrLbl = { agree: 'AI agrees with report', partial: 'AI partly agrees', disagree: 'AI disagrees with report' }[agr];
+                    return (
+                      <div style={{ margin: '14px 20px 0' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px', flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.06em', color: '#64748b' }}>Deal narrative</span>
+                          {tabs.map(t => (
+                            <button key={t.k} onClick={() => setNarrativeTab(t.k)} style={{ padding: isMobile ? '8px 12px' : '3px 10px', borderRadius: '12px', border: '1px solid', borderColor: active === t.k ? '#c4b5fd' : '#e2e8f0', background: active === t.k ? '#ede9fe' : '#fff', color: active === t.k ? '#5b21b6' : '#64748b', fontSize: '11px', fontWeight: active === t.k ? '600' : '400', cursor: 'pointer', fontFamily: 'inherit' }}>{t.l}</button>
+                          ))}
+                          {agr && <span title={an.aiReportCrossCheck} style={{ marginLeft: 'auto', fontSize: '10px', fontWeight: '600', padding: '2px 8px', borderRadius: '10px', background: '#fff', border: `1px solid ${agrC}`, color: agrC, cursor: 'help' }}>{agrLbl}</span>}
+                        </div>
+
+                        {/* Report pane — the report's own written summary */}
+                        {active === 'report' && (
+                    <div style={{ borderRadius: '8px', border: '1px solid #fde68a', background: '#fffbeb', padding: '10px 12px', display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
                       <span style={{ fontSize: '14px', flexShrink: 0 }}>📄</span>
                       <div>
                         <div style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.07em', color: '#92400e', marginBottom: '3px' }}>Report summary</div>
@@ -4340,14 +4369,14 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     </div>
                   )}
 
-                  {/* AI deal review — Overview tab (same card as the Deal Analysis tab) */}
-                  {propCanvasTab === 'overview' && an.aiSummary && (() => {
+                  {/* AI review pane (same card as the Deal Analysis tab) */}
+                  {active === 'ai' && hasAi && (() => {
                     const hasScore = an.aiDealScore != null;
                     const score = an.aiDealScore ?? 0;
                     const scoreCol = score >= 70 ? '#059669' : score >= 45 ? '#d97706' : '#dc2626';
                     const verdictLabel = { strong_buy: 'Strong buy', buy: 'Buy', conditional: 'Conditional', avoid: 'Avoid' }[an.aiVerdict] || an.aiVerdict;
                     return (
-                      <div style={{ margin: '14px 20px 0', backgroundColor: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: '10px', padding: '14px 16px' }}>
+                      <div style={{ backgroundColor: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: '10px', padding: '14px 16px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '10px', flexWrap: 'wrap' }}>
                           <div style={{ fontSize: '12px', fontWeight: '700', color: '#6d28d9' }}>🤖 AI deal review</div>
                           {(hasScore || verdictLabel) && (
@@ -4407,13 +4436,13 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     );
                   })()}
 
-                  {/* Market comparison — Overview tab (same card as the Deal Analysis tab) */}
-                  {propCanvasTab === 'overview' && an.dealAnalysisSummary && (() => {
+                  {/* Market comparison pane (same card as the Deal Analysis tab) */}
+                  {active === 'market' && hasMarket && (() => {
                     const posCol = { underpriced: '#059669', fair: '#2563eb', overpriced: '#dc2626', insufficient_data: '#64748b' }[an.dealAnalysisPositioning] || '#64748b';
                     const posLabel = { underpriced: 'Underpriced', fair: 'Fair value', overpriced: 'Overpriced', insufficient_data: 'Insufficient data' }[an.dealAnalysisPositioning] || an.dealAnalysisPositioning;
                     const comps = an.dealAnalysisComparables || [];
                     return (
-                      <div style={{ margin: '14px 20px 0', backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '14px 16px' }}>
+                      <div style={{ backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '14px 16px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '10px', flexWrap: 'wrap' }}>
                           <div style={{ fontSize: '12px', fontWeight: '700', color: '#1d4ed8' }}>🌐 Market comparison</div>
                           <span style={{ fontSize: '11px', padding: '2px 10px', borderRadius: '12px', background: '#fff', border: `1px solid ${posCol}`, color: posCol, fontWeight: '700' }}>{posLabel} · {an.dealAnalysisConfidence} confidence</span>
@@ -4435,6 +4464,9 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                             ))}
                           </div>
                         )}
+                      </div>
+                    );
+                  })()}
                       </div>
                     );
                   })()}
