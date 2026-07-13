@@ -5557,7 +5557,12 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
                       <div>
                         <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8' }}>Property Intelligence</div>
-                        {intel.lastRun && <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '2px' }}>Last run: {fmtAt(intel.lastRun)}</div>}
+                        {intel.lastRun && (
+                          <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '2px' }}>
+                            Last run: {fmtAt(intel.lastRun)}
+                            {(Date.now() - new Date(intel.lastRun)) > 30 * 86400000 && <span style={{ marginLeft: '6px', color: '#b45309', fontWeight: '600' }}>⚠ over 30 days old — refresh before bidding</span>}
+                          </div>
+                        )}
                       </div>
                       <button
                         onClick={() => runPropertyIntelligence(currentViewProperty)}
@@ -5613,14 +5618,25 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         return { ok: { bg: '#f0fdf4', fg: '#166534', bar: '#22c55e' }, warn: { bg: '#fffbeb', fg: '#92400e', bar: '#f59e0b' }, bad: { bg: '#fef2f2', fg: '#991b1b', bar: '#ef4444' } }[good];
                       };
 
-                      const Card = ({ title, icon, children, status }) => (
+                      const staleChip = (iso) => {
+                        if (!iso) return null;
+                        const days = Math.floor((Date.now() - new Date(iso)) / 86400000);
+                        if (isNaN(days)) return null;
+                        const level = days > 60 ? 'red' : days > 30 ? 'amber' : null;
+                        const cc = level === 'red' ? { bg: '#fee2e2', fg: '#991b1b' } : level === 'amber' ? { bg: '#fef3c7', fg: '#92400e' } : { bg: '#f1f5f9', fg: '#94a3b8' };
+                        return <span title={level ? 'Stale — refresh before bidding' : 'Data age'} style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '10px', background: cc.bg, color: cc.fg, whiteSpace: 'nowrap' }}>{level ? '⚠ ' : ''}{days < 1 ? 'today' : `${days}d old`}</span>;
+                      };
+                      const Card = ({ title, icon, children, status, fetchedAt }) => (
                         <div style={{ border: '1px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden', marginBottom: '8px' }}>
                           <div style={{ padding: '8px 12px', background: '#f8fafc', borderBottom: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', gap: '6px', justifyContent: 'space-between' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                               <span style={{ fontSize: '14px' }}>{icon}</span>
                               <span style={{ fontSize: '11px', fontWeight: '600', color: '#0f172a' }}>{title}</span>
                             </div>
-                            {status && <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '10px', background: status==='error'?'#fee2e2':'#dcfce7', color: status==='error'?'#991b1b':'#166534' }}>{status==='error'?'Failed':'OK'}</span>}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                              {staleChip(fetchedAt)}
+                              {status && <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '10px', background: status==='error'?'#fee2e2':'#dcfce7', color: status==='error'?'#991b1b':'#166534' }}>{status==='error'?'Failed':'OK'}</span>}
+                            </div>
                           </div>
                           <div style={{ padding: '10px 12px', fontSize: '11px', color: '#334155', lineHeight: '1.7' }}>{children}</div>
                         </div>
@@ -5674,7 +5690,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0' }}>
                             {/* Location */}
                             {addr && (
-                              <Card title="Location" icon="📍" status={c.address?.status}>
+                              <Card title="Location" icon="📍" status={c.address?.status} fetchedAt={c.address?.fetchedAt || intel.lastRun}>
                                 <Row l="Local authority" v={addr.localAuthority} />
                                 <Row l="Ward" v={addr.ward} />
                                 <Row l="Region" v={addr.region} />
@@ -5685,7 +5701,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
 
                             {/* Market Data */}
                             {lr && (
-                              <Card title="Market Data" icon="📊" status={c.landRegistry?.status}>
+                              <Card title="Market Data" icon="📊" status={c.landRegistry?.status} fetchedAt={c.landRegistry?.fetchedAt || intel.lastRun}>
                                 <Row l="Avg sold price" v={lr.avgPrice ? `£${lr.avgPrice.toLocaleString()}` : null} />
                                 <Row l="Recent sales" v={lr.salesCount ? `${lr.salesCount} transactions` : null} />
                                 {lr.priceGrowth != null && (
@@ -5697,7 +5713,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
 
                             {/* EPC */}
                             {epc && (
-                              <Card title="EPC" icon="⚡" status={c.epc?.status}>
+                              <Card title="EPC" icon="⚡" status={c.epc?.status} fetchedAt={c.epc?.fetchedAt || intel.lastRun}>
                                 {epc.epcRating && (
                                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
                                     <div style={{ width: '24px', height: '24px', borderRadius: '4px', background: {'A':'#00a550','B':'#50b848','C':'#b3ce3e','D':'#fff200','E':'#f8b832','F':'#f07f30','G':'#ed1c24'}[epc.epcRating]||'#e2e8f0', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: '700', color: ['A','B','C'].includes(epc.epcRating)?'#fff':'#000' }}>{epc.epcRating}</div>
@@ -5716,7 +5732,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
 
                             {/* Crime */}
                             {police && (
-                              <Card title="Crime Risk" icon="🚔" status={c.police?.status}>
+                              <Card title="Crime Risk" icon="🚔" status={c.police?.status} fetchedAt={c.police?.fetchedAt || intel.lastRun}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
                                   <div style={{ padding: '2px 8px', borderRadius: '4px', fontWeight: '600', fontSize: '12px', background: {'Low':'#dcfce7','Medium':'#fef9c3','High':'#fee2e2','Very High':'#fee2e2'}[police.riskLabel]||'#f1f5f9', color: {'Low':'#166534','Medium':'#92400e','High':'#991b1b','Very High':'#7f1d1d'}[police.riskLabel]||'#475569' }}>{police.riskLabel}</div>
                                   <span style={{ color: '#94a3b8' }}>risk area</span>
@@ -5731,7 +5747,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
 
                             {/* Flood */}
                             {flood && (
-                              <Card title="Flood Risk" icon="🌊" status={c.flood?.status}>
+                              <Card title="Flood Risk" icon="🌊" status={c.flood?.status} fetchedAt={c.flood?.fetchedAt || intel.lastRun}>
                                 <div style={{ marginBottom: '4px', fontWeight: '500', color: flood.floodAreasNearby > 0 ? '#92400e' : '#166534', fontSize: '12px' }}>
                                   {flood.floodAreasNearby > 0 ? `⚠️ ${flood.floodAreasNearby} EA area(s) nearby` : '✅ No flood areas within 0.5km'}
                                 </div>
@@ -5743,7 +5759,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
 
                             {/* Planning */}
                             {plan && (
-                              <Card title="Planning Constraints" icon="🏛️" status={c.planning?.status}>
+                              <Card title="Planning Constraints" icon="🏛️" status={c.planning?.status} fetchedAt={c.planning?.fetchedAt || intel.lastRun}>
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: '6px' }}>
                                   {[
                                     { l: `Listed Building${plan.listedBuildingGrade ? ` (Grade ${plan.listedBuildingGrade})` : ''}`, v: plan.listedBuilding, warn: true },
@@ -5772,7 +5788,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                             )}
                             {/* UK HPI */}
                             {hpi && (
-                              <Card title="UK House Price Index" icon="📈" status={c.hpi?.status}>
+                              <Card title="UK House Price Index" icon="📈" status={c.hpi?.status} fetchedAt={c.hpi?.fetchedAt || intel.lastRun}>
                                 <Row l="Avg price (LA)" v={hpi.avgPrice ? `£${hpi.avgPrice.toLocaleString()}` : null} />
                                 {hpi.growth1yr != null && <Row l="1yr growth" v={<span style={{ color: hpi.growth1yr >= 0 ? '#166534' : '#991b1b', fontWeight: '600' }}>{hpi.growth1yr >= 0 ? '+' : ''}{hpi.growth1yr}%</span>} />}
                                 {hpi.growth3yr != null && <Row l="3yr growth" v={<span style={{ color: hpi.growth3yr >= 0 ? '#166534' : '#991b1b' }}>{hpi.growth3yr >= 0 ? '+' : ''}{hpi.growth3yr}%</span>} />}
@@ -5783,7 +5799,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
 
                             {/* IMD Deprivation */}
                             {imd && (
-                              <Card title="Deprivation Index (IMD 2019)" icon="📊" status={c.imd?.status}>
+                              <Card title="Deprivation Index (IMD 2019)" icon="📊" status={c.imd?.status} fetchedAt={c.imd?.fetchedAt || intel.lastRun}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
                                   <div style={{ width: '32px', height: '32px', borderRadius: '6px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '700', fontSize: '14px', background: imd.decile >= 8 ? '#dcfce7' : imd.decile >= 5 ? '#fef9c3' : imd.decile >= 3 ? '#fed7aa' : '#fee2e2', color: imd.decile >= 8 ? '#166534' : imd.decile >= 5 ? '#92400e' : imd.decile >= 3 ? '#9a3412' : '#991b1b' }}>D{imd.decile}</div>
                                   <div><div style={{ fontWeight: '600', fontSize: '11px' }}>{imd.label}</div><div style={{ fontSize: '10px', color: '#94a3b8' }}>Decile 1 = most deprived</div></div>
@@ -5799,7 +5815,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
 
                             {/* Air Quality */}
                             {air && (
-                              <Card title="Air Quality" icon="🌬️" status={c.airQuality?.status}>
+                              <Card title="Air Quality" icon="🌬️" status={c.airQuality?.status} fetchedAt={c.airQuality?.fetchedAt || intel.lastRun}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
                                   <div style={{ padding: '2px 8px', borderRadius: '4px', fontWeight: '600', fontSize: '12px', background: air.europeanAqi <= 20 ? '#dcfce7' : air.europeanAqi <= 40 ? '#ecfccb' : air.europeanAqi <= 60 ? '#fef9c3' : air.europeanAqi <= 80 ? '#fed7aa' : '#fee2e2', color: air.europeanAqi <= 40 ? '#166534' : air.europeanAqi <= 60 ? '#92400e' : '#991b1b' }}>{air.label}</div>
                                   <span style={{ color: '#94a3b8' }}>EU AQI {air.europeanAqi}</span>
