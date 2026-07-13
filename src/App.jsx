@@ -3513,6 +3513,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
             const st = normaliseStatus(currentViewProperty.status);
             const aDate = currentViewProperty.auctionDate ? new Date(currentViewProperty.auctionDate) : null;
             const daysLeft = aDate ? Math.ceil((aDate - new Date()) / 86400000) : null;
+            const bidDay = daysLeft !== null && daysLeft <= 0 && !['Won', 'Lost', 'Refurb', 'For Sale', 'Completed', 'Not Proceeding'].includes(st);
             const gp = currentViewProperty.guidePrice || 0;
             const maxBid = parseFloat(an.maxBid) || currentViewProperty.maxBid || 0;
             const netProfit = parseFloat(an.netProfit) || 0;
@@ -4243,6 +4244,50 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     return <div style={{ padding: '14px 20px', fontSize: '12px', color: '#b91c1c' }}>Couldn't render comparables — {String(e?.message || e)}</div>;
                   } })()}
 
+                  {/* Bid-day mode — auction is today/past and the deal is still live:
+                      pin the bid strategy + quick bid logging above everything else.
+                      Shares bidAmountInput/bidNoteInput with the Bid Log tab (the two
+                      forms are never rendered at the same time). */}
+                  {propCanvasTab === 'overview' && bidDay && (() => {
+                    const bids = currentViewProperty.bidLog || [];
+                    const lastBid = bids[bids.length - 1];
+                    return (
+                      <div style={{ margin: '14px 20px 0', borderRadius: '10px', border: '1px solid #fca5a5', background: '#fef2f2', padding: '12px 14px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px', flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: '12px', fontWeight: '700', color: '#b91c1c' }}>🔨 Bid day</span>
+                          <span style={{ fontSize: '11px', color: '#991b1b' }}>{daysLeft === 0 ? 'Auction is today' : 'Auction date has passed'} — log bids as they happen</span>
+                          {ourMaxBid > 0 && <span style={{ marginLeft: 'auto', fontSize: '11px', fontWeight: '700', color: '#b91c1c' }}>Our max: {fmtNum(ourMaxBid)}</span>}
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2,1fr)' : 'repeat(3,1fr)', gap: '8px', marginBottom: '10px' }}>
+                          {[
+                            { l: 'Walk away', v: walkBid, sub: 'Minimum threshold', st: {} },
+                            { l: 'Target bid', v: targetBid, sub: '20%+ margin', st: { border: '0.5px solid #059669', background: '#f0fdf4' }, vc: '#166534', lc: '#27500a' },
+                            { l: 'Stretch bid', v: stretchBid || maxBid, sub: 'Absolute maximum', st: { border: '0.5px solid #d97706', background: '#fffbeb' }, vc: '#92400e' },
+                          ].filter(b => b.v > 0).map(b => (
+                            <div key={b.l} style={{ border: '0.5px solid #e2e8f0', borderRadius: '8px', padding: '11px 13px', background: '#fff', ...b.st }}>
+                              <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.05em', color: b.lc || '#94a3b8', marginBottom: '4px' }}>{b.l}</div>
+                              <div style={{ fontSize: '17px', fontWeight: '500', color: b.vc || '#0f172a' }}>{fmtNum(b.v)}</div>
+                              <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '2px' }}>{b.sub}</div>
+                            </div>
+                          ))}
+                        </div>
+                        <form
+                          onSubmit={e => { e.preventDefault(); addBid(parseFloat(bidAmountInput), bidNoteInput); setBidAmountInput(''); setBidNoteInput(''); }}
+                          style={{ display: 'flex', gap: '8px', flexDirection: isMobile ? 'column' : 'row' }}
+                        >
+                          <input type="number" min="1" placeholder="Bid amount £" value={bidAmountInput} onChange={e => setBidAmountInput(e.target.value)} style={{ width: isMobile ? '100%' : '150px', padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box', background: '#fff' }} />
+                          <input placeholder="Note (optional)" value={bidNoteInput} onChange={e => setBidNoteInput(e.target.value)} style={{ flex: 1, padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box', background: '#fff' }} />
+                          <button type="submit" disabled={!(parseFloat(bidAmountInput) > 0)} style={{ padding: isMobile ? '12px' : '7px 16px', borderRadius: '6px', border: 'none', background: parseFloat(bidAmountInput) > 0 ? '#059669' : '#e2e8f0', color: parseFloat(bidAmountInput) > 0 ? '#fff' : '#94a3b8', fontSize: '12px', fontWeight: '600', cursor: parseFloat(bidAmountInput) > 0 ? 'pointer' : 'default', fontFamily: 'inherit' }}>Log bid</button>
+                        </form>
+                        <div style={{ marginTop: '8px', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: '#991b1b', flexWrap: 'wrap' }}>
+                          <span>{bids.length} bid{bids.length === 1 ? '' : 's'} logged{lastBid ? ` · last ${fmtNum(lastBid.amount)}` : ''}</span>
+                          <button onClick={() => setPropCanvasTab('bids')} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#7C3AED', fontSize: '11px', fontWeight: '600', fontFamily: 'inherit', padding: 0 }}>view log</button>
+                          {lastBid && ourMaxBid > 0 && lastBid.amount > ourMaxBid && <span style={{ fontWeight: '700' }}>⚠️ over our max</span>}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* Deal readiness checklist — Overview tab, live deals only.
                       Purely derived from existing data; nothing stored. */}
                   {propCanvasTab === 'overview' && !['Won', 'Lost', 'Refurb', 'For Sale', 'Completed', 'Not Proceeding'].includes(st) && (() => {
@@ -4858,8 +4903,9 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     );
                   })()}
 
-                  {/* Bid strategy cards — hidden once Lost; post-bid review carries the numbers */}
-                  {propCanvasTab === 'overview' && st !== 'Lost' && (walkBid || targetBid || stretchBid) ? (
+                  {/* Bid strategy cards — hidden once Lost (post-bid review carries the
+                      numbers) and on bid day (the pinned bid-day card carries them) */}
+                  {propCanvasTab === 'overview' && st !== 'Lost' && !bidDay && (walkBid || targetBid || stretchBid) ? (
                     <div style={{ padding: '14px 20px', borderBottom: '0.5px solid #e2e8f0' }}>
                       <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8', marginBottom: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <span>Bid strategy</span>
