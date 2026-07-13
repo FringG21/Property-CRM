@@ -4836,11 +4836,27 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                             Strategy was: walk away {walkBid ? `£${walkBid.toLocaleString()}` : '—'} · target {targetBid ? `£${targetBid.toLocaleString()}` : '—'} · stretch {stretchBid ? `£${stretchBid.toLocaleString()}` : '—'}
                           </div>
                         )}
+                        <div style={{ marginTop: '10px', paddingTop: '8px', borderTop: '1px solid #f1f5f9' }}>
+                          <div style={lbl3}>Post-mortem — what happened & what we'd change</div>
+                          <textarea value={currentViewProperty.postMortem || ''} onChange={e => updateFieldInView('postMortem', e.target.value)} placeholder="e.g. Outbid by £12k — our GDV was right but we were slow to walk; this street keeps going 15% over report max…" style={{ ...inpStyle3, minHeight: '64px', resize: 'vertical', lineHeight: '1.5' }} />
+                        </div>
                         {currentViewProperty.lotResultFetchedAt && <div style={{ marginTop: '8px', fontSize: '10px', color: '#94a3b8' }}>Auto-fetched {fmtAt(currentViewProperty.lotResultFetchedAt)} · manual edits preserved</div>}
                       </div>
                     </div>
                     );
                   })()}
+
+                  {/* Decline reason — deals we chose not to bid on */}
+                  {propCanvasTab === 'overview' && st === 'Not Proceeding' && (
+                    <div style={{ margin: '14px 20px 0', border: '1px solid #e2e8f0', borderRadius: '10px', background: '#fff', padding: '12px 14px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                        <span style={{ fontSize: '14px' }}>🚪</span>
+                        <span style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a' }}>Why we passed</span>
+                      </div>
+                      <textarea value={currentViewProperty.declineReason || ''} onChange={e => updateFieldInView('declineReason', e.target.value)} placeholder="Why didn't we bid? e.g. legal pack showed a restrictive covenant; margin under 10% at realistic hammer; wrong area…" style={{ width: '100%', minHeight: '64px', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', fontFamily: 'inherit', resize: 'vertical', lineHeight: '1.5', outline: 'none', boxSizing: 'border-box' }} />
+                      <div style={{ marginTop: '6px', fontSize: '10px', color: '#94a3b8' }}>Recorded so passed-deal patterns can be reviewed later.</div>
+                    </div>
+                  )}
 
                   {/* Deal Outturn — actual vs predicted (post-auction stages) */}
                   {propCanvasTab === 'overview' && ['Won', 'Refurb', 'For Sale', 'Completed'].includes(st) && (() => {
