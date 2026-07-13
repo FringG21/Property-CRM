@@ -2757,6 +2757,88 @@ function enrichCompsWithEPC(lrItems, epcItems) {
   });
 }
 
+// Merge RightMove Plus listings into the property's existing comps and
+// Land Registry items. Backfill only — a field already populated on a comp
+// is never overwritten. Each backfilled field is tagged in comp.fieldSources
+// so the UI can show which source supplied it. Land Registry sold data wins
+// over RightMove figures for price/date (LR is the actual sale record).
+function mergeRightmoveListings(listings, comps, lrItems) {
+  const RM = 'RightMove Plus';
+  const LR = 'Land Registry';
+  const norm = s => (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  const shortKey = addr => {
+    const tokens = norm(addr).split(' ').filter(Boolean);
+    const num = tokens.find(t => /^\d+[a-z]?$/.test(t)) || '';
+    const numIdx = tokens.indexOf(num);
+    const prefix = numIdx > 0 ? tokens.slice(Math.max(0, numIdx - 1), numIdx).join(' ') : '';
+    return `${prefix} ${num}`.trim();
+  };
+  const bestMatch = (addr, items, getAddr) => {
+    if (!addr || !items?.length) return null;
+    const aKey = shortKey(addr);
+    let bestScore = 0.35;
+    let best = null;
+    for (const it of items) {
+      const itAddr = getAddr(it);
+      const score = addressSimilarity(addr, itAddr);
+      const keyBonus = (aKey && shortKey(itAddr) === aKey) ? 0.2 : 0;
+      if (score + keyBonus > bestScore) { bestScore = score + keyBonus; best = it; }
+    }
+    return best;
+  };
+  const blank = v => v == null || v === '';
+
+  const enrichedComps = comps.map(c => ({ ...c }));
+  const newComps = [];
+  let enrichedCount = 0;
+
+  for (const l of listings) {
+    if (!l || blank(l.address)) continue;
+    const lrHit = bestMatch(l.address, lrItems, it => it.address);
+    const soldPrice = (lrHit?.price ?? l.soldPrice) ?? null;
+    const soldDate = (lrHit?.date ?? l.soldDate) ?? null;
+    const soldSrc = lrHit ? LR : RM;
+
+    const compHit = bestMatch(l.address, enrichedComps, c => c.address);
+    if (compHit) {
+      const srcs = { ...(compHit.fieldSources || {}) };
+      let touched = false;
+      const fill = (field, value, src) => {
+        if (blank(compHit[field]) && !blank(value)) { compHit[field] = value; srcs[field] = src; touched = true; }
+      };
+      fill('bedrooms', l.bedrooms, RM);
+      fill('tenure', l.tenure, RM);
+      fill('propertyType', l.propertyType, RM);
+      fill('floorArea', l.floorArea, RM);
+      fill('askingPrice', l.askingPrice, RM);
+      if (blank(compHit.soldPrice) && blank(compHit.price)) fill('soldPrice', soldPrice, soldSrc);
+      if (blank(compHit.soldDate) && blank(compHit.date)) fill('soldDate', soldDate, soldSrc);
+      if (touched) { compHit.fieldSources = srcs; compHit.enriched = true; enrichedCount++; }
+    } else {
+      const srcs = {};
+      ['bedrooms', 'tenure', 'propertyType', 'floorArea', 'askingPrice'].forEach(f => { if (!blank(l[f])) srcs[f] = RM; });
+      if (!blank(soldPrice)) srcs.soldPrice = soldSrc;
+      if (!blank(soldDate)) srcs.soldDate = soldSrc;
+      newComps.push({
+        id: crypto.randomUUID(),
+        address: l.address,
+        bedrooms: l.bedrooms ?? null,
+        tenure: l.tenure ?? null,
+        propertyType: l.propertyType ?? null,
+        floorArea: l.floorArea ?? null,
+        askingPrice: l.askingPrice ?? null,
+        soldPrice,
+        soldDate,
+        source: RM,
+        enriched: !!lrHit,
+        fieldSources: srcs,
+        addedAt: new Date().toISOString(),
+      });
+    }
+  }
+  return { enrichedComps, newComps, enrichedCount };
+}
+
 // ============================================================
 // COMPOSITE SCORES — derived purely from connector data (no new API calls)
 // Each score is 0–100. `invert:true` means higher = worse (risk scores).
@@ -5006,6 +5088,83 @@ async function handleApiRoutes(request, env, url, ctx) {
     // --------------------------------------------------------
     // AI — deal review (summary, risk flags, deal score)
     // --------------------------------------------------------
+    // --------------------------------------------------------
+    // AI — RightMove Plus report parse + comparable enrichment
+    // Stateless by design: reads the stored doc from R2, extracts listings
+    // via the LLM chain, matches them against the comps/LR items the client
+    // sent, and returns the merged result. The SPA stays the single writer
+    // of property state (avoids the /api/crm-data lost-update race).
+    // --------------------------------------------------------
+    if (url.pathname === '/api/ai/parse-rightmove' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      if (!env.AI) return corsResponse({ success: false, message: 'Document parsing unavailable — AI binding not configured' }, 400);
+      if (!anyAiProviderConfigured(env)) {
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
+      }
+      const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
+      if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
+
+      const { key, comps, lrItems } = await request.json();
+      if (!key || typeof key !== 'string') return corsResponse({ success: false, message: 'Missing document key' }, 400);
+      if (!key.startsWith(`${session.userId}/`)) return corsResponse({ success: false, message: 'Forbidden' }, 403);
+
+      const obj = await env.CRM_DOCS.get(key);
+      if (!obj) return corsResponse({ success: false, message: 'Document not found' }, 404);
+      const blob = await obj.blob();
+      const name = key.split('/').pop() || 'rightmove-plus.pdf';
+      const md = await env.AI.toMarkdown([{ name, blob }]);
+      const text = ((Array.isArray(md) ? md[0]?.data : md?.data) || '').slice(0, 40000);
+      if (!text.trim()) return corsResponse({ success: false, message: 'Could not extract any text from the document' }, 422);
+
+      const schema = {
+        type: 'object',
+        additionalProperties: false,
+        required: ['listings'],
+        properties: {
+          listings: {
+            type: 'array',
+            description: 'Every distinct property listing found in the report',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['address'],
+              properties: {
+                address: { type: 'string', description: 'Full street address as printed, including house number/name and street' },
+                bedrooms: { type: 'integer', description: 'Bedroom count if stated' },
+                propertyType: { type: 'string', description: 'e.g. Detached, Semi-detached, Terraced, Flat' },
+                tenure: { type: 'string', description: 'Freehold or Leasehold, only if stated' },
+                floorArea: { type: 'number', description: 'Floor area in square metres, only if stated' },
+                askingPrice: { type: 'number', description: 'Asking/listed/guide price in GBP as a plain number' },
+                soldPrice: { type: 'number', description: 'Sold price in GBP, only if the report shows an actual sale record for this property' },
+                soldDate: { type: 'string', description: 'Sale date as YYYY-MM-DD, only if a sale record is shown' },
+              },
+            },
+          },
+        },
+      };
+
+      try {
+        const { result, provider } = await generateInsight({
+          system: 'You extract structured comparable-property data from RightMove Plus reports for a UK auction investor. Extract every distinct property listing in the document. Use only values printed in the report — never guess, estimate, or invent; omit any field that is not stated. Prices are GBP plain numbers with no separators. Dates are YYYY-MM-DD. An asking/listed price is NOT a sold price — only report soldPrice when the document shows an actual sale.',
+          prompt: `Extract every property listing from this RightMove Plus report:\n\n${text}`,
+          schema,
+          requiredFields: ['listings'],
+          env,
+        });
+        const listings = Array.isArray(result.listings) ? result.listings : [];
+        const { enrichedComps, newComps, enrichedCount } = mergeRightmoveListings(
+          listings,
+          Array.isArray(comps) ? comps : [],
+          Array.isArray(lrItems) ? lrItems : []
+        );
+        return corsResponse({ success: true, listings, enrichedComps, newComps, enrichedCount, provider, parsedAt: new Date().toISOString() });
+      } catch (err) {
+        console.error('RightMove Plus parse failed:', err);
+        return corsResponse({ success: false, message: 'Could not parse the RightMove Plus report' }, 502);
+      }
+    }
+
     if (url.pathname === '/api/ai/deal-review' && request.method === 'POST') {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);

@@ -1565,8 +1565,40 @@ export default function App({ user = {}, onLogout }) {
       }).then(() => { setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); })
         .catch(() => setSaveStatus('idle'));
 
+      // RightMove Plus: parse listings server-side and enrich comparables.
+      // Runs after the upload has been stored and saved — a parse failure
+      // never loses the document.
+      if (fileKey === 'rightmovePlus') {
+        enrichFromRightmovePlus(updatedProp, data.key, token);
+      }
+
     } catch {
       alert('Document upload failed — please check your connection and try again.');
+    }
+  };
+
+  const enrichFromRightmovePlus = async (prop, docKey, token) => {
+    try {
+      const res = await fetch('/api/ai/parse-rightmove', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          key: docKey,
+          comps: prop.comparables || [],
+          lrItems: prop.intelligence?.connectors?.landRegistry?.data?.items || [],
+        }),
+      });
+      const parsed = await res.json();
+      if (!parsed.success) {
+        alert(`RightMove Plus report stored, but parsing failed: ${parsed.message || 'unknown error'}`);
+        return;
+      }
+      const merged = [...(parsed.enrichedComps || prop.comparables || []), ...(parsed.newComps || [])];
+      const summary = `RightMove Plus parsed: ${(parsed.listings || []).length} listings — ${parsed.enrichedCount || 0} comps enriched, ${(parsed.newComps || []).length} new comps added`;
+      setProperties(prev => prev.map(p => p.id === prop.id ? withActivity({ ...p, comparables: merged }, 'document', summary) : p));
+      setCurrentViewProperty(prev => (prev && prev.id === prop.id) ? withActivity({ ...prev, comparables: merged }, 'document', summary) : prev);
+    } catch {
+      alert('RightMove Plus report stored, but comparable enrichment failed — re-upload to retry.');
     }
   };
 
@@ -3506,6 +3538,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
               { key: 'sprift', label: 'Sprift report', accept: '.html,.htm,.pdf' },
               { key: 'legalPack', label: 'Legal pack', accept: '.pdf,.zip,.doc,.docx' },
               { key: 'surveyReport', label: 'Survey report', accept: '.pdf' },
+              { key: 'rightmovePlus', label: 'RightMove Plus report', accept: '.pdf,.html,.htm' },
             ];
             const surveyJobs = currentViewProperty.surveyJobs || [];
             const latestJob = surveyJobs[surveyJobs.length - 1];
@@ -4070,7 +4103,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     const rawTotal = reportComps.length + lrItems.length + otherComps.length;
                     const EPC_COL = { A:'#00a550',B:'#50b848',C:'#b3ce3e',D:'#fff200',E:'#f8b832',F:'#f07f30',G:'#ed1c24' };
                     const tag = (label, kind) => {
-                      const c = kind === 'report' ? { bg:'#ede9fe', fg:'#5b21b6' } : kind === 'manual' ? { bg:'#f1f5f9', fg:'#475569' } : { bg:'#dbeafe', fg:'#1e40af' };
+                      const c = kind === 'report' ? { bg:'#ede9fe', fg:'#5b21b6' } : kind === 'manual' ? { bg:'#f1f5f9', fg:'#475569' } : kind === 'rm' ? { bg:'#ccfbf1', fg:'#0f766e' } : { bg:'#dbeafe', fg:'#1e40af' };
                       return <span key={label} style={{ fontSize:'10px', padding:'1px 6px', borderRadius:'8px', background:c.bg, color:c.fg, whiteSpace:'nowrap' }}>{label}</span>;
                     };
                     const metaLine = (parts) => parts.filter(Boolean).length > 0 && (
@@ -4112,10 +4145,12 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                       epcRating: item.epcRating, floorArea: item.floorArea, habitableRooms: item.habitableRooms,
                     }));
                     otherComps.forEach(c => {
-                      const isReport = /report/i.test(c.source || ''); const isLr = /land\s*reg/i.test(c.source || '');
-                      upsert(c.address, isReport ? 'Report' : isLr ? 'Land Reg' : 'Manual', isReport ? 'report' : isLr ? 'lr' : 'manual', {
+                      const isReport = /report/i.test(c.source || ''); const isLr = /land\s*reg/i.test(c.source || ''); const isRm = /rightmove/i.test(c.source || '');
+                      upsert(c.address, isReport ? 'Report' : isLr ? 'Land Reg' : isRm ? 'RM Plus' : 'Manual', isReport ? 'report' : isLr ? 'lr' : isRm ? 'rm' : 'manual', {
                         address: c.address, price: c.soldPrice ?? c.price,
                         date: (c.soldDate || c.date) || '', bedrooms: c.bedrooms, notes: c.notes,
+                        propertyType: c.propertyType, tenure: c.tenure, floorArea: c.floorArea,
+                        enriched: c.enriched, fieldSources: c.fieldSources,
                       });
                     });
                     const fmtCompDate = (d) => {
@@ -4135,6 +4170,16 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                           <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8' }}>Comparable sales</div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                             {rows.length > 1 && <div style={{ display: 'flex', gap: '4px' }}>{sortBtn('Price ↑', 'asc')}{sortBtn('Price ↓', 'desc')}</div>}
+                            {rows.length > 0 && (() => {
+                              const hasBeds = r => { const b = compOverrides[r._key]?.bedrooms ?? r.bedrooms; return b != null && b !== ''; };
+                              const fullCount = rows.filter(r => r.address && r.price && r.date && hasBeds(r)).length;
+                              const allFull = fullCount === rows.length;
+                              return (
+                                <span title="Full data = address, sold price, sold date and bedrooms" style={{ fontSize: '10px', padding: '2px 8px', borderRadius: '10px', background: allFull ? '#dcfce7' : '#fef3c7', color: allFull ? '#166534' : '#92400e', whiteSpace: 'nowrap' }}>
+                                  {fullCount} of {rows.length} full data
+                                </span>
+                              );
+                            })()}
                             <div style={{ fontSize: '11px', color: '#94a3b8' }}>{rows.length} propert{rows.length === 1 ? 'y' : 'ies'}{rawTotal > rows.length ? ` · ${rawTotal - rows.length} merged` : ''}</div>
                           </div>
                         </div>
@@ -4178,7 +4223,9 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                       r.habitableRooms ? `${r.habitableRooms} rooms` : null,
                                       compFa > 0 ? `${compFa}m²` : null,
                                       ppsm,
+                                      r.tenure ? <span style={{ color: '#64748b' }}>{r.tenure}</span> : null,
                                       r.tier ? <span style={{ color: '#7c3aed' }}>{r.tier}</span> : null,
+                                      r.enriched ? <span title={r.fieldSources && Object.keys(r.fieldSources).length ? Object.entries(r.fieldSources).map(([f, s]) => `${f}: ${s}`).join(' · ') : 'Backfilled from RightMove Plus / Land Registry'} style={{ padding: '0 5px', borderRadius: '8px', background: '#ccfbf1', color: '#0f766e', fontWeight: '600', cursor: 'help' }}>Enriched</span> : null,
                                       r.notes || null,
                                     ])}
                                   </div>
