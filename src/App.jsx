@@ -4243,6 +4243,44 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     return <div style={{ padding: '14px 20px', fontSize: '12px', color: '#b91c1c' }}>Couldn't render comparables — {String(e?.message || e)}</div>;
                   } })()}
 
+                  {/* Deal readiness checklist — Overview tab, live deals only.
+                      Purely derived from existing data; nothing stored. */}
+                  {propCanvasTab === 'overview' && !['Won', 'Lost', 'Refurb', 'For Sale', 'Completed', 'Not Proceeding'].includes(st) && (() => {
+                    const lrCount = (intel.connectors?.landRegistry?.data?.items || []).length;
+                    const compCount = (an.compsList || []).length + lrCount + (currentViewProperty.comparables || []).filter(c => !c.fromIntelligence).length;
+                    const checks = [
+                      { label: 'Assessment report', done: !!propFiles.mainReport, tab: 'documents' },
+                      { label: 'Report parsed', done: an.maxBid != null || !!an.reportSummary, tab: 'documents' },
+                      { label: 'AI review run', done: an.aiDealScore != null, tab: 'overview' },
+                      { label: 'Legal pack', done: !!propFiles.legalPack || (currentViewProperty.legalPackFiles || []).length > 0, tab: 'documents' },
+                      { label: 'Survey', done: !!propFiles.surveyReport || surveyJobs.length > 0, tab: 'documents' },
+                      { label: 'Intelligence run', done: !!intel.lastRun, tab: 'intel' },
+                      { label: '3+ comparables', done: compCount >= 3, tab: 'comparables' },
+                      { label: 'Guide price', done: gp > 0, tab: 'overview' },
+                      { label: 'Our max bid', done: ourMaxBid > 0, tab: 'financials' },
+                    ];
+                    const doneCount = checks.filter(c => c.done).length;
+                    const ready = doneCount === checks.length;
+                    return (
+                      <div style={{ margin: '14px 20px 0', borderRadius: '10px', border: `1px solid ${ready ? '#bbf7d0' : '#e2e8f0'}`, background: ready ? '#f0fdf4' : '#fff', padding: '12px 14px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                          <div style={{ fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.06em', color: ready ? '#166534' : '#475569' }}>Deal readiness</div>
+                          <span style={{ fontSize: '11px', fontWeight: '700', color: ready ? '#059669' : '#d97706' }}>{doneCount}/{checks.length}{ready ? ' — ready to bid' : ''}</span>
+                          <div style={{ flex: 1, minWidth: '80px', height: '5px', background: '#f1f5f9', borderRadius: '3px', overflow: 'hidden' }}>
+                            <div style={{ width: `${Math.round(doneCount / checks.length * 100)}%`, height: '100%', background: ready ? '#059669' : '#d97706' }}></div>
+                          </div>
+                        </div>
+                        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(3, 1fr)', gap: '2px 10px' }}>
+                          {checks.map(c => (
+                            <button key={c.label} onClick={() => setPropCanvasTab(c.tab)} title={c.done ? 'Done' : 'Outstanding — click to jump there'} style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit', padding: isMobile ? '8px 0' : '4px 0', fontSize: '11px', color: c.done ? '#166534' : '#94a3b8', textAlign: 'left' }}>
+                              <span>{c.done ? '✅' : '⬜'}</span><span>{c.label}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {/* Report summary — Overview tab (the report's own written summary).
                       Coexists with the AI review card below. Legacy fallback: older
                       properties stored the report summary in aiSummary before an AI
