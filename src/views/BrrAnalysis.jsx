@@ -4,6 +4,7 @@ import {
   createScenario, duplicateScenario, renameScenario, deleteScenario,
   setActiveScenario, toggleLock, toggleArchive, setScenarioOverride, appendAudit,
   compQuality, findDuplicateGroups, recommendRent,
+  applyStress, sensitivityGrid, SENSITIVITY_PRESETS, DEFAULT_STRESS,
 } from '../../worker/brrCalc.js';
 
 const pf = v => parseFloat(v) || 0;
@@ -16,6 +17,28 @@ const EVIDENCE_TYPE_OPTIONS = [
 ];
 const CONDITION_OPTIONS = [['', '—'], ['poor', 'Poor'], ['average', 'Average'], ['good', 'Good'], ['refurbished', 'Refurbished']];
 const FURNISHED_OPTIONS = [['', '—'], ['furnished', 'Furnished'], ['unfurnished', 'Unfurnished'], ['part', 'Part-furnished']];
+const STRESS_FIELD_META = [
+  ['hammerPct', 'Hammer price', '%'], ['refurbPct', 'Refurb budget', '%'], ['endValuePct', 'End value', '%'],
+  ['rentPct', 'Rent', '%'], ['ratePts', 'Mortgage rate', 'pts'], ['ltvPts', 'LTV', 'pts'],
+  ['serviceChargePct', 'Service charge', '%'], ['opexPct', 'Other opex', '%'], ['voidPtsExtra', 'Void %', 'pts'],
+];
+const AXIS_FIELD_META = {
+  hammer: { label: 'Hammer price', fmt: v => fmtGbp(v) },
+  endValue: { label: 'End value', fmt: v => fmtGbp(v) },
+  rent: { label: 'Monthly rent', fmt: v => fmtGbp(v) },
+  ratePct: { label: 'Mortgage rate', fmt: v => fmtPct(v) },
+  ltvPct: { label: 'LTV', fmt: v => fmtPct(v) },
+  refurbBudget: { label: 'Refurb budget', fmt: v => fmtGbp(v) },
+  opexScale: { label: 'Opex scale', fmt: v => `${v > 0 ? '+' : ''}${v}%` },
+};
+const SENS_METRIC_META = {
+  cashLeftIn: { label: 'Cash left in', fmt: fmtGbp },
+  capitalRecycledPct: { label: 'Capital recycled %', fmt: fmtPct },
+  totalCashInvested: { label: 'Total cash invested', fmt: fmtGbp },
+  equityRetained: { label: 'Equity retained', fmt: fmtGbp },
+  monthlyCashflow: { label: 'Monthly cash flow', fmt: fmtGbp },
+  netCashReturned: { label: 'Cash returned', fmt: fmtGbp },
+};
 const BLANK_COMP = {
   address: '', postcode: '', distanceMiles: null, monthlyRent: null, evidenceType: 'asking',
   listedAt: null, letAgreedAt: null, achievedAt: null, propertyType: '', beds: null, baths: null,
@@ -186,12 +209,17 @@ const COMPARISON_COLUMNS = [
 ];
 
 export default function BrrAnalysis({ property, updateFieldInView, addBid, logTimeline, isMobile, isTablet, userName }) {
-  const [expanded, setExpanded] = useState({ price: true, costs: false, endValue: false, mortgage: false, rent: false, opex: false, comps: false, comparison: false, audit: false });
+  const [expanded, setExpanded] = useState({ price: true, costs: false, endValue: false, mortgage: false, rent: false, opex: false, comps: false, comparison: false, sensitivity: false, stress: false, audit: false });
   const [renamingId, setRenamingId] = useState(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [auditPage, setAuditPage] = useState(1);
   const [compDraft, setCompDraft] = useState(null);
   const [editingCompId, setEditingCompId] = useState(null);
+  const [sensPresetKey, setSensPresetKey] = useState(SENSITIVITY_PRESETS[0].key);
+  const [sensCustomRow, setSensCustomRow] = useState('hammer');
+  const [sensCustomCol, setSensCustomCol] = useState('ratePct');
+  const [sensCustomMetric, setSensCustomMetric] = useState('cashLeftIn');
+  const [sensCell, setSensCell] = useState(null);
   const toggle = key => setExpanded(e => ({ ...e, [key]: !e[key] }));
 
   if (!property) return null;
@@ -392,6 +420,44 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
   const rec = brr.rentRecommendation;
   rentWarnings.rentHigh = !!(rec && rec.optimistic != null && resolved.grossMonthlyRent > rec.optimistic * 1.05);
 
+  // --- Stress testing (section 10) — combined config drives the dashboard's
+  // "Stressed cash flow" KPI and the comparison table (phase 1's stress payment
+  // only stressed the mortgage rate; this replaces that for display purposes).
+  const stressConfig = brr.stress || DEFAULT_STRESS;
+  const stressedOut = computeBrr(applyStress(resolved, stressConfig));
+  const patchStress = patch => {
+    const nextStress = { ...stressConfig, ...patch };
+    updateFieldInView('brr', stamp({ ...brr, stress: nextStress }, { scenarioId: null, field: 'stress', prev: stressConfig, next: nextStress, reason: null }));
+  };
+  const ruleTarget = (key, fallback) => {
+    const r = (brr.rules || []).find(x => x.key === key);
+    return r ? r.target : fallback;
+  };
+  const combinedChecks = [
+    { label: 'Positive cash flow', pass: stressedOut.monthlyCashflow != null && stressedOut.monthlyCashflow > 0, value: stressedOut.monthlyCashflow == null ? '—' : `${fmtGbp(stressedOut.monthlyCashflow)}/mo` },
+    { label: `Capital recycled ≥ ${ruleTarget('minCapitalRecycledPct', 75)}%`, pass: stressedOut.capitalRecycledPct != null && stressedOut.capitalRecycledPct >= ruleTarget('minCapitalRecycledPct', 75), value: fmtPct(stressedOut.capitalRecycledPct) },
+    { label: `Equity retained ≥ ${ruleTarget('minEquityRetainedPct', 20)}%`, pass: stressedOut.equityRetainedPct != null && stressedOut.equityRetainedPct >= ruleTarget('minEquityRetainedPct', 20), value: fmtPct(stressedOut.equityRetainedPct) },
+    { label: `Cash left in ≤ ${fmtGbp(ruleTarget('maxCashLeftIn', 20000))}`, pass: stressedOut.cashLeftIn <= ruleTarget('maxCashLeftIn', 20000), value: fmtGbp(stressedOut.cashLeftIn) },
+  ];
+
+  // --- Sensitivity grids (section 9) — derived on demand, never persisted.
+  const activeSens = sensPresetKey === 'custom'
+    ? { rowAxis: { field: sensCustomRow }, colAxis: { field: sensCustomCol }, metric: sensCustomMetric }
+    : SENSITIVITY_PRESETS.find(p => p.key === sensPresetKey) || SENSITIVITY_PRESETS[0];
+  const sensGrid = blocked ? null : sensitivityGrid({ inputs: resolved, rowAxis: activeSens.rowAxis, colAxis: activeSens.colAxis, metric: activeSens.metric });
+  const axisCurrentValue = field => {
+    switch (field) {
+      case 'hammer': return resolved.hammer;
+      case 'endValue': return resolved.selectedEndValue;
+      case 'rent': return resolved.grossMonthlyRent;
+      case 'ratePct': return resolved.mortgage.ratePct;
+      case 'ltvPct': return resolved.mortgage.ltvPct;
+      case 'refurbBudget': return resolved.refurbBudget;
+      case 'opexScale': return 0;
+      default: return 0;
+    }
+  };
+
   const priceBasisLabel = scenario.assumedHammerPrice != null ? 'Assumed' : (PRICE_BASIS_LABEL[scenario.priceBasis] || 'Guide');
   const nonArchived = brr.scenarios.filter(s => !s.archived);
 
@@ -409,7 +475,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
     { l: 'Monthly rent', v: fmtGbp(resolved.grossMonthlyRent) },
     { l: 'Mortgage payment', v: fmtGbp(out.monthlyMortgagePayment) + '/mo' },
     { l: 'Monthly cash flow', v: out.monthlyCashflow == null ? '—' : fmtGbp(out.monthlyCashflow) + '/mo', c: out.monthlyCashflow == null ? undefined : out.monthlyCashflow >= 0 ? COLORS.good : COLORS.bad },
-    { l: 'Stressed cash flow', v: out.stressMonthlyCashflow == null ? '—' : fmtGbp(out.stressMonthlyCashflow) + '/mo', c: out.stressMonthlyCashflow != null && out.stressMonthlyCashflow < 0 ? COLORS.bad : undefined },
+    { l: 'Stressed cash flow', v: stressedOut.monthlyCashflow == null ? '—' : fmtGbp(stressedOut.monthlyCashflow) + '/mo', c: stressedOut.monthlyCashflow != null && stressedOut.monthlyCashflow < 0 ? COLORS.bad : undefined },
     { l: 'Gross yield', v: fmtPct(out.grossYieldOnHammer) },
     { l: 'Net yield', v: fmtPct(out.netYield) },
     { l: 'Rental confidence', v: brr.defaults.rent.confidence || '—' },
@@ -429,6 +495,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
     const r = resolveScenario(property, brr, s);
     const o = computeBrr(r.inputs);
     const v = computeVerdict(o);
+    const stressedO = computeBrr(applyStress(r.inputs, stressConfig));
     return {
       id: s.id, name: s.name, locked: s.locked,
       hammer: r.inputs.hammer,
@@ -447,7 +514,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
       grossMonthlyRent: r.inputs.grossMonthlyRent,
       monthlyMortgagePayment: o.monthlyMortgagePayment,
       monthlyCashflow: o.monthlyCashflow,
-      stressMonthlyCashflow: o.stressMonthlyCashflow,
+      stressMonthlyCashflow: stressedO.monthlyCashflow,
       grossYieldOnHammer: o.grossYieldOnHammer,
       netYield: o.netYield,
       maxBidResult: null,
@@ -891,6 +958,115 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
             </table>
           </div>
         )}
+      </Section>
+
+      {/* Section 9 — Sensitivity analysis */}
+      <Section title="9. Sensitivity analysis" expanded={expanded.sensitivity} onToggle={() => toggle('sensitivity')}>
+        {blocked ? (
+          <div style={{ fontSize: '12px', color: COLORS.textFaint }}>Set a hammer price to run sensitivity grids.</div>
+        ) : (
+          <>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '10px' }}>
+              <Select value={sensPresetKey} onChange={e => { setSensPresetKey(e.target.value); setSensCell(null); }} options={[...SENSITIVITY_PRESETS.map(p => [p.key, p.label]), ['custom', 'Custom…']]} />
+              {sensPresetKey === 'custom' && (
+                <>
+                  <Select value={sensCustomRow} onChange={e => { setSensCustomRow(e.target.value); setSensCell(null); }} options={Object.entries(AXIS_FIELD_META).map(([k, m]) => [k, `Row: ${m.label}`])} />
+                  <Select value={sensCustomCol} onChange={e => { setSensCustomCol(e.target.value); setSensCell(null); }} options={Object.entries(AXIS_FIELD_META).map(([k, m]) => [k, `Col: ${m.label}`])} />
+                  <Select value={sensCustomMetric} onChange={e => { setSensCustomMetric(e.target.value); setSensCell(null); }} options={Object.entries(SENS_METRIC_META).map(([k, m]) => [k, m.label])} />
+                </>
+              )}
+            </div>
+            <div style={{ fontSize: '11px', color: COLORS.textFaint, marginBottom: '8px' }}>
+              Rows: {AXIS_FIELD_META[activeSens.rowAxis.field].label} · Columns: {AXIS_FIELD_META[activeSens.colAxis.field].label} · Cell: {SENS_METRIC_META[activeSens.metric].label}. Tap a cell for detail. Green = positive cash flow, red = negative; purple outline = current scenario.
+            </div>
+            {sensGrid && (
+              <div className="crm-table-wrap" style={{ overflowX: 'auto', maxWidth: '100%' }}>
+                <table style={{ borderCollapse: 'collapse', fontSize: '11px' }}>
+                  <thead>
+                    <tr>
+                      <th style={{ position: 'sticky', left: 0, background: COLORS.cardBg, padding: '6px 8px', borderBottom: `1px solid ${COLORS.borderLight}` }} />
+                      {sensGrid.colAxis.values.slice(0, isMobile ? 5 : sensGrid.colAxis.values.length).map((cv, ci) => (
+                        <th key={ci} style={{ padding: '6px 8px', color: COLORS.textFaint, fontSize: '10px', whiteSpace: 'nowrap', borderBottom: `1px solid ${COLORS.borderLight}` }}>{AXIS_FIELD_META[sensGrid.colAxis.field].fmt(cv)}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sensGrid.rows.map((row, ri) => (
+                      <tr key={ri}>
+                        <td style={{ position: 'sticky', left: 0, background: COLORS.cardBg, padding: '6px 8px', color: COLORS.textFaint, fontSize: '10px', fontWeight: '600', whiteSpace: 'nowrap', borderBottom: `0.5px solid ${COLORS.border}` }}>{AXIS_FIELD_META[sensGrid.rowAxis.field].fmt(row.rowValue)}</td>
+                        {row.cells.slice(0, isMobile ? 5 : row.cells.length).map((cell, ci) => {
+                          const isCurrent = Math.abs(cell.rowValue - axisCurrentValue(sensGrid.rowAxis.field)) < 0.01 && Math.abs(cell.colValue - axisCurrentValue(sensGrid.colAxis.field)) < 0.01;
+                          return (
+                            <td key={ci} onClick={() => setSensCell({ ...cell, rowField: sensGrid.rowAxis.field, colField: sensGrid.colAxis.field, metric: sensGrid.metric })}
+                              style={{ padding: '6px 8px', textAlign: 'right', color: COLORS.text, background: cell.pass ? '#052e1b' : '#3f0d0d', outline: isCurrent ? `2px solid ${COLORS.accent}` : 'none', outlineOffset: '-2px', cursor: 'pointer', whiteSpace: 'nowrap', borderBottom: `0.5px solid ${COLORS.border}` }}>
+                              {SENS_METRIC_META[sensGrid.metric].fmt(cell.value)}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {sensCell && (
+              <div style={{ marginTop: '10px', border: `1px solid ${COLORS.accent}`, borderRadius: '8px', padding: '10px 12px', background: '#0b1120' }}>
+                <div style={{ fontSize: '11px', color: COLORS.textFaint, marginBottom: '6px' }}>
+                  {AXIS_FIELD_META[sensCell.rowField].label}: <strong style={{ color: COLORS.text }}>{AXIS_FIELD_META[sensCell.rowField].fmt(sensCell.rowValue)}</strong>
+                  {' · '}{AXIS_FIELD_META[sensCell.colField].label}: <strong style={{ color: COLORS.text }}>{AXIS_FIELD_META[sensCell.colField].fmt(sensCell.colValue)}</strong>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2,1fr)' : 'repeat(4,1fr)', gap: '6px' }}>
+                  <KpiTile label="Total cash invested" value={fmtGbp(sensCell.out.totalCashInvested)} isMobile={isMobile} />
+                  <KpiTile label="Cash left in" value={sensCell.out.cashLeftIn > 0 ? fmtGbp(sensCell.out.cashLeftIn) : 'Recycled'} isMobile={isMobile} />
+                  <KpiTile label="Capital recycled" value={fmtPct(sensCell.out.capitalRecycledPct)} isMobile={isMobile} />
+                  <KpiTile label="Equity retained" value={fmtGbp(sensCell.out.equityRetained)} isMobile={isMobile} />
+                  <KpiTile label="Monthly cash flow" value={sensCell.out.monthlyCashflow == null ? '—' : fmtGbp(sensCell.out.monthlyCashflow) + '/mo'} isMobile={isMobile} />
+                  <KpiTile label="Gross yield" value={fmtPct(sensCell.out.grossYieldOnHammer)} isMobile={isMobile} />
+                  <KpiTile label="Net yield" value={fmtPct(sensCell.out.netYield)} isMobile={isMobile} />
+                  <KpiTile label="Cash returned" value={fmtGbp(sensCell.out.netCashReturned)} isMobile={isMobile} />
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </Section>
+
+      {/* Section 10 — Stress testing */}
+      <Section title="10. Stress testing" expanded={expanded.stress} onToggle={() => toggle('stress')}>
+        <div style={{ fontSize: '11px', color: COLORS.textFaint, marginBottom: '8px' }}>Editable downside deltas — combined applies all of them together.</div>
+        {STRESS_FIELD_META.map(([key, label, unit]) => (
+          <Row key={key} label={`${label} (${unit === 'pts' ? 'pts' : '%'})`}>
+            <NumInput value={stressConfig[key]} onChange={v => patchStress({ [key]: v == null ? 0 : v })} />
+          </Row>
+        ))}
+
+        <div style={{ marginTop: '14px', paddingTop: '12px', borderTop: `0.5px solid ${COLORS.border}` }}>
+          <div style={{ fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.05em', color: COLORS.textFaint, marginBottom: '8px' }}>Individual stresses</div>
+          {STRESS_FIELD_META.map(([key, label, unit]) => {
+            const delta = stressConfig[key];
+            if (!delta) return null;
+            const individualOut = computeBrr(applyStress(resolved, { [key]: delta }));
+            const pass = individualOut.monthlyCashflow != null && individualOut.monthlyCashflow > 0;
+            return (
+              <div key={key} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', padding: '6px 0', borderBottom: `0.5px solid ${COLORS.border}`, fontSize: '12px' }}>
+                <span style={{ color: COLORS.textMuted }}>{label} {delta > 0 ? '+' : ''}{delta}{unit === 'pts' ? 'pts' : '%'}</span>
+                <span style={{ color: pass ? COLORS.good : COLORS.bad, fontWeight: '600' }}>
+                  {pass ? '✓' : '✗'} {individualOut.monthlyCashflow == null ? '—' : `${fmtGbp(individualOut.monthlyCashflow)}/mo`}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+
+        <div style={{ marginTop: '14px', paddingTop: '12px', borderTop: `0.5px solid ${COLORS.border}` }}>
+          <div style={{ fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.05em', color: COLORS.textFaint, marginBottom: '8px' }}>Combined downside</div>
+          {combinedChecks.map(c => (
+            <div key={c.label} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', padding: '6px 0', borderBottom: `0.5px solid ${COLORS.border}`, fontSize: '12px' }}>
+              <span style={{ color: COLORS.textMuted }}>{c.label}</span>
+              <span style={{ color: c.pass ? COLORS.good : COLORS.bad, fontWeight: '600' }}>{c.pass ? '✓' : '✗'} {c.value}</span>
+            </div>
+          ))}
+        </div>
       </Section>
 
       {/* Section 15 — Audit history */}

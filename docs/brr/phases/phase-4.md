@@ -66,3 +66,41 @@ local component state on demand (memoised on inputs), never persisted; only the 
 
 ---
 _Post-phase notes:_
+
+Shipped 2026-07-14. `worker/brrCalc.js`: `applyStress(inputs, stress)` applies a sparse
+StressConfig patch (missing keys = 0 delta), so the same function serves both an individual
+single-delta stress and the combined 9-key downside; `serviceChargePct` stresses only service
+charge, `opexPct` stresses every other opex cost line, `voidPtsExtra` adds to `voidPct`.
+`sensitivityGrid({inputs, rowAxis, colAxis, metric, rules})` is the generic 2-axis helper (each
+cell carries `value`, `pass`, and the full `out` BrrOutputs for the detail popover); `rules` is
+an optional `(out) => boolean` predicate so the phase-5 rule engine can plug in later without a
+signature change — pass/fail defaults to the phase-1 basic condition (positive monthly cash
+flow). `DEFAULT_STRESS` is now exported (was previously a private const backing `seedBrr`).
+13 `SENSITIVITY_PRESETS` exported.
+
+**Interpretation call (spec was ambiguous — flag to user if wrong):** the 13 preset names in
+04's spec pair either two real axis fields ("endValue×LTV", "rent×rate", "rent×opexScale" — the
+3 built as genuine swept 2-axis grids) or one axis field + an output-metric name ("hammer×cashLeftIn"
+etc. — the other 10). Since `sensitivityGrid` is explicitly a 2-axis helper, the 10 metric-named
+presets use a second axis held at a single no-op value (current scenario setting) so they run
+through the same shared function as a 1-column sensitivity list. Chose secondary "held" axes
+that a real BRR analyst would plausibly want elsewhere in the tab (e.g. hammer's held axis is
+LTV, refurb's is rate) — purely a rendering choice, doesn't change any number. Also assumed:
+the "four combined-downside checks" pull their targets from the existing `brr.rules`
+(`minCapitalRecycledPct`, `minEquityRetainedPct`, `maxCashLeftIn`) regardless of each rule's
+`enabled` flag, since the stress test's checklist is independent of the phase-5 investment-rules
+module — sensible defaults (75% / 20% / £20,000) are used if a rule is ever absent.
+
+`BrrAnalysis.jsx`: section 9 (preset picker + custom row/col/metric dropdowns, colour-coded
+grid — green pass / red fail / purple outline on the current-scenario cell, sticky row header,
+mobile capped at 5 columns, tap-to-open detail popover with an 8-tile mini-KPI set) and section
+10 (editable `StressConfig` inputs, per-delta individual-stress list with tick/cross, combined-
+downside card with the four checks). Dashboard's "Stressed cash flow" KPI and the comparison
+table's "Stressed cash flow" column now both read `computeBrr(applyStress(resolved, brr.stress))`
+(the combined config) instead of `computeBrr`'s own rate-only `stressMonthlyCashflow` field —
+that internal field is untouched (still rate-only) since tests pin it and phase 1 code depends
+on it; only the UI's *display* source changed, per the phase brief. Deliberate scope cut: no
+"Ranges" expander for editing sweep step counts/bounds — presets and the default ±10%/rate-±2pt/
+LTV-60-80 sweeps from 02-calculations.md are used as-is; flag to user if custom range editing is
+wanted. `npm test` (120/120) and `npm run build` verified; deployed live. Live browser
+walkthrough of sections 9/10 not done this session — same auth-wall reason as phase 3.

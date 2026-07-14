@@ -123,7 +123,7 @@ export const DEFAULT_BRR_RULES = [
   { id: 'rule_minValuationConfidence', key: 'minValuationConfidence', enabled: false, mandatory: false, target: 0 },
 ];
 
-const DEFAULT_STRESS = { hammerPct: 5, refurbPct: 15, endValuePct: -10, rentPct: -10, ratePts: 2, ltvPts: -5, serviceChargePct: 25, opexPct: 10, voidPtsExtra: 4 };
+export const DEFAULT_STRESS = { hammerPct: 5, refurbPct: 15, endValuePct: -10, rentPct: -10, ratePts: 2, ltvPts: -5, serviceChargePct: 25, opexPct: 10, voidPtsExtra: 4 };
 
 function uuid() {
   return (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -821,3 +821,143 @@ export function computeBrr(resolved) {
     metricNotes, warnings,
   };
 }
+
+// --- Sensitivity & stress testing (02-calculations.md §§14-15) -------------
+
+const OPEX_COST_KEYS = ['maintenance', 'insurance', 'serviceCharge', 'groundRent', 'licensing', 'compliance', 'utilities', 'councilTax', 'cleaning', 'gardening'];
+
+/** Scale every OpexItem's £ value by pctDelta (e.g. +10 => ×1.10). Rates (voidPct/managementPct) are untouched. */
+function scaleOpexCosts(opex, pctDelta, { excludeKeys = [] } = {}) {
+  const mult = 1 + pf(pctDelta) / 100;
+  const next = { ...opex };
+  for (const key of OPEX_COST_KEYS) {
+    if (excludeKeys.includes(key)) continue;
+    const item = next[key] || { mode: 'annual', value: 0 };
+    next[key] = { ...item, value: pf(item.value) * mult };
+  }
+  next.otherMonthly = pf(opex.otherMonthly) * mult;
+  next.otherAnnual = pf(opex.otherAnnual) * mult;
+  return next;
+}
+
+/**
+ * Apply a (possibly sparse) StressConfig patch to resolved inputs. Missing keys are
+ * treated as 0 (no stress on that lever) — the same function serves both an individual
+ * single-delta stress (pass one key) and the combined downside (pass the full 9-key
+ * config). serviceChargePct stresses service charge only; opexPct stresses every other
+ * opex cost line (not service charge, which has its own dedicated lever).
+ * @param {object} inputs ResolvedInputs (the `inputs` object from resolveScenario)
+ * @param {Partial<typeof DEFAULT_STRESS>} stress
+ */
+export function applyStress(inputs, stress) {
+  const s = stress || {};
+  const serviceCharge = inputs.opex.serviceCharge || { mode: 'annual', value: 0 };
+  const opex = {
+    ...scaleOpexCosts(inputs.opex, s.opexPct, { excludeKeys: ['serviceCharge'] }),
+    serviceCharge: { ...serviceCharge, value: pf(serviceCharge.value) * (1 + pf(s.serviceChargePct) / 100) },
+    voidPct: pf(inputs.opex.voidPct) + pf(s.voidPtsExtra),
+  };
+  return {
+    ...inputs,
+    hammer: pf(inputs.hammer) * (1 + pf(s.hammerPct) / 100),
+    refurbBudget: pf(inputs.refurbBudget) * (1 + pf(s.refurbPct) / 100),
+    selectedEndValue: pf(inputs.selectedEndValue) * (1 + pf(s.endValuePct) / 100),
+    grossMonthlyRent: pf(inputs.grossMonthlyRent) * (1 + pf(s.rentPct) / 100),
+    mortgage: { ...inputs.mortgage, ratePct: pf(inputs.mortgage.ratePct) + pf(s.ratePts), ltvPct: pf(inputs.mortgage.ltvPct) + pf(s.ltvPts) },
+    opex,
+  };
+}
+
+function axisCentre(inputs, field) {
+  switch (field) {
+    case 'hammer': return pf(inputs.hammer);
+    case 'endValue': return pf(inputs.selectedEndValue);
+    case 'rent': return pf(inputs.grossMonthlyRent);
+    case 'ratePct': return pf(inputs.mortgage.ratePct);
+    case 'ltvPct': return pf(inputs.mortgage.ltvPct);
+    case 'refurbBudget': return pf(inputs.refurbBudget);
+    case 'opexScale': return 0; // pct delta around "no change"
+    default: return 0;
+  }
+}
+
+/** Default sweep for an axis field: ±10% in 5 steps (rate: ±2pts/0.5, LTV: 60-80/5pt). */
+function defaultAxisValues(field, centre) {
+  if (field === 'ratePct') {
+    const vals = [];
+    for (let d = -2; d <= 2 + 1e-9; d += 0.5) vals.push(round1(centre + d));
+    return vals;
+  }
+  if (field === 'ltvPct') {
+    const vals = [];
+    for (let v = 60; v <= 80; v += 5) vals.push(v);
+    return vals;
+  }
+  if (field === 'opexScale') return [-10, -5, 0, 5, 10];
+  return [-10, -5, 0, 5, 10].map(p => round(centre * (1 + p / 100)));
+}
+
+/** Apply one axis substitution to a resolved-inputs clone. */
+function applyAxisValue(inputs, field, value) {
+  switch (field) {
+    case 'hammer': return { ...inputs, hammer: value };
+    case 'endValue': return { ...inputs, selectedEndValue: value };
+    case 'rent': return { ...inputs, grossMonthlyRent: value };
+    case 'ratePct': return { ...inputs, mortgage: { ...inputs.mortgage, ratePct: value } };
+    case 'ltvPct': return { ...inputs, mortgage: { ...inputs.mortgage, ltvPct: value } };
+    case 'refurbBudget': return { ...inputs, refurbBudget: value };
+    case 'opexScale': return { ...inputs, opex: scaleOpexCosts(inputs.opex, value) };
+    default: return inputs;
+  }
+}
+
+function basicGridPass(out) {
+  return out.monthlyCashflow != null && out.monthlyCashflow > 0;
+}
+
+/**
+ * Generic 2-axis sensitivity grid (02-calculations.md §14). Each cell re-runs computeBrr
+ * with both axis substitutions applied and reports the requested metric plus a pass/fail
+ * flag. `rules`, if supplied, must be a function `(BrrOutputs) => boolean` (the phase-5
+ * rule engine plugs in here without changing this signature); until then pass/fail uses
+ * the basic phase-1 condition (positive monthly cash flow).
+ * @param {{ inputs: object, rowAxis: { field: string, values?: number[], single?: boolean },
+ *   colAxis: { field: string, values?: number[], single?: boolean }, metric: string,
+ *   rules?: (out: object) => boolean }} args
+ */
+export function sensitivityGrid({ inputs, rowAxis, colAxis, metric, rules }) {
+  const passFn = typeof rules === 'function' ? rules : basicGridPass;
+  const rowValues = rowAxis.values || (rowAxis.single ? [axisCentre(inputs, rowAxis.field)] : defaultAxisValues(rowAxis.field, axisCentre(inputs, rowAxis.field)));
+  const colValues = colAxis.values || (colAxis.single ? [axisCentre(inputs, colAxis.field)] : defaultAxisValues(colAxis.field, axisCentre(inputs, colAxis.field)));
+  const rows = rowValues.map(rv => ({
+    rowValue: rv,
+    cells: colValues.map(cv => {
+      const cellInputs = applyAxisValue(applyAxisValue(inputs, rowAxis.field, rv), colAxis.field, cv);
+      const out = computeBrr(cellInputs);
+      return { rowValue: rv, colValue: cv, value: out[metric], pass: passFn(out), out };
+    }),
+  }));
+  return { rowAxis: { field: rowAxis.field, values: rowValues }, colAxis: { field: colAxis.field, values: colValues }, metric, rows };
+}
+
+/**
+ * The 13 named preset tables (spec §17). Presets whose spec name pairs an axis field
+ * with a metric (not a second axis field) use a single-valued, no-op second axis held
+ * at its current value — they still run through the shared 2-axis helper as a 1-column
+ * sensitivity list. Presets naming two real axis fields sweep both.
+ */
+export const SENSITIVITY_PRESETS = [
+  { key: 'hammerCashLeftIn', label: 'Hammer × cash left in', rowAxis: { field: 'hammer' }, colAxis: { field: 'ltvPct', single: true }, metric: 'cashLeftIn' },
+  { key: 'hammerRecycledPct', label: 'Hammer × capital recycled %', rowAxis: { field: 'hammer' }, colAxis: { field: 'ltvPct', single: true }, metric: 'capitalRecycledPct' },
+  { key: 'hammerTotalCash', label: 'Hammer × total cash invested', rowAxis: { field: 'hammer' }, colAxis: { field: 'refurbBudget', single: true }, metric: 'totalCashInvested' },
+  { key: 'endValueLtv', label: 'End value × LTV', rowAxis: { field: 'endValue' }, colAxis: { field: 'ltvPct' }, metric: 'cashLeftIn' },
+  { key: 'endValueCashLeftIn', label: 'End value × cash left in', rowAxis: { field: 'endValue' }, colAxis: { field: 'ratePct', single: true }, metric: 'cashLeftIn' },
+  { key: 'endValueEquity', label: 'End value × equity retained', rowAxis: { field: 'endValue' }, colAxis: { field: 'ltvPct', single: true }, metric: 'equityRetained' },
+  { key: 'rentRate', label: 'Rent × mortgage rate', rowAxis: { field: 'rent' }, colAxis: { field: 'ratePct' }, metric: 'monthlyCashflow' },
+  { key: 'rentCashflow', label: 'Rent × monthly cash flow', rowAxis: { field: 'rent' }, colAxis: { field: 'ltvPct', single: true }, metric: 'monthlyCashflow' },
+  { key: 'rentOpexScale', label: 'Rent × opex scale', rowAxis: { field: 'rent' }, colAxis: { field: 'opexScale' }, metric: 'monthlyCashflow' },
+  { key: 'refurbCashLeftIn', label: 'Refurb budget × cash left in', rowAxis: { field: 'refurbBudget' }, colAxis: { field: 'ratePct', single: true }, metric: 'cashLeftIn' },
+  { key: 'rateCashflow', label: 'Rate × monthly cash flow', rowAxis: { field: 'ratePct' }, colAxis: { field: 'ltvPct', single: true }, metric: 'monthlyCashflow' },
+  { key: 'ltvCashReturned', label: 'LTV × cash returned', rowAxis: { field: 'ltvPct' }, colAxis: { field: 'ratePct', single: true }, metric: 'netCashReturned' },
+  { key: 'ltvEquity', label: 'LTV × equity retained', rowAxis: { field: 'ltvPct' }, colAxis: { field: 'ratePct', single: true }, metric: 'equityRetained' },
+];

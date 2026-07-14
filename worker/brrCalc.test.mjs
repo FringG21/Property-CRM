@@ -24,6 +24,10 @@ import {
   findDuplicateGroups,
   recommendRent,
   DEFAULT_BRR_RULES,
+  applyStress,
+  sensitivityGrid,
+  SENSITIVITY_PRESETS,
+  DEFAULT_STRESS,
 } from './brrCalc.js';
 
 // Baseline worked example (docs/brr/08-testing.md):
@@ -777,4 +781,120 @@ test('findDuplicateGroups: same source is not flagged as a probable-dup (no cros
   const groups = findDuplicateGroups(comps);
   assert.equal(groups.c1, undefined);
   assert.equal(groups.c2, undefined);
+});
+
+// --- Suite 12b — Sensitivity & stress (applyStress, sensitivityGrid) -------
+
+test('applyStress: empty patch is a no-op on every value', () => {
+  const inputs = makeInputs();
+  const stressed = applyStress(inputs, {});
+  assert.equal(stressed.hammer, inputs.hammer);
+  assert.equal(stressed.refurbBudget, inputs.refurbBudget);
+  assert.equal(stressed.selectedEndValue, inputs.selectedEndValue);
+  assert.equal(stressed.grossMonthlyRent, inputs.grossMonthlyRent);
+  assert.equal(stressed.mortgage.ratePct, inputs.mortgage.ratePct);
+  assert.equal(stressed.mortgage.ltvPct, inputs.mortgage.ltvPct);
+  assert.equal(stressed.opex.voidPct, inputs.opex.voidPct);
+});
+
+test('applyStress: each individual delta moves only its own value', () => {
+  const inputs = makeInputs();
+  assert.equal(applyStress(inputs, { hammerPct: 5 }).hammer, 94500);
+  assert.ok(Math.abs(applyStress(inputs, { refurbPct: 15 }).refurbBudget - 28750) < 1e-6);
+  assert.equal(applyStress(inputs, { endValuePct: -10 }).selectedEndValue, 135000);
+  assert.equal(applyStress(inputs, { rentPct: -10 }).grossMonthlyRent, 765);
+  assert.equal(applyStress(inputs, { ratePts: 2 }).mortgage.ratePct, 7.5);
+  assert.equal(applyStress(inputs, { ltvPts: -5 }).mortgage.ltvPct, 70);
+  assert.equal(applyStress(inputs, { voidPtsExtra: 4 }).opex.voidPct, 12);
+});
+
+test('applyStress: serviceChargePct stresses only service charge, not other opex lines', () => {
+  const inputs = makeInputs({ opex: { ...makeInputs().opex, serviceCharge: { mode: 'annual', value: 1000 } } });
+  const stressed = applyStress(inputs, { serviceChargePct: 25 });
+  assert.equal(stressed.opex.serviceCharge.value, 1250);
+  assert.equal(stressed.opex.insurance.value, inputs.opex.insurance.value);
+});
+
+test('applyStress: opexPct stresses other opex cost lines but not service charge', () => {
+  const inputs = makeInputs({ opex: { ...makeInputs().opex, serviceCharge: { mode: 'annual', value: 1000 }, groundRent: { mode: 'annual', value: 200 } } });
+  const stressed = applyStress(inputs, { opexPct: 10 });
+  assert.ok(Math.abs(stressed.opex.insurance.value - 275) < 1e-9);
+  assert.ok(Math.abs(stressed.opex.groundRent.value - 220) < 1e-9);
+  assert.equal(stressed.opex.serviceCharge.value, 1000);
+});
+
+test('applyStress: combined spec example (+5% hammer, +15% refurb, -10% value, -10% rent, +2pts rate, -5pts LTV)', () => {
+  const inputs = makeInputs();
+  const stressed = applyStress(inputs, DEFAULT_STRESS);
+  const base = computeBrr(inputs);
+  const out = computeBrr(stressed);
+  assert.equal(stressed.hammer, 94500);
+  assert.ok(Math.abs(stressed.refurbBudget - 28750) < 1e-6);
+  assert.equal(stressed.selectedEndValue, 135000);
+  assert.equal(stressed.grossMonthlyRent, 765);
+  assert.equal(stressed.mortgage.ratePct, 7.5);
+  assert.equal(stressed.mortgage.ltvPct, 70);
+  // Four downside checks are readable straight off the stressed output.
+  assert.ok(out.monthlyCashflow < base.monthlyCashflow);
+  assert.ok(typeof out.capitalRecycledPct === 'number' || out.capitalRecycledPct === null);
+  assert.ok(typeof out.equityRetainedPct === 'number' || out.equityRetainedPct === null);
+  assert.ok(typeof out.cashLeftIn === 'number');
+});
+
+test('sensitivityGrid: identity cell (row=current, col=current) equals the plain computeBrr result', () => {
+  const inputs = makeInputs();
+  const grid = sensitivityGrid({
+    inputs,
+    rowAxis: { field: 'hammer', values: [inputs.hammer] },
+    colAxis: { field: 'ltvPct', values: [inputs.mortgage.ltvPct] },
+    metric: 'cashLeftIn',
+  });
+  const expected = computeBrr(inputs).cashLeftIn;
+  assert.equal(grid.rows[0].cells[0].value, expected);
+});
+
+test('sensitivityGrid: single (no-op) axis produces a 1-column grid', () => {
+  const inputs = makeInputs();
+  const grid = sensitivityGrid({
+    inputs,
+    rowAxis: { field: 'hammer' },
+    colAxis: { field: 'ltvPct', single: true },
+    metric: 'cashLeftIn',
+  });
+  assert.equal(grid.rows.length, 5); // default ±10% in 5 steps
+  for (const row of grid.rows) assert.equal(row.cells.length, 1);
+  assert.deepEqual(grid.colAxis.values, [inputs.mortgage.ltvPct]);
+});
+
+test('sensitivityGrid: two swept axes produce a full rows×cols grid', () => {
+  const inputs = makeInputs();
+  const grid = sensitivityGrid({ inputs, rowAxis: { field: 'rent' }, colAxis: { field: 'ratePct' }, metric: 'monthlyCashflow' });
+  assert.equal(grid.rows.length, 5);
+  assert.equal(grid.colAxis.values.length, 9); // ±2pts in 0.5 steps
+  for (const row of grid.rows) assert.equal(row.cells.length, 9);
+});
+
+test('sensitivityGrid: default LTV axis is 60-80 in 5pt steps and includes the scenario LTV', () => {
+  const inputs = makeInputs();
+  const grid = sensitivityGrid({ inputs, rowAxis: { field: 'ltvPct' }, colAxis: { field: 'ratePct', single: true }, metric: 'equityRetained' });
+  assert.deepEqual(grid.rowAxis.values, [60, 65, 70, 75, 80]);
+  assert.ok(grid.rowAxis.values.includes(inputs.mortgage.ltvPct));
+});
+
+test('sensitivityGrid: pass/fail defaults to the basic phase-1 condition (positive monthly cash flow)', () => {
+  const inputs = makeInputs({ grossMonthlyRent: 0 });
+  const grid = sensitivityGrid({ inputs, rowAxis: { field: 'hammer', values: [inputs.hammer] }, colAxis: { field: 'ltvPct', values: [inputs.mortgage.ltvPct] }, metric: 'monthlyCashflow' });
+  assert.equal(grid.rows[0].cells[0].pass, false);
+});
+
+test('SENSITIVITY_PRESETS: all 13 presets run without throwing and target a real BrrOutputs metric', () => {
+  const inputs = makeInputs();
+  assert.equal(SENSITIVITY_PRESETS.length, 13);
+  const baseOut = computeBrr(inputs);
+  for (const preset of SENSITIVITY_PRESETS) {
+    assert.ok(Object.prototype.hasOwnProperty.call(baseOut, preset.metric), `${preset.key} metric '${preset.metric}' missing from BrrOutputs`);
+    const grid = sensitivityGrid({ inputs, rowAxis: preset.rowAxis, colAxis: preset.colAxis, metric: preset.metric });
+    assert.ok(grid.rows.length > 0, `${preset.key} produced no rows`);
+    assert.ok(grid.rows[0].cells.length > 0, `${preset.key} produced no columns`);
+  }
 });
