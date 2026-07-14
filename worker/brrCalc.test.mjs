@@ -19,6 +19,10 @@ import {
   toggleArchive,
   setScenarioOverride,
   appendAudit,
+  normaliseAddress,
+  compQuality,
+  findDuplicateGroups,
+  recommendRent,
   DEFAULT_BRR_RULES,
 } from './brrCalc.js';
 
@@ -583,4 +587,194 @@ test('resolveScenario: maxBrrBid priceBasis resolves to guide price with a note 
   const { inputs, sources } = resolveScenario(property, brr, scenario);
   assert.equal(inputs.hammer, 80000);
   assert.ok(sources.hammerNote);
+});
+
+// --- Suite 10 — Rent recommendation (recommendRent) ------------------------
+
+test('normaliseAddress: lowercases, strips punctuation, drops post-comma part', () => {
+  assert.equal(normaliseAddress('12 High St., Sheffield'), '12 high st');
+  assert.equal(normaliseAddress('12 High St'), '12 high st');
+  assert.equal(normaliseAddress(''), '');
+  assert.equal(normaliseAddress(null), '');
+});
+
+test('compQuality: evidence-type base weights', () => {
+  const now = new Date('2026-07-14T00:00:00Z');
+  const base = evidenceType => compQuality({ evidenceType }, {}, now).evidenceBase;
+  assert.equal(base('achieved'), 1.0);
+  assert.equal(base('letAgreed'), 0.9);
+  assert.equal(base('agentAppraisal'), 0.7);
+  assert.equal(base('reducedAsking'), 0.6);
+  assert.equal(base('asking'), 0.5);
+  assert.equal(base('userEvidence'), 0.5);
+});
+
+test('compQuality: staleness factors at 91 and 181 days', () => {
+  const now = new Date('2026-07-14T00:00:00Z');
+  const daysAgo = d => new Date(now.getTime() - d * 86400000).toISOString();
+  const fresh = compQuality({ evidenceType: 'achieved', achievedAt: daysAgo(30) }, {}, now);
+  const stale = compQuality({ evidenceType: 'achieved', achievedAt: daysAgo(91) }, {}, now);
+  const veryStale = compQuality({ evidenceType: 'achieved', achievedAt: daysAgo(181) }, {}, now);
+  assert.equal(fresh.stalenessFactor, 1);
+  assert.equal(fresh.staleFlag, null);
+  assert.equal(stale.stalenessFactor, 0.7);
+  assert.equal(stale.staleFlag, 'stale');
+  assert.equal(veryStale.stalenessFactor, 0.4);
+  assert.equal(veryStale.staleFlag, 'very-stale');
+});
+
+test('compQuality: similarity moves in the right direction for beds/type/distance', () => {
+  const now = new Date();
+  const subject = { beds: 2, propertyType: 'semi-detached' };
+  const exactBeds = compQuality({ evidenceType: 'achieved', beds: 2, condition: 'good' }, subject, now).similarity;
+  const offByOneBeds = compQuality({ evidenceType: 'achieved', beds: 3, condition: 'good' }, subject, now).similarity;
+  const offByTwoBeds = compQuality({ evidenceType: 'achieved', beds: 5, condition: 'good' }, subject, now).similarity;
+  assert.ok(exactBeds > offByOneBeds);
+  assert.ok(offByOneBeds > offByTwoBeds);
+
+  const sameType = compQuality({ evidenceType: 'achieved', propertyType: 'semi-detached', condition: 'good' }, subject, now).similarity;
+  const flatVsHouse = compQuality({ evidenceType: 'achieved', propertyType: 'flat', condition: 'good' }, subject, now).similarity;
+  assert.ok(sameType > flatVsHouse);
+
+  const close = compQuality({ evidenceType: 'achieved', distanceMiles: 0.1, condition: 'good' }, subject, now).similarity;
+  const far = compQuality({ evidenceType: 'achieved', distanceMiles: 2, condition: 'good' }, subject, now).similarity;
+  assert.ok(close > far);
+});
+
+test('compQuality: user weight scales the effective weight', () => {
+  const now = new Date();
+  const base = compQuality({ evidenceType: 'achieved' }, {}, now).effectiveWeight;
+  const halved = compQuality({ evidenceType: 'achieved', weight: 0.5 }, {}, now).effectiveWeight;
+  assert.ok(Math.abs(halved - base * 0.5) < 1e-9);
+});
+
+test('recommendRent: asking-type rent gets a 3% haircut applied inside the weighted calc', () => {
+  const out = recommendRent([{ id: 'c1', evidenceType: 'asking', monthlyRent: 1000, included: true }], {}, new Date());
+  assert.equal(out.recommended, Math.round(1000 * 0.97));
+});
+
+test('recommendRent: adjustment is added before the haircut/weighting', () => {
+  const comps = [{ id: 'c1', evidenceType: 'achieved', monthlyRent: 1000, adjustment: -50, included: true }];
+  const out = recommendRent(comps, {}, new Date());
+  assert.equal(out.recommended, 950);
+});
+
+test('recommendRent: weighted mean favors higher-quality evidence over a plain average', () => {
+  const comps = [
+    { id: 'c1', evidenceType: 'achieved', monthlyRent: 1000, included: true },
+    { id: 'c2', evidenceType: 'asking', monthlyRent: 1200, included: true },
+  ];
+  const out = recommendRent(comps, {}, new Date());
+  const plainAverage = (1000 + 1200 * 0.97) / 2;
+  assert.ok(out.recommended < plainAverage);
+});
+
+test('recommendRent: <4 comps uses the recommended ×0.9/×1.0/×1.08 fallback for C/E/O', () => {
+  const comps = [
+    { id: 'c1', evidenceType: 'achieved', monthlyRent: 1000, included: true },
+    { id: 'c2', evidenceType: 'letAgreed', monthlyRent: 1000, included: true },
+  ];
+  const out = recommendRent(comps, {}, new Date());
+  assert.equal(out.expected, out.recommended);
+  assert.equal(out.conservative, Math.round(out.recommended * 0.9));
+  assert.equal(out.optimistic, Math.round(out.recommended * 1.08));
+});
+
+test('recommendRent: >=4 comps uses percentile-based C/E/O', () => {
+  const comps = [
+    { id: 'c1', evidenceType: 'achieved', monthlyRent: 900, included: true },
+    { id: 'c2', evidenceType: 'achieved', monthlyRent: 950, included: true },
+    { id: 'c3', evidenceType: 'achieved', monthlyRent: 1000, included: true },
+    { id: 'c4', evidenceType: 'achieved', monthlyRent: 1100, included: true },
+  ];
+  const out = recommendRent(comps, {}, new Date());
+  assert.ok(out.conservative <= out.expected);
+  assert.ok(out.optimistic >= out.expected);
+});
+
+test('recommendRent: 0 included comps -> insufficient confidence, nulls, no throw', () => {
+  const out = recommendRent([], {}, new Date());
+  assert.equal(out.confidence, 'insufficient');
+  assert.equal(out.recommended, null);
+  assert.deepEqual(out.compIdsUsed, []);
+});
+
+test('recommendRent: excluded comps are ignored for the calc but the caller\'s array is untouched', () => {
+  const comps = [
+    { id: 'c1', evidenceType: 'achieved', monthlyRent: 1000, included: true },
+    { id: 'c2', evidenceType: 'achieved', monthlyRent: 5000, included: false },
+  ];
+  const out = recommendRent(comps, {}, new Date());
+  assert.deepEqual(out.compIdsUsed, ['c1']);
+  assert.equal(comps.length, 2);
+});
+
+test('recommendRent: confidence — high (>=3 comps, achieved/letAgreed present, none very stale, tight spread)', () => {
+  const comps = [
+    { id: 'c1', evidenceType: 'achieved', monthlyRent: 1000, included: true },
+    { id: 'c2', evidenceType: 'letAgreed', monthlyRent: 1020, included: true },
+    { id: 'c3', evidenceType: 'achieved', monthlyRent: 1010, included: true },
+  ];
+  assert.equal(recommendRent(comps, {}, new Date()).confidence, 'high');
+});
+
+test('recommendRent: confidence — medium (>=2 comps, not asking-only)', () => {
+  const comps = [
+    { id: 'c1', evidenceType: 'agentAppraisal', monthlyRent: 1000, included: true },
+    { id: 'c2', evidenceType: 'asking', monthlyRent: 1050, included: true },
+  ];
+  assert.equal(recommendRent(comps, {}, new Date()).confidence, 'medium');
+});
+
+test('recommendRent: confidence — low (single comp, or asking-only)', () => {
+  const single = recommendRent([{ id: 'c1', evidenceType: 'achieved', monthlyRent: 1000, included: true }], {}, new Date());
+  assert.equal(single.confidence, 'low');
+  const askingOnly = recommendRent([
+    { id: 'c1', evidenceType: 'asking', monthlyRent: 1000, included: true },
+    { id: 'c2', evidenceType: 'asking', monthlyRent: 1000, included: true },
+  ], {}, new Date());
+  assert.equal(askingOnly.confidence, 'low');
+});
+
+test('recommendRent: confidence drops from high when a comp is very stale', () => {
+  const now = new Date();
+  const daysAgo = d => new Date(now.getTime() - d * 86400000).toISOString();
+  const comps = [
+    { id: 'c1', evidenceType: 'achieved', monthlyRent: 1000, achievedAt: daysAgo(200), included: true },
+    { id: 'c2', evidenceType: 'letAgreed', monthlyRent: 1020, included: true },
+    { id: 'c3', evidenceType: 'achieved', monthlyRent: 1010, included: true },
+  ];
+  assert.notEqual(recommendRent(comps, {}, now).confidence, 'high');
+});
+
+test('findDuplicateGroups: exact normalised-address match groups comps', () => {
+  const comps = [
+    { id: 'c1', address: '12 High Street, Sheffield', postcode: 'S1 1AA' },
+    { id: 'c2', address: '12 High Street', postcode: 'S1 1AA' },
+    { id: 'c3', address: '45 Low Road', postcode: 'S2 2BB' },
+  ];
+  const groups = findDuplicateGroups(comps);
+  assert.ok(groups.c1 && groups.c1.includes('c2'));
+  assert.equal(groups.c3, undefined);
+});
+
+test('findDuplicateGroups: probable-dup by postcode + beds + rent within ±£25 across different sources', () => {
+  const comps = [
+    { id: 'c1', address: '1 Foo Street', postcode: 'S1 1AA', beds: 2, monthlyRent: 900, source: 'AgentA' },
+    { id: 'c2', address: '1 Foo St', postcode: 'S1 1AA', beds: 2, monthlyRent: 910, source: 'AgentB' },
+    { id: 'c3', address: '99 Bar Avenue', postcode: 'S1 1AA', beds: 2, monthlyRent: 990, source: 'AgentC' },
+  ];
+  const groups = findDuplicateGroups(comps);
+  assert.ok(groups.c1.includes('c2'));
+  assert.equal(groups.c3, undefined);
+});
+
+test('findDuplicateGroups: same source is not flagged as a probable-dup (no cross-source evidence)', () => {
+  const comps = [
+    { id: 'c1', address: '1 Foo Street', postcode: 'S1 1AA', beds: 2, monthlyRent: 900, source: 'AgentA' },
+    { id: 'c2', address: '2 Different Road', postcode: 'S1 1AA', beds: 2, monthlyRent: 905, source: 'AgentA' },
+  ];
+  const groups = findDuplicateGroups(comps);
+  assert.equal(groups.c1, undefined);
+  assert.equal(groups.c2, undefined);
 });

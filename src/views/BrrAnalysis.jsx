@@ -1,9 +1,50 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   seedBrr, migrateBrrShape, resolveScenario, computeBrr,
   createScenario, duplicateScenario, renameScenario, deleteScenario,
   setActiveScenario, toggleLock, toggleArchive, setScenarioOverride, appendAudit,
+  compQuality, findDuplicateGroups, recommendRent,
 } from '../../worker/brrCalc.js';
+
+const pf = v => parseFloat(v) || 0;
+const SQM_TO_SQFT = 10.7639;
+
+const EVIDENCE_TYPE_OPTIONS = [
+  ['achieved', 'Achieved (tenancy signed)'], ['letAgreed', 'Let agreed'],
+  ['agentAppraisal', 'Agent appraisal'], ['reducedAsking', 'Reduced asking'],
+  ['asking', 'Asking'], ['userEvidence', 'User evidence'],
+];
+const CONDITION_OPTIONS = [['', '—'], ['poor', 'Poor'], ['average', 'Average'], ['good', 'Good'], ['refurbished', 'Refurbished']];
+const FURNISHED_OPTIONS = [['', '—'], ['furnished', 'Furnished'], ['unfurnished', 'Unfurnished'], ['part', 'Part-furnished']];
+const BLANK_COMP = {
+  address: '', postcode: '', distanceMiles: null, monthlyRent: null, evidenceType: 'asking',
+  listedAt: null, letAgreedAt: null, achievedAt: null, propertyType: '', beds: null, baths: null,
+  floorAreaSqm: null, condition: '', furnished: '', garden: null, parking: null, transportNote: '',
+  source: '', evidenceUrl: '', adjustment: null, adjustmentReason: '', weight: 1, included: null, notes: '',
+};
+
+/** Reuses the existing staleChip visual convention (src/App.jsx:5669) — amber >90d, red >180d for rental evidence. */
+function StaleChip({ staleFlag, ageDays }) {
+  if (ageDays == null) return null;
+  const cc = staleFlag === 'very-stale' ? { bg: '#fee2e2', fg: '#991b1b' } : staleFlag === 'stale' ? { bg: '#fef3c7', fg: '#92400e' } : { bg: '#1e293b', fg: '#64748b' };
+  return <span title={staleFlag ? 'Stale — refresh before relying on this comp' : 'Evidence age'} style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '10px', background: cc.bg, color: cc.fg, whiteSpace: 'nowrap' }}>{staleFlag ? '⚠ ' : ''}{ageDays < 1 ? 'today' : `${ageDays}d old`}</span>;
+}
+
+/** Draft-until-blur number input — used for rent fields once a recommendation exists, so a
+ * reason prompt fires once per edit instead of once per keystroke. */
+function CommitOnBlurInput({ value, onCommit, width }) {
+  const [draft, setDraft] = useState(value == null ? '' : String(value));
+  useEffect(() => { setDraft(value == null ? '' : String(value)); }, [value]);
+  return (
+    <input
+      type="number"
+      value={draft}
+      onChange={e => setDraft(e.target.value)}
+      onBlur={() => { const v = draft === '' ? null : parseFloat(draft); if (v !== value) onCommit(v); }}
+      style={{ width: width || '110px', minHeight: '32px', fontSize: '14px', border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', background: '#0b1120', color: COLORS.text, padding: '4px 8px', fontFamily: 'inherit' }}
+    />
+  );
+}
 
 // BRR Analysis — phase 2: flexible scenarios. Full scenario engine (create/
 // rename/duplicate/delete/lock/archive/set-active), sparse per-scenario
@@ -145,10 +186,12 @@ const COMPARISON_COLUMNS = [
 ];
 
 export default function BrrAnalysis({ property, updateFieldInView, addBid, logTimeline, isMobile, isTablet, userName }) {
-  const [expanded, setExpanded] = useState({ price: true, costs: false, endValue: false, mortgage: false, rent: false, opex: false, comparison: false, audit: false });
+  const [expanded, setExpanded] = useState({ price: true, costs: false, endValue: false, mortgage: false, rent: false, opex: false, comps: false, comparison: false, audit: false });
   const [renamingId, setRenamingId] = useState(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [auditPage, setAuditPage] = useState(1);
+  const [compDraft, setCompDraft] = useState(null);
+  const [editingCompId, setEditingCompId] = useState(null);
   const toggle = key => setExpanded(e => ({ ...e, [key]: !e[key] }));
 
   if (!property) return null;
@@ -173,7 +216,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
   // Every mutation funnels through exactly one App-level write per action:
   // logTimeline() for coarse scenario events (also lands on the Timeline tab),
   // updateFieldInView('brr', …) for quiet per-field edits.
-  const applyOverride = (path, value) => {
+  const applyOverride = (path, value, opts = {}) => {
     let workingBrr = brr;
     let sc = scenario;
     let timelineDetail = null;
@@ -184,10 +227,15 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
       sc = workingBrr.scenarios.find(s => s.id === sc.id);
       timelineDetail = `Scenario unlocked: ${sc.name}`;
     }
+    let reason = null;
+    if (opts.requireReason) {
+      reason = window.prompt('This rent has a recommended value from your comps — reason for overriding it:', '');
+      if (!reason) return;
+    }
     const before = sc.overrides;
     const result = setScenarioOverride(workingBrr, sc.id, path, value);
     if (result.error) return;
-    workingBrr = stamp(result.brr, { scenarioId: sc.id, field: path, prev: before, next: value, reason: null });
+    workingBrr = stamp(result.brr, { scenarioId: sc.id, field: path, prev: before, next: value, reason });
     if (timelineDetail && logTimeline) logTimeline(workingBrr, timelineDetail);
     else updateFieldInView('brr', workingBrr);
   };
@@ -211,7 +259,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
   };
 
   const patchOverrides = patch => Object.entries(patch).forEach(([k, v]) => applyOverride(k, v));
-  const patchDeepOverride = (group, patch) => applyOverride(group, { ...(scenario.overrides[group] || {}), ...patch });
+  const patchDeepOverride = (group, patch, opts) => applyOverride(group, { ...(scenario.overrides[group] || {}), ...patch }, opts);
   const resetOverride = key => {
     const next = { ...scenario.overrides };
     delete next[key];
@@ -270,10 +318,79 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
     updateFieldInView('brr', { ...brr, scenarios: nextScenarios });
   }
 
+  // --- Rental comparables (section 6) ---------------------------------------
+  const an = property.analytics || {};
+  const subject = {
+    beds: parseInt(property.beds, 10) || null,
+    propertyType: property.propertyType || null,
+    floorAreaSqm: parseFloat(property.floorArea) || parseFloat(an.floorArea) || null,
+    garden: null, parking: null, furnished: null,
+  };
+  const rentalComps = brr.rentalComps || [];
+  const dupGroups = findDuplicateGroups(rentalComps);
+
+  const recomputeAndCommit = (nextRentalComps, auditPatch) => {
+    const rec = recommendRent(nextRentalComps, subject, new Date());
+    let workingBrr = { ...brr, rentalComps: nextRentalComps, rentRecommendation: rec };
+    if (auditPatch) workingBrr = stamp(workingBrr, auditPatch);
+    updateFieldInView('brr', workingBrr);
+  };
+
+  const saveComp = (draft, editingId) => {
+    if (!draft.address || !draft.address.trim()) { window.alert('Address is required.'); return false; }
+    if (!(pf(draft.monthlyRent) > 0)) { window.alert('Monthly rent is required.'); return false; }
+    if (pf(draft.adjustment) !== 0 && !draft.adjustmentReason) { window.alert('A reason is required when setting an adjustment.'); return false; }
+    const isNew = !editingId;
+    const now = nowIso();
+    const compId = editingId || `rc_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    let nextComp = { ...draft, id: compId, createdAt: isNew ? now : draft.createdAt, addedBy: isNew ? (userName || 'You') : draft.addedBy };
+    let nextComps;
+    if (isNew) {
+      nextComps = [...rentalComps, nextComp];
+      if (nextComp.included == null) {
+        const groups = findDuplicateGroups(nextComps);
+        const group = groups[compId];
+        const groupHasIncluded = group && group.some(id => id !== compId && (nextComps.find(c => c.id === id) || {}).included !== false);
+        nextComp = { ...nextComp, included: !groupHasIncluded };
+        nextComps = nextComps.map(c => c.id === compId ? nextComp : c);
+      }
+    } else {
+      nextComps = rentalComps.map(c => c.id === compId ? nextComp : c);
+    }
+    recomputeAndCommit(nextComps, { scenarioId: null, field: 'rentalComps', prev: isNew ? null : editingId, next: nextComp.address, reason: null });
+    return true;
+  };
+  const deleteComp = id => {
+    const target = rentalComps.find(c => c.id === id);
+    if (!window.confirm(`Delete this comparable (${target.address})? This cannot be undone.`)) return;
+    recomputeAndCommit(rentalComps.filter(c => c.id !== id), { scenarioId: null, field: 'rentalComps', prev: target.address, next: null, reason: null });
+  };
+  const toggleIncludeComp = id => {
+    const target = rentalComps.find(c => c.id === id);
+    const nextComps = rentalComps.map(c => c.id === id ? { ...c, included: c.included === false } : c);
+    recomputeAndCommit(nextComps, { scenarioId: null, field: 'rentalComp.included', prev: target.included !== false, next: target.included === false, reason: null });
+  };
+  const useRecommended = () => {
+    const rec = brr.rentRecommendation;
+    if (!rec || rec.recommended == null) return;
+    const nextRent = { ...brr.defaults.rent, conservative: rec.conservative, expected: rec.expected, optimistic: rec.optimistic };
+    const nextBrr = stamp({ ...brr, defaults: { ...brr.defaults, rent: nextRent } }, { scenarioId: null, field: 'defaults.rent', prev: brr.defaults.rent, next: nextRent, reason: null });
+    updateFieldInView('brr', nextBrr);
+  };
+
+  const includedComps = rentalComps.filter(c => c.included !== false);
+  const rentWarnings = {
+    noComps: includedComps.length === 0,
+    askingOnly: includedComps.length > 0 && includedComps.every(c => c.evidenceType === 'asking'),
+    allStale: includedComps.length > 0 && includedComps.every(c => compQuality(c, subject, new Date()).staleFlag != null),
+  };
+
   const { inputs: resolved, sources } = resolveScenario(property, brr, scenario);
   const out = computeBrr(resolved);
   const verdict = computeVerdict(out);
   const blocked = resolved.hammer <= 0;
+  const rec = brr.rentRecommendation;
+  rentWarnings.rentHigh = !!(rec && rec.optimistic != null && resolved.grossMonthlyRent > rec.optimistic * 1.05);
 
   const priceBasisLabel = scenario.assumedHammerPrice != null ? 'Assumed' : (PRICE_BASIS_LABEL[scenario.priceBasis] || 'Guide');
   const nonArchived = brr.scenarios.filter(s => !s.archived);
@@ -498,21 +615,218 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
 
       {/* Section 5 — Rental assumptions */}
       <Section title="5. Rental assumptions" expanded={expanded.rent} onToggle={() => toggle('rent')}>
-        <Row label="Conservative">
-          <NumInput value={resolved.rent.conservative} onChange={v => patchDeepOverride('rent', { conservative: v })} />
-        </Row>
-        <Row label="Expected">
-          <NumInput value={resolved.rent.expected} onChange={v => patchDeepOverride('rent', { expected: v })} />
-        </Row>
-        <Row label="Optimistic">
-          <NumInput value={resolved.rent.optimistic} onChange={v => patchDeepOverride('rent', { optimistic: v })} />
-        </Row>
-        <Row label="Custom">
-          <NumInput value={resolved.rent.custom} onChange={v => patchDeepOverride('rent', { custom: v })} />
-        </Row>
+        {rec && (
+          <div style={{ fontSize: '11px', color: COLORS.textFaint, marginBottom: '8px' }}>
+            A recommendation exists from your comps — editing these fields will ask for a reason.
+          </div>
+        )}
+        {(() => {
+          const RentInput = rec ? CommitOnBlurInput : NumInput;
+          const commitRent = (key, v) => patchDeepOverride('rent', { [key]: v }, { requireReason: !!rec });
+          return (
+            <>
+              <Row label="Conservative">
+                <RentInput value={resolved.rent.conservative} onChange={v => commitRent('conservative', v)} onCommit={v => commitRent('conservative', v)} />
+              </Row>
+              <Row label="Expected">
+                <RentInput value={resolved.rent.expected} onChange={v => commitRent('expected', v)} onCommit={v => commitRent('expected', v)} />
+              </Row>
+              <Row label="Optimistic">
+                <RentInput value={resolved.rent.optimistic} onChange={v => commitRent('optimistic', v)} onCommit={v => commitRent('optimistic', v)} />
+              </Row>
+              <Row label="Custom">
+                <RentInput value={resolved.rent.custom} onChange={v => commitRent('custom', v)} onCommit={v => commitRent('custom', v)} />
+              </Row>
+            </>
+          );
+        })()}
         <Row label="Selected basis">
           <Select value={resolved.rent.selected} onChange={e => patchDeepOverride('rent', { selected: e.target.value })} options={[['conservative', 'Conservative'], ['expected', 'Expected'], ['optimistic', 'Optimistic'], ['custom', 'Custom']]} />
         </Row>
+      </Section>
+
+      {/* Section 6 — Rental comparables */}
+      <Section title="6. Rental comparables" expanded={expanded.comps} onToggle={() => toggle('comps')}>
+        {(rentWarnings.noComps || rentWarnings.askingOnly || rentWarnings.allStale || rentWarnings.rentHigh) && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '10px' }}>
+            {rentWarnings.noComps && <span style={{ fontSize: '11px', color: COLORS.warnText }}>⚠ No rental comparables added yet.</span>}
+            {rentWarnings.askingOnly && <span style={{ fontSize: '11px', color: COLORS.warnText }}>⚠ Evidence is asking-only — rents discounted 3% in the calc.</span>}
+            {rentWarnings.allStale && <span style={{ fontSize: '11px', color: COLORS.warnText }}>⚠ All included comps are stale (&gt;90 days old).</span>}
+            {rentWarnings.rentHigh && <span style={{ fontSize: '11px', color: COLORS.bad }}>⚠ Selected rent is more than 5% above the optimistic evidence estimate.</span>}
+          </div>
+        )}
+
+        {rec && (
+          <div style={{ border: `0.5px solid ${COLORS.borderLight}`, borderRadius: '8px', padding: '10px 12px', marginBottom: '12px', background: '#0b1120' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+              <div style={{ display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: '12px', color: COLORS.textMuted }}>Conservative <strong style={{ color: COLORS.text }}>{fmtGbp(rec.conservative)}</strong></span>
+                <span style={{ fontSize: '12px', color: COLORS.textMuted }}>Recommended <strong style={{ color: COLORS.accent }}>{fmtGbp(rec.recommended)}</strong></span>
+                <span style={{ fontSize: '12px', color: COLORS.textMuted }}>Optimistic <strong style={{ color: COLORS.text }}>{fmtGbp(rec.optimistic)}</strong></span>
+                <span style={{ fontSize: '11px', color: COLORS.textFaint, textTransform: 'uppercase' }}>Confidence: {rec.confidence}</span>
+              </div>
+              <button onClick={useRecommended} disabled={rec.recommended == null} style={{ fontSize: '11px', fontWeight: '600', color: rec.recommended == null ? COLORS.textFaint : COLORS.accent, background: 'transparent', border: `1px solid ${rec.recommended == null ? COLORS.borderLight : COLORS.accent}`, borderRadius: '6px', padding: '6px 10px', minHeight: '32px', cursor: rec.recommended == null ? 'not-allowed' : 'pointer' }}>Use recommended</button>
+            </div>
+          </div>
+        )}
+
+        {!compDraft ? (
+          <button onClick={() => { setEditingCompId(null); setCompDraft({ ...BLANK_COMP }); }} style={{ fontSize: '11px', fontWeight: '600', color: COLORS.accent, background: 'transparent', border: `1px solid ${COLORS.accent}`, borderRadius: '6px', padding: '6px 10px', minHeight: '32px', cursor: 'pointer', marginBottom: '10px' }}>+ Add comparable</button>
+        ) : (
+          <div style={{ border: `1px solid ${COLORS.accent}`, borderRadius: '8px', padding: '10px 12px', marginBottom: '12px', background: '#0b1120' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '8px' }}>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Address
+                <input value={compDraft.address} onChange={e => setCompDraft({ ...compDraft, address: e.target.value })} style={{ minHeight: '32px', fontSize: '13px', background: '#1e293b', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px' }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Postcode
+                <input value={compDraft.postcode || ''} onChange={e => setCompDraft({ ...compDraft, postcode: e.target.value })} style={{ minHeight: '32px', fontSize: '13px', background: '#1e293b', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px' }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Monthly rent (£)
+                <NumInput value={compDraft.monthlyRent} onChange={v => setCompDraft({ ...compDraft, monthlyRent: v })} width="100%" />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Evidence type
+                <Select value={compDraft.evidenceType} onChange={e => setCompDraft({ ...compDraft, evidenceType: e.target.value })} options={EVIDENCE_TYPE_OPTIONS} style={{ width: '100%' }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Listed date
+                <input type="date" value={(compDraft.listedAt || '').slice(0, 10)} onChange={e => setCompDraft({ ...compDraft, listedAt: e.target.value || null })} style={{ minHeight: '32px', fontSize: '13px', background: '#1e293b', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px' }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Let-agreed date
+                <input type="date" value={(compDraft.letAgreedAt || '').slice(0, 10)} onChange={e => setCompDraft({ ...compDraft, letAgreedAt: e.target.value || null })} style={{ minHeight: '32px', fontSize: '13px', background: '#1e293b', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px' }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Achieved date
+                <input type="date" value={(compDraft.achievedAt || '').slice(0, 10)} onChange={e => setCompDraft({ ...compDraft, achievedAt: e.target.value || null })} style={{ minHeight: '32px', fontSize: '13px', background: '#1e293b', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px' }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Property type
+                <input value={compDraft.propertyType || ''} onChange={e => setCompDraft({ ...compDraft, propertyType: e.target.value })} style={{ minHeight: '32px', fontSize: '13px', background: '#1e293b', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px' }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Beds
+                <NumInput value={compDraft.beds} onChange={v => setCompDraft({ ...compDraft, beds: v })} width="100%" />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Baths
+                <NumInput value={compDraft.baths} onChange={v => setCompDraft({ ...compDraft, baths: v })} width="100%" />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Floor area (sqm)
+                <NumInput value={compDraft.floorAreaSqm} onChange={v => setCompDraft({ ...compDraft, floorAreaSqm: v })} width="100%" />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Distance (miles)
+                <NumInput value={compDraft.distanceMiles} onChange={v => setCompDraft({ ...compDraft, distanceMiles: v })} width="100%" />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Condition
+                <Select value={compDraft.condition || ''} onChange={e => setCompDraft({ ...compDraft, condition: e.target.value })} options={CONDITION_OPTIONS} style={{ width: '100%' }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Furnished
+                <Select value={compDraft.furnished || ''} onChange={e => setCompDraft({ ...compDraft, furnished: e.target.value })} options={FURNISHED_OPTIONS} style={{ width: '100%' }} />
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: COLORS.textFaint, minHeight: '44px' }}>
+                <input type="checkbox" checked={!!compDraft.garden} onChange={e => setCompDraft({ ...compDraft, garden: e.target.checked })} /> Garden
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: COLORS.textFaint, minHeight: '44px' }}>
+                <input type="checkbox" checked={!!compDraft.parking} onChange={e => setCompDraft({ ...compDraft, parking: e.target.checked })} /> Parking
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Transport note
+                <input value={compDraft.transportNote || ''} onChange={e => setCompDraft({ ...compDraft, transportNote: e.target.value })} style={{ minHeight: '32px', fontSize: '13px', background: '#1e293b', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px' }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Source (agent/portal)
+                <input value={compDraft.source || ''} onChange={e => setCompDraft({ ...compDraft, source: e.target.value })} style={{ minHeight: '32px', fontSize: '13px', background: '#1e293b', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px' }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Evidence URL
+                <input value={compDraft.evidenceUrl || ''} onChange={e => setCompDraft({ ...compDraft, evidenceUrl: e.target.value })} style={{ minHeight: '32px', fontSize: '13px', background: '#1e293b', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px' }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Adjustment (£/month, +/−)
+                <NumInput value={compDraft.adjustment} onChange={v => setCompDraft({ ...compDraft, adjustment: v })} width="100%" />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Adjustment reason {pf(compDraft.adjustment) !== 0 && <span style={{ color: COLORS.bad }}>(required)</span>}
+                <input value={compDraft.adjustmentReason || ''} onChange={e => setCompDraft({ ...compDraft, adjustmentReason: e.target.value })} style={{ minHeight: '32px', fontSize: '13px', background: '#1e293b', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px' }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint }}>Weight (0–1)
+                <input type="range" min="0" max="1" step="0.05" value={compDraft.weight == null ? 1 : compDraft.weight} onChange={e => setCompDraft({ ...compDraft, weight: parseFloat(e.target.value) })} style={{ minHeight: '32px' }} />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontSize: '11px', color: COLORS.textFaint, gridColumn: isMobile ? 'auto' : '1 / -1' }}>Notes
+                <textarea value={compDraft.notes || ''} onChange={e => setCompDraft({ ...compDraft, notes: e.target.value })} rows={2} style={{ fontSize: '13px', background: '#1e293b', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px', fontFamily: 'inherit', resize: 'vertical' }} />
+              </label>
+            </div>
+            <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+              <button onClick={() => { if (saveComp(compDraft, editingCompId)) { setCompDraft(null); setEditingCompId(null); } }} style={{ fontSize: '12px', fontWeight: '600', color: '#fff', background: COLORS.accent, border: 'none', borderRadius: '6px', padding: '8px 14px', minHeight: '44px', cursor: 'pointer' }}>Save</button>
+              <button onClick={() => { setCompDraft(null); setEditingCompId(null); }} style={{ fontSize: '12px', color: COLORS.textMuted, background: 'transparent', border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '8px 14px', minHeight: '44px', cursor: 'pointer' }}>Cancel</button>
+            </div>
+          </div>
+        )}
+
+        {rentalComps.length === 0 ? (
+          <div style={{ fontSize: '12px', color: COLORS.textFaint }}>No rental comparables added yet.</div>
+        ) : isMobile ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {rentalComps.map(c => {
+              const q = compQuality(c, subject, new Date());
+              const isDup = !!dupGroups[c.id];
+              return (
+                <div key={c.id} style={{ border: `0.5px solid ${COLORS.border}`, borderRadius: '8px', padding: '10px', opacity: c.included === false ? 0.5 : 1 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '6px' }}>
+                    <div>
+                      <div style={{ fontSize: '13px', fontWeight: '600', color: COLORS.text }}>{c.address}</div>
+                      <div style={{ fontSize: '11px', color: COLORS.textFaint }}>{c.postcode} · {EVIDENCE_TYPE_OPTIONS.find(([k]) => k === c.evidenceType)?.[1] || c.evidenceType}</div>
+                    </div>
+                    <div style={{ fontSize: '14px', fontWeight: '700', color: COLORS.text }}>{fmtGbp(pf(c.monthlyRent) + pf(c.adjustment))}</div>
+                  </div>
+                  <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginTop: '6px' }}>
+                    <StaleChip staleFlag={q.staleFlag} ageDays={q.ageDays} />
+                    {isDup && <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '10px', background: '#2e1065', color: '#c4b5fd' }}>possible duplicate</span>}
+                    {c.beds != null && <span style={{ fontSize: '10px', color: COLORS.textFaint }}>{fmtGbp(pf(c.monthlyRent) / c.beds)}/bed</span>}
+                    {c.floorAreaSqm > 0 && <span style={{ fontSize: '10px', color: COLORS.textFaint }}>{fmtGbp(pf(c.monthlyRent) / (c.floorAreaSqm * SQM_TO_SQFT))}/sqft</span>}
+                  </div>
+                  <div style={{ display: 'flex', gap: '10px', marginTop: '8px' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: COLORS.textFaint }}>
+                      <input type="checkbox" checked={c.included !== false} onChange={() => toggleIncludeComp(c.id)} /> Include
+                    </label>
+                    <button onClick={() => { setEditingCompId(c.id); setCompDraft({ ...c }); }} style={{ fontSize: '11px', color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer' }}>Edit</button>
+                    <button onClick={() => deleteComp(c.id)} style={{ fontSize: '11px', color: COLORS.bad, background: 'none', border: 'none', cursor: 'pointer' }}>Delete</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="crm-table-wrap" style={{ overflowX: 'auto', maxWidth: '100%' }}>
+            <table style={{ borderCollapse: 'collapse', fontSize: '11px', minWidth: '100%' }}>
+              <thead>
+                <tr>
+                  {['Address', 'Evidence', 'Rent', '£/bed', '£/sqft', 'Condition', 'Weight', 'Age', 'Include', ''].map(h => (
+                    <th key={h} style={{ textAlign: 'left', padding: '6px 8px', color: COLORS.textFaint, textTransform: 'uppercase', fontSize: '9px', letterSpacing: '.04em', whiteSpace: 'nowrap', borderBottom: `1px solid ${COLORS.borderLight}` }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rentalComps.map(c => {
+                  const q = compQuality(c, subject, new Date());
+                  const isDup = !!dupGroups[c.id];
+                  const effectiveRent = pf(c.monthlyRent) + pf(c.adjustment);
+                  return (
+                    <tr key={c.id} style={{ opacity: c.included === false ? 0.5 : 1 }}>
+                      <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, color: COLORS.text }}>
+                        {c.address}
+                        {isDup && <span style={{ marginLeft: '6px', fontSize: '9px', padding: '1px 5px', borderRadius: '8px', background: '#2e1065', color: '#c4b5fd' }}>possible duplicate</span>}
+                      </td>
+                      <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, color: COLORS.textMuted, whiteSpace: 'nowrap' }}>{EVIDENCE_TYPE_OPTIONS.find(([k]) => k === c.evidenceType)?.[1] || c.evidenceType}</td>
+                      <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, color: COLORS.text, fontWeight: '600' }}>{fmtGbp(effectiveRent)}</td>
+                      <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, color: COLORS.textMuted }}>{c.beds ? fmtGbp(effectiveRent / c.beds) : '—'}</td>
+                      <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, color: COLORS.textMuted }}>{c.floorAreaSqm > 0 ? fmtGbp(effectiveRent / (c.floorAreaSqm * SQM_TO_SQFT)) : '—'}</td>
+                      <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, color: COLORS.textMuted }}>{c.condition || '—'}</td>
+                      <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, color: COLORS.textMuted }}>{q.effectiveWeight.toFixed(2)}</td>
+                      <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}` }}><StaleChip staleFlag={q.staleFlag} ageDays={q.ageDays} /></td>
+                      <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}` }}>
+                        <input type="checkbox" checked={c.included !== false} onChange={() => toggleIncludeComp(c.id)} />
+                      </td>
+                      <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, whiteSpace: 'nowrap' }}>
+                        <button onClick={() => { setEditingCompId(c.id); setCompDraft({ ...c }); }} style={{ fontSize: '11px', color: COLORS.accent, background: 'none', border: 'none', cursor: 'pointer', marginRight: '6px' }}>Edit</button>
+                        <button onClick={() => deleteComp(c.id)} style={{ fontSize: '11px', color: COLORS.bad, background: 'none', border: 'none', cursor: 'pointer' }}>Delete</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </Section>
 
       {/* Section 7 — Operating costs */}

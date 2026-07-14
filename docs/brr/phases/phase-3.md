@@ -61,3 +61,19 @@ stay read-only — this phase adds RENTAL comps only, stored at `property.brr.re
 
 ---
 _Post-phase notes:_
+
+Shipped 2026-07-14. `worker/brrCalc.js`: `recommendRent`/`compQuality`/`findDuplicateGroups`/
+`normaliseAddress` implement 05-rental-comps.md in full (evidence-type weights, asking −3%
+haircut, similarity scoring, staleness factors, union-find duplicate grouping, percentile
+C/E/O with <4-comp fallback, confidence ladder). `worker/brrCalc.test.mjs` suite 10 (15 tests,
+109 total in `npm test`). `BrrAnalysis.jsx` section 6: comp list (mobile cards / desktop
+table), full add/edit form, duplicate chips, staleness chips, £/bed + £/sqft columns,
+recommendation card + "Use recommended", reason-required manual rent overrides via
+`CommitOnBlurInput` + `window.prompt`, inline warnings (no comps / asking-only / all-stale /
+rent >5% above optimistic). Gotcha: the add-form did not wire up `transportNote` even though
+it's in the RentalComp shape — added the missing input during this session's continuation.
+No dedicated "included" toggle in the add form; new comps auto-default `included` based on
+duplicate-group detection (only the highest-quality member of a group defaults to true),
+matching 05's spec — user can still flip it after via the row checkbox. `npm test` (109/109)
+and `npm run build` verified; deployed live. Live browser walkthrough of section 6 not done
+this session (auth wall — user login required, not something this agent can enter).

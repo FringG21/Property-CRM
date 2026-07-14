@@ -317,6 +317,192 @@ export function appendAudit(brr, entry) {
   return { ...brr, audit };
 }
 
+// --- Rental comparables (05-rental-comps.md) --------------------------------
+
+const EVIDENCE_BASE_WEIGHT = { achieved: 1.0, letAgreed: 0.9, agentAppraisal: 0.7, reducedAsking: 0.6, asking: 0.5, userEvidence: 0.5 };
+const ASKING_HAIRCUT = 0.97; // -3%, applied inside the weighted calc for asking-type evidence
+
+/** Reuses the sales-comp merge's normKey approach (src/App.jsx normKey): pre-comma, lowercased, punctuation stripped. */
+export function normaliseAddress(address) {
+  return String(address || '').split(',')[0].toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function mostRecentEvidenceDate(comp) {
+  const dates = [comp.achievedAt, comp.letAgreedAt, comp.listedAt]
+    .filter(Boolean).map(d => new Date(d)).filter(d => !Number.isNaN(d.getTime()));
+  if (!dates.length) return null;
+  return new Date(Math.max(...dates.map(d => d.getTime())));
+}
+
+function ageDaysFor(comp, now) {
+  const d = mostRecentEvidenceDate(comp);
+  if (!d) return null;
+  return Math.floor((now - d) / 86400000);
+}
+
+function stalenessFactorFor(ageDays) {
+  if (ageDays == null) return 1;
+  if (ageDays > 180) return 0.4;
+  if (ageDays > 90) return 0.7;
+  return 1;
+}
+
+function similarityScore(comp, subject) {
+  let s = 1;
+  if (subject.beds != null && comp.beds != null) {
+    const diff = Math.abs(comp.beds - subject.beds);
+    s *= diff === 0 ? 1.0 : diff === 1 ? 0.7 : 0.3;
+  }
+  if (subject.propertyType && comp.propertyType) {
+    const isFlatLike = t => /flat|maisonette/i.test(t);
+    if (comp.propertyType.toLowerCase() === subject.propertyType.toLowerCase()) s *= 1.0;
+    else if (isFlatLike(comp.propertyType) !== isFlatLike(subject.propertyType)) s *= 0.5;
+    else s *= 0.8;
+  }
+  if (subject.floorAreaSqm != null && comp.floorAreaSqm != null && subject.floorAreaSqm > 0) {
+    const pctDiff = Math.abs(comp.floorAreaSqm - subject.floorAreaSqm) / subject.floorAreaSqm;
+    s *= pctDiff <= 0.15 ? 1.0 : pctDiff <= 0.30 ? 0.7 : 0.5;
+  } else {
+    s *= 0.8;
+  }
+  s *= (comp.condition === 'refurbished' || comp.condition === 'good') ? 1.0 : 0.8;
+  if (comp.distanceMiles != null) {
+    const d = comp.distanceMiles;
+    s *= d <= 0.25 ? 1.0 : d <= 0.5 ? 0.9 : d <= 1 ? 0.75 : 0.5;
+  }
+  if (subject.garden != null && comp.garden != null && subject.garden !== comp.garden) s -= 0.05;
+  if (subject.parking != null && comp.parking != null && subject.parking !== comp.parking) s -= 0.05;
+  if (subject.furnished != null && comp.furnished != null && subject.furnished !== comp.furnished) s -= 0.05;
+  return Math.max(0, s);
+}
+
+/**
+ * Per-comp quality breakdown for UI chips: age, evidence base weight, similarity
+ * vs subject, staleness factor, and the combined effective weight.
+ * @param {object} comp RentalComp
+ * @param {object} subject { beds, propertyType, floorAreaSqm, garden, parking, furnished }
+ * @param {Date} [now]
+ */
+export function compQuality(comp, subject, now = new Date()) {
+  const ageDays = ageDaysFor(comp, now);
+  const evidenceBase = EVIDENCE_BASE_WEIGHT[comp.evidenceType] ?? 0.5;
+  const similarity = similarityScore(comp, subject || {});
+  const staleness = stalenessFactorFor(ageDays);
+  const userWeight = comp.weight != null ? pf(comp.weight) : 1;
+  const effectiveWeight = userWeight * evidenceBase * similarity * staleness;
+  const staleFlag = ageDays == null ? null : ageDays > 180 ? 'very-stale' : ageDays > 90 ? 'stale' : null;
+  return { ageDays, evidenceBase, similarity, stalenessFactor: staleness, effectiveWeight, staleFlag };
+}
+
+/**
+ * Union-find over exact normalised-address matches and probable duplicates
+ * (postcode + beds + rent within ±£25 across different sources).
+ * @returns {Object<string, string[]>} comp id -> array of ids in its group (only for groups of size > 1)
+ */
+export function findDuplicateGroups(comps) {
+  const parent = {};
+  const find = x => (parent[x] === x ? x : (parent[x] = find(parent[x])));
+  const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[ra] = rb; };
+  comps.forEach(c => { parent[c.id] = c.id; });
+
+  const byAddr = {};
+  comps.forEach(c => {
+    const key = normaliseAddress(c.address);
+    if (!key) return;
+    if (byAddr[key] != null) union(byAddr[key], c.id); else byAddr[key] = c.id;
+  });
+
+  for (let i = 0; i < comps.length; i++) {
+    for (let j = i + 1; j < comps.length; j++) {
+      const a = comps[i], b = comps[j];
+      if (a.postcode && b.postcode && a.beds != null && b.beds != null &&
+          a.postcode.toLowerCase().replace(/\s+/g, '') === b.postcode.toLowerCase().replace(/\s+/g, '') &&
+          a.beds === b.beds && Math.abs(pf(a.monthlyRent) - pf(b.monthlyRent)) <= 25 && a.source !== b.source) {
+        union(a.id, b.id);
+      }
+    }
+  }
+
+  const groups = {};
+  comps.forEach(c => { const root = find(c.id); (groups[root] = groups[root] || []).push(c.id); });
+  const dupGroupOf = {};
+  Object.values(groups).forEach(ids => { if (ids.length > 1) ids.forEach(id => { dupGroupOf[id] = ids; }); });
+  return dupGroupOf;
+}
+
+function quantile(sortedAsc, q) {
+  if (!sortedAsc.length) return null;
+  const pos = (sortedAsc.length - 1) * q;
+  const base = Math.floor(pos);
+  const rest = pos - base;
+  return sortedAsc[base + 1] !== undefined ? sortedAsc[base] + rest * (sortedAsc[base + 1] - sortedAsc[base]) : sortedAsc[base];
+}
+
+function median(sortedAsc) {
+  const n = sortedAsc.length;
+  if (!n) return null;
+  const mid = Math.floor(n / 2);
+  return n % 2 ? sortedAsc[mid] : (sortedAsc[mid - 1] + sortedAsc[mid]) / 2;
+}
+
+/**
+ * Weighted recommended rent (05-rental-comps.md §Methodology). Only `included`
+ * comps (default true when unset) feed the calculation; excluded comps are
+ * ignored here but the caller keeps them in `brr.rentalComps` untouched.
+ * @param {object[]} comps RentalComp[]
+ * @param {object} subject { beds, propertyType, floorAreaSqm, garden, parking, furnished }
+ * @param {Date} [now]
+ */
+export function recommendRent(comps, subject, now = new Date()) {
+  const included = (comps || []).filter(c => c.included !== false);
+  if (included.length === 0) {
+    return { recommended: null, conservative: null, expected: null, optimistic: null, confidence: 'insufficient', computedAt: now.toISOString(), compIdsUsed: [] };
+  }
+
+  const rows = included.map(c => {
+    const q = compQuality(c, subject, now);
+    let adjustedRent = pf(c.monthlyRent) + pf(c.adjustment);
+    if (c.evidenceType === 'asking') adjustedRent *= ASKING_HAIRCUT;
+    return { comp: c, adjustedRent, weight: q.effectiveWeight, staleFlag: q.staleFlag };
+  });
+
+  const totalWeight = rows.reduce((s, r) => s + r.weight, 0);
+  const recommended = totalWeight > 0
+    ? rows.reduce((s, r) => s + r.adjustedRent * r.weight, 0) / totalWeight
+    : rows.reduce((s, r) => s + r.adjustedRent, 0) / rows.length;
+
+  const adjustedRents = rows.map(r => r.adjustedRent).sort((a, b) => a - b);
+  let conservative, optimistic;
+  if (adjustedRents.length >= 4) {
+    conservative = Math.min(quantile(adjustedRents, 0.25), recommended * 0.95);
+    optimistic = Math.max(quantile(adjustedRents, 0.75), recommended * 1.05);
+  } else {
+    conservative = recommended * 0.9;
+    optimistic = recommended * 1.08;
+  }
+
+  const achievedOrLetCount = rows.filter(r => r.comp.evidenceType === 'achieved' || r.comp.evidenceType === 'letAgreed').length;
+  const anyVeryStale = rows.some(r => r.staleFlag === 'very-stale');
+  const askingOnly = rows.every(r => r.comp.evidenceType === 'asking');
+  const med = median(adjustedRents);
+  const spreadPct = med > 0 ? ((Math.max(...adjustedRents) - Math.min(...adjustedRents)) / med) * 100 : 0;
+
+  let confidence;
+  if (rows.length >= 3 && achievedOrLetCount >= 1 && !anyVeryStale && spreadPct <= 20) confidence = 'high';
+  else if (rows.length >= 2 && !askingOnly) confidence = 'medium';
+  else confidence = 'low';
+
+  return {
+    recommended: Math.round(recommended),
+    conservative: Math.round(conservative),
+    expected: Math.round(recommended),
+    optimistic: Math.round(optimistic),
+    confidence,
+    computedAt: now.toISOString(),
+    compIdsUsed: rows.map(r => r.comp.id),
+  };
+}
+
 /**
  * Resolve a scenario's effective inputs against inheritance precedence:
  * scenario override → brr default → property manual value → report (analytics)
