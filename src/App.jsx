@@ -12,6 +12,7 @@ import {
   Bold, Italic, Underline, List, ListOrdered
 } from 'lucide-react';
 import MarketIntel from './views/MarketIntel.jsx';
+import BrrAnalysis from './views/BrrAnalysis.jsx';
 
 // Fix Leaflet default marker icons
 delete L.Icon.Default.prototype._getIconUrl;
@@ -3783,6 +3784,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     { k: 'comparables', l: 'Comparables', count: ((an.compsList?.length || 0) + (intel.connectors?.landRegistry?.data?.items?.length || 0) + ((currentViewProperty.comparables || []).filter(c => !c.fromIntelligence).length)) || null },
                     { k: 'intel', l: 'Intelligence', dot: intel.lastRun },
                     { k: 'financials', l: 'Deal Analysis' },
+                    { k: 'brr', l: 'BRR Analysis' },
                     { k: 'documents', l: 'Documents', count: (Object.values(propFiles).filter(Boolean).length + (currentViewProperty.customDocs?.length || 0) + (currentViewProperty.legalPackFiles?.length || 0)) || null },
                     { k: 'tasks', l: 'Tasks', count: tasks.filter(t => t.linkedType === 'Property' && t.linkedId === currentViewProperty.id).length || null },
                     { k: 'notes', l: 'Notes', count: currentViewProperty.notesList?.length },
@@ -5217,6 +5219,10 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     </div>
 
                   </div>
+                  )}
+
+                  {propCanvasTab === 'brr' && (
+                    <BrrAnalysis property={currentViewProperty} updateFieldInView={updateFieldInView} addBid={addBid} isMobile={isMobile} isTablet={isTablet} userName={user.name || 'You'} />
                   )}
 
                   {/* Documents — Documents tab */}

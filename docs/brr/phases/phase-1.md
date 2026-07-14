@@ -84,4 +84,26 @@ a parsed report, walk the acceptance list, screenshot the tab → `git add` the 
 `docs/brr/README.md` and append a short "shipped/gotchas" note below.
 
 ---
-_Post-phase notes: (fill in after completion)_
+_Post-phase notes (shipped 2026-07-14):_
+
+- Built `worker/brrCalc.js` (pure calc module, `BRR_CALC_VERSION = 1`), `worker/brrCalc.test.mjs`
+  (38 new tests, suites 1–6 + seed/version sanity — 77 total across `npm test`, all green),
+  `src/views/BrrAnalysis.jsx`, and the 3 `src/App.jsx` edits (import, tab entry, panel block).
+- `breakEvenMonthlyRent` is solved by **bisection**, not the closed-form in 02-calculations.md
+  §13 — the doc's algebra only holds when the opex composition matches one specific pct/fixed
+  split. Bisection is correct for any opex mix and still satisfies the ±£1 test invariant.
+  Worth updating 02-calculations.md if a future phase relies on the closed form directly.
+- A few of the doc's pinned example numbers in 08-testing.md don't match the actual bands/rates
+  in `calcSDLT`/App.jsx (e.g. the SDLT £1m and standard-rate £300k examples, repayment-mortgage
+  figure) — tests pin numbers independently re-derived from the real formula instead of the
+  doc's literal figures, since the doc explicitly requires numeric identity with `calcSDLT`.
+- Browser-verified live on the deployed Worker (`wrangler dev --local` can't exercise this —
+  no AI/Vectorize dependency here, but kept the deployed-URL verification habit): BRR Analysis
+  tab renders between Deal Analysis and Documents; scenario seeds on first open; editing rent
+  and assumed hammer recomputes every KPI (cash invested, mortgage, cash left in, recycled %,
+  yields, verdict) instantly; reset-to-inherited restores the guide price; values persisted
+  through a full page reload; no horizontal overflow at 375/768/1280px.
+- Browser-tool gotcha: `read_page`/`find` intermittently failed to surface inputs inside the
+  collapsible sections (possibly a depth/virtualisation quirk in the Browser pane's a11y-tree
+  walker, not an app bug — verified via `document.querySelectorAll` that the real DOM was
+  correct); drove verification via `javascript_tool` dispatching native `input` events instead.
