@@ -26,23 +26,6 @@ const STRESS_FIELD_META = [
   ['rentPct', 'Rent', '%'], ['ratePts', 'Mortgage rate', 'pts'], ['ltvPts', 'LTV', 'pts'],
   ['serviceChargePct', 'Service charge', '%'], ['opexPct', 'Other opex', '%'], ['voidPtsExtra', 'Void %', 'pts'],
 ];
-const AXIS_FIELD_META = {
-  hammer: { label: 'Hammer price', fmt: v => fmtGbp(v) },
-  endValue: { label: 'End value', fmt: v => fmtGbp(v) },
-  rent: { label: 'Monthly rent', fmt: v => fmtGbp(v) },
-  ratePct: { label: 'Mortgage rate', fmt: v => fmtPct(v) },
-  ltvPct: { label: 'LTV', fmt: v => fmtPct(v) },
-  refurbBudget: { label: 'Refurb budget', fmt: v => fmtGbp(v) },
-  opexScale: { label: 'Opex scale', fmt: v => `${v > 0 ? '+' : ''}${v}%` },
-};
-const SENS_METRIC_META = {
-  cashLeftIn: { label: 'Cash left in', fmt: fmtGbp },
-  capitalRecycledPct: { label: 'Capital recycled %', fmt: fmtPct },
-  totalCashInvested: { label: 'Total cash invested', fmt: fmtGbp },
-  equityRetained: { label: 'Equity retained', fmt: fmtGbp },
-  monthlyCashflow: { label: 'Monthly cash flow', fmt: fmtGbp },
-  netCashReturned: { label: 'Cash returned', fmt: fmtGbp },
-};
 const RULE_META = {
   maxCashLeftIn: { label: 'Max cash left in', unit: '£' },
   minCapitalRecycledPct: { label: 'Min capital recycled', unit: '%' },
@@ -103,6 +86,24 @@ const COLORS = {
 
 const fmtGbp = v => (v == null || Number.isNaN(v)) ? '—' : `£${Math.round(v).toLocaleString()}`;
 const fmtPct = v => (v == null || Number.isNaN(v)) ? '—' : `${v.toFixed(1)}%`;
+
+const AXIS_FIELD_META = {
+  hammer: { label: 'Hammer price', fmt: v => fmtGbp(v) },
+  endValue: { label: 'End value', fmt: v => fmtGbp(v) },
+  rent: { label: 'Monthly rent', fmt: v => fmtGbp(v) },
+  ratePct: { label: 'Mortgage rate', fmt: v => fmtPct(v) },
+  ltvPct: { label: 'LTV', fmt: v => fmtPct(v) },
+  refurbBudget: { label: 'Refurb budget', fmt: v => fmtGbp(v) },
+  opexScale: { label: 'Opex scale', fmt: v => `${v > 0 ? '+' : ''}${v}%` },
+};
+const SENS_METRIC_META = {
+  cashLeftIn: { label: 'Cash left in', fmt: fmtGbp },
+  capitalRecycledPct: { label: 'Capital recycled %', fmt: fmtPct },
+  totalCashInvested: { label: 'Total cash invested', fmt: fmtGbp },
+  equityRetained: { label: 'Equity retained', fmt: fmtGbp },
+  monthlyCashflow: { label: 'Monthly cash flow', fmt: fmtGbp },
+  netCashReturned: { label: 'Cash returned', fmt: fmtGbp },
+};
 
 const SOURCE_BADGE = {
   manual: { l: 'Manual', bg: '#1e293b', fg: '#94a3b8' },
