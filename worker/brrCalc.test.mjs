@@ -28,6 +28,11 @@ import {
   sensitivityGrid,
   SENSITIVITY_PRESETS,
   DEFAULT_STRESS,
+  evaluateRules,
+  deriveConfidences,
+  solveMaxBid,
+  computeWarnings,
+  computeVerdict,
 } from './brrCalc.js';
 
 // Baseline worked example (docs/brr/08-testing.md):
@@ -897,4 +902,334 @@ test('SENSITIVITY_PRESETS: all 13 presets run without throwing and target a real
     assert.ok(grid.rows.length > 0, `${preset.key} produced no rows`);
     assert.ok(grid.rows[0].cells.length > 0, `${preset.key} produced no columns`);
   }
+});
+
+// --- Suite 7 — Rules (evaluateRules) ----------------------------------------
+
+const baseRuleOutputs = () => ({
+  cashLeftIn: 10000, capitalRecycledPct: 80, monthlyCashflow: 200, annualCashflow: 2400,
+  equityRetained: 40000, equityRetainedPct: 25, refinanceBuffer: 15000,
+  grossYieldOnHammer: 8, netYield: 6, interestCoverage: 1.5, debtServiceCoverage: 1.5,
+  totalCashInvested: 50000, projectCostPctOfValue: 70, metricNotes: {},
+});
+
+test('evaluateRules: each RuleKey has a satisfied case and a violated case', () => {
+  const cases = [
+    ['maxCashLeftIn', 'cashLeftIn', 20000, 15000, 25000],
+    ['minCapitalRecycledPct', 'capitalRecycledPct', 75, 80, 60],
+    ['minMonthlyCashflow', 'monthlyCashflow', 150, 200, 50],
+    ['minAnnualCashflow', 'annualCashflow', 1800, 2400, 500],
+    ['minEquityRetained', 'equityRetained', 30000, 40000, 10000],
+    ['minEquityRetainedPct', 'equityRetainedPct', 20, 25, 10],
+    ['minRefinanceBuffer', 'refinanceBuffer', 10000, 15000, 2000],
+    ['minGrossYieldPct', 'grossYieldOnHammer', 7, 8, 4],
+    ['minNetYieldPct', 'netYield', 5, 6, 2],
+    ['minICR', 'interestCoverage', 1.45, 1.5, 1.0],
+    ['minDSCR', 'debtServiceCoverage', 1.25, 1.5, 1.0],
+    ['maxTotalCashInvested', 'totalCashInvested', 60000, 50000, 70000],
+    ['maxProjectCostPctOfValue', 'projectCostPctOfValue', 90, 70, 95],
+  ];
+  for (const [key, metric, target, satisfiedActual, violatedActual] of cases) {
+    const rule = { id: 'r', key, enabled: true, mandatory: true, target };
+    const okRes = evaluateRules({ ...baseRuleOutputs(), [metric]: satisfiedActual }, [rule], {}).results[0];
+    const badRes = evaluateRules({ ...baseRuleOutputs(), [metric]: violatedActual }, [rule], {}).results[0];
+    assert.equal(okRes.satisfied, true, `${key} should be satisfied`);
+    assert.equal(badRes.satisfied, false, `${key} should be violated`);
+    assert.ok(badRes.note, `${key} violated case should carry a note`);
+  }
+});
+
+test('evaluateRules: confidence rules rank low/medium/high against a numeric target', () => {
+  const rule = { id: 'r', key: 'minRentalConfidence', enabled: true, mandatory: false, target: 2 };
+  assert.equal(evaluateRules(baseRuleOutputs(), [rule], { rental: 'high' }).results[0].satisfied, true);
+  assert.equal(evaluateRules(baseRuleOutputs(), [rule], { rental: 'low' }).results[0].satisfied, false);
+});
+
+test('evaluateRules: a disabled rule is always satisfied and never fails pass', () => {
+  const rule = { id: 'r', key: 'minMonthlyCashflow', enabled: false, mandatory: true, target: 999999 };
+  const res = evaluateRules(baseRuleOutputs(), [rule], {});
+  assert.equal(res.pass, true);
+  assert.equal(res.results[0].satisfied, true);
+});
+
+test('evaluateRules: a mandatory rule over a null metric is not satisfied, with a cannot-evaluate note', () => {
+  const rule = { id: 'r', key: 'minICR', enabled: true, mandatory: true, target: 1.2 };
+  const out = { ...baseRuleOutputs(), interestCoverage: null, metricNotes: { interestCoverage: 'No mortgage debt' } };
+  const res = evaluateRules(out, [rule], {});
+  assert.equal(res.pass, false);
+  assert.match(res.results[0].note, /cannot evaluate/);
+});
+
+test('evaluateRules: an advisory failure never fails pass, but is listed in advisoryFailures', () => {
+  const rule = { id: 'r', key: 'minCapitalRecycledPct', enabled: true, mandatory: false, target: 90 };
+  const res = evaluateRules({ ...baseRuleOutputs(), capitalRecycledPct: 50 }, [rule], {});
+  assert.equal(res.pass, true);
+  assert.equal(res.advisoryFailures.length, 1);
+  assert.equal(res.mandatoryFailures.length, 0);
+});
+
+test('evaluateRules: no mandatory rules enabled -> pass = true', () => {
+  const rules = [{ id: 'r', key: 'minCapitalRecycledPct', enabled: true, mandatory: false, target: 200 }];
+  assert.equal(evaluateRules({ ...baseRuleOutputs(), capitalRecycledPct: 10 }, rules, {}).pass, true);
+});
+
+// --- Suite 8 — Max-bid solver (solveMaxBid) ---------------------------------
+
+function makeBrrFixture(rentExpected = 850) {
+  const property = { guidePrice: 90000, refurbLevel: 'medium', analytics: { refurbMedium: 25000, gdvBase: 150000, gdvConservative: 140000, gdvOptimistic: 160000 } };
+  let brr = seedBrr(property);
+  brr = { ...brr, defaults: { ...brr.defaults, rent: { ...brr.defaults.rent, expected: rentExpected } } };
+  const scenario = brr.scenarios.find(s => s.type === 'expected');
+  return { property, brr, scenario };
+}
+
+test('solveMaxBid: spec-shaped example — maxCashLeftIn is the binding rule, names both figures', () => {
+  const { property, brr, scenario } = makeBrrFixture();
+  const rules = [{ id: 'r', key: 'maxCashLeftIn', enabled: true, mandatory: true, target: 15000 }];
+  const res = solveMaxBid({ property, brr, scenario, rules, minPrice: 90000, increment: 500 });
+  assert.equal(res.maxBid, 95000);
+  assert.equal(res.limitingRuleKey, 'maxCashLeftIn');
+  assert.equal(res.firstFailingBid, 95500);
+  assert.match(res.failReason, /£95,500/);
+  assert.match(res.failReason, /£15,275/);
+  assert.match(res.failReason, /£15,000/);
+});
+
+test('solveMaxBid: SDLT/percentage-fee recompute is non-linear across the walk (never static subtraction)', () => {
+  const { property, brr, scenario } = makeBrrFixture();
+  const rules = [{ id: 'r', key: 'maxCashLeftIn', enabled: true, mandatory: true, target: 15000 }];
+  const res = solveMaxBid({ property, brr, scenario, rules, minPrice: 90000, increment: 500 });
+  const atMin = computeBrr({ ...resolveScenario(property, brr, scenario).inputs, hammer: 90000 });
+  const delta = res.outputsAtMax.totalCashInvested - atMin.totalCashInvested;
+  // 5 steps of £500 = £2,500 hammer increase; a static walk would show exactly £2,500 here —
+  // the real delta differs because SDLT/percentage fees scale with price.
+  assert.notEqual(delta, 2500);
+});
+
+test('solveMaxBid: no bid passes when the minimum price already fails', () => {
+  const { property, brr, scenario } = makeBrrFixture();
+  const rules = [{ id: 'r', key: 'maxCashLeftIn', enabled: true, mandatory: true, target: 100 }];
+  const res = solveMaxBid({ property, brr, scenario, rules, minPrice: 90000, increment: 500 });
+  assert.equal(res.maxBid, null);
+  assert.equal(res.firstFailingBid, 90000);
+  assert.match(res.failReason, /No bid passes/);
+});
+
+test('solveMaxBid: every tested bid passes -> ceiling returned with a note', () => {
+  const { property, brr, scenario } = makeBrrFixture();
+  const rules = [{ id: 'r', key: 'maxCashLeftIn', enabled: true, mandatory: true, target: 10000000 }];
+  const res = solveMaxBid({ property, brr, scenario, rules, minPrice: 90000, increment: 10000, ceiling: 120000 });
+  assert.equal(res.maxBid, 120000);
+  assert.equal(res.limitingRuleKey, null);
+  assert.match(res.failReason, /Every tested bid/);
+});
+
+test('solveMaxBid: two rules failing at the same increment — limiting is the first listed, reason names both', () => {
+  const { property, brr, scenario } = makeBrrFixture();
+  const rules = [
+    { id: 'r1', key: 'maxCashLeftIn', enabled: true, mandatory: true, target: 15000 },
+    { id: 'r2', key: 'maxTotalCashInvested', enabled: true, mandatory: true, target: 127500 },
+  ];
+  const res = solveMaxBid({ property, brr, scenario, rules, minPrice: 90000, increment: 500 });
+  assert.equal(res.maxBid, 95000);
+  assert.equal(res.limitingRuleKey, 'maxCashLeftIn');
+  assert.match(res.failReason, /cash left in/);
+  assert.match(res.failReason, /total cash/);
+});
+
+test('solveMaxBid: a finer increment stays consistent with a coarser one (maxBid1000 <= maxBid250 + 750)', () => {
+  const { property, brr, scenario } = makeBrrFixture();
+  const rules = [{ id: 'r', key: 'maxCashLeftIn', enabled: true, mandatory: true, target: 15000 }];
+  const maxBid1000 = solveMaxBid({ property, brr, scenario, rules, minPrice: 90000, increment: 1000 }).maxBid;
+  const maxBid250 = solveMaxBid({ property, brr, scenario, rules, minPrice: 90000, increment: 250 }).maxBid;
+  assert.ok(maxBid1000 <= maxBid250 + 750);
+});
+
+test('solveMaxBid: a conflicting rule (impossible at any price) yields no passing bids', () => {
+  const { property, brr, scenario } = makeBrrFixture();
+  const rules = [{ id: 'r', key: 'minMonthlyCashflow', enabled: true, mandatory: true, target: 100000 }];
+  const res = solveMaxBid({ property, brr, scenario, rules, minPrice: 90000, increment: 5000, ceiling: 150000 });
+  assert.equal(res.maxBid, null);
+});
+
+test('solveMaxBid: maxMortgageOverride below the calculated mortgage lowers (or nulls) the max bid', () => {
+  const { property, brr: brrBase, scenario: scBase } = makeBrrFixture();
+  const brrCapped = { ...brrBase, defaults: { ...brrBase.defaults, mortgage: { ...brrBase.defaults.mortgage, maxMortgageOverride: 80000 } } };
+  const scCapped = brrCapped.scenarios.find(s => s.type === 'expected');
+  const rules = [{ id: 'r', key: 'maxCashLeftIn', enabled: true, mandatory: true, target: 15000 }];
+  const uncapped = solveMaxBid({ property, brr: brrBase, scenario: scBase, rules, minPrice: 90000, increment: 500 }).maxBid;
+  const capped = solveMaxBid({ property, brr: brrCapped, scenario: scCapped, rules, minPrice: 90000, increment: 500 }).maxBid;
+  assert.ok((capped ?? 0) <= uncapped);
+});
+
+// --- Suite 11 — Warnings & verdict -------------------------------------------
+
+function baseWarningsFixture() {
+  const { property, brr, scenario } = makeBrrFixture();
+  const { inputs: resolved } = resolveScenario(property, brr, scenario);
+  const outputs = computeBrr(resolved);
+  return { property, brr, resolved, outputs };
+}
+
+test('computeWarnings: W-NOHAMMER (blocked) when hammer <= 0', () => {
+  const { brr } = baseWarningsFixture();
+  const resolved = { hammer: 0, grossMonthlyRent: 800, opex: {}, mortgage: {}, refurbBudget: 0, contingencyPct: 10, legalFees: 0, surveyCost: 0, adminFee: 0, endValue: {}, selectedEndValue: 100000 };
+  const outputs = computeBrr(resolved);
+  const warnings = computeWarnings(resolved, outputs, brr, brr.rules);
+  assert.ok(warnings.some(w => w.code === 'W-NOHAMMER' && w.severity === 'blocked'));
+});
+
+test('computeWarnings: W-ZERORENT (blocked) when rent <= 0', () => {
+  const { brr, resolved: base } = baseWarningsFixture();
+  const resolved = { ...base, grossMonthlyRent: 0 };
+  const outputs = computeBrr(resolved);
+  const warnings = computeWarnings(resolved, outputs, brr, brr.rules);
+  assert.ok(warnings.some(w => w.code === 'W-ZERORENT' && w.severity === 'blocked'));
+});
+
+test('computeWarnings: W-BADLTV (blocked) is re-surfaced from computeBrr with catalogue severity', () => {
+  const { brr, resolved: base } = baseWarningsFixture();
+  const resolved = { ...base, mortgage: { ...base.mortgage, ltvPct: 150 } };
+  const outputs = computeBrr(resolved);
+  const warnings = computeWarnings(resolved, outputs, brr, brr.rules);
+  assert.ok(warnings.some(w => w.code === 'W-BADLTV' && w.severity === 'blocked'));
+});
+
+test('computeWarnings: W-BADTERM (blocked) is re-surfaced from computeBrr for an invalid repayment term', () => {
+  const { brr, resolved: base } = baseWarningsFixture();
+  const resolved = { ...base, mortgage: { ...base.mortgage, type: 'repayment', termYears: 12.5 } };
+  const outputs = computeBrr(resolved);
+  const warnings = computeWarnings(resolved, outputs, brr, brr.rules);
+  assert.ok(warnings.some(w => w.code === 'W-BADTERM' && w.severity === 'blocked'));
+});
+
+test('computeWarnings: W-NEGCF (high) when monthly cash flow is negative', () => {
+  const { brr, resolved } = baseWarningsFixture();
+  const outputs = { ...computeBrr(resolved), monthlyCashflow: -50 };
+  const warnings = computeWarnings(resolved, outputs, brr, brr.rules);
+  assert.ok(warnings.some(w => w.code === 'W-NEGCF' && w.severity === 'high'));
+});
+
+test('computeWarnings: W-REFURBGTUPLIFT (high) when refurb + contingency exceeds the value uplift', () => {
+  const { brr, resolved: base } = baseWarningsFixture();
+  const resolved = { ...base, refurbBudget: 50000, contingencyPct: 10 };
+  const outputs = { ...computeBrr(resolved), valueUplift: 10000, contingency: 5000 };
+  const warnings = computeWarnings(resolved, outputs, brr, brr.rules);
+  assert.ok(warnings.some(w => w.code === 'W-REFURBGTUPLIFT' && w.severity === 'high'));
+});
+
+test('computeWarnings: W-NORENTCOMPS (caution) when there are no included rental comparables', () => {
+  const { brr, resolved, outputs } = baseWarningsFixture();
+  const warnings = computeWarnings(resolved, outputs, { ...brr, rentalComps: [] }, brr.rules);
+  assert.ok(warnings.some(w => w.code === 'W-NORENTCOMPS' && w.severity === 'caution'));
+});
+
+test('computeWarnings: W-NOCONT (caution) when contingency is 0%', () => {
+  const { brr, resolved: base } = baseWarningsFixture();
+  const resolved = { ...base, contingencyPct: 0 };
+  const outputs = computeBrr(resolved);
+  const warnings = computeWarnings(resolved, outputs, brr, brr.rules);
+  assert.ok(warnings.some(w => w.code === 'W-NOCONT' && w.severity === 'caution'));
+});
+
+test('computeWarnings: W-ZERORATE (info) is re-surfaced when rate is 0 on an interest-only mortgage', () => {
+  const { brr, resolved: base } = baseWarningsFixture();
+  const resolved = { ...base, mortgage: { ...base.mortgage, ratePct: 0, type: 'io' } };
+  const outputs = computeBrr(resolved);
+  const warnings = computeWarnings(resolved, outputs, brr, brr.rules);
+  assert.ok(warnings.some(w => w.code === 'W-ZERORATE' && w.severity === 'info'));
+});
+
+test('computeWarnings: hammer > end value still computes (negative equity created) and does not throw', () => {
+  const { brr, resolved: base } = baseWarningsFixture();
+  const resolved = { ...base, hammer: 500000, selectedEndValue: 150000 };
+  const outputs = computeBrr(resolved);
+  assert.ok(outputs.equityCreated < 0);
+  assert.doesNotThrow(() => computeWarnings(resolved, outputs, brr, brr.rules));
+});
+
+test('computeVerdict: Insufficient evidence when a blocked warning is present', () => {
+  const v = computeVerdict({ monthlyCashflow: null, capitalRecycledPct: null, metricNotes: {} }, { pass: true, mandatoryFailures: [], advisoryFailures: [] }, [{ code: 'W-NOHAMMER', severity: 'blocked' }], {}, [], 0, 'Expected');
+  assert.equal(v.label, 'Insufficient evidence');
+  assert.ok(v.explanation);
+});
+
+test('computeVerdict: BRR does not meet criteria when a mandatory rule fails', () => {
+  const ruleResults = { pass: false, mandatoryFailures: [{ ruleKey: 'maxCashLeftIn', note: 'leaves £26,400 invested, exceeding your £20,000 target' }], advisoryFailures: [] };
+  const v = computeVerdict({ monthlyCashflow: 100, capitalRecycledPct: 80, metricNotes: {} }, ruleResults, [], {}, [], 0, 'Expected');
+  assert.equal(v.label, 'BRR does not meet criteria');
+  assert.match(v.explanation, /£20,000/);
+});
+
+test('computeVerdict: High-risk BRR when mandatory rules pass but a high-severity warning fires', () => {
+  const ruleResults = { pass: true, mandatoryFailures: [], advisoryFailures: [] };
+  const v = computeVerdict({ monthlyCashflow: 100, capitalRecycledPct: 80, metricNotes: {} }, ruleResults, [{ code: 'W-NEGSTRESSCF', severity: 'high' }], { rental: 'high', valuation: 'high' }, [], 0, 'Expected');
+  assert.equal(v.label, 'High-risk BRR');
+});
+
+test('computeVerdict: High-risk BRR when the combined stress test fails 2+ of its four checks', () => {
+  const ruleResults = { pass: true, mandatoryFailures: [], advisoryFailures: [] };
+  const v = computeVerdict({ monthlyCashflow: 100, capitalRecycledPct: 80, metricNotes: {} }, ruleResults, [], { rental: 'high', valuation: 'high' }, [], 2, 'Expected');
+  assert.equal(v.label, 'High-risk BRR');
+});
+
+test('computeVerdict: Marginal BRR with 2+ advisory failures and no high warnings', () => {
+  const ruleResults = { pass: true, mandatoryFailures: [], advisoryFailures: [{ ruleKey: 'a' }, { ruleKey: 'b' }] };
+  const v = computeVerdict({ monthlyCashflow: 100, capitalRecycledPct: 80, metricNotes: {} }, ruleResults, [], { rental: 'high', valuation: 'high' }, [], 0, 'Expected');
+  assert.equal(v.label, 'Marginal BRR');
+});
+
+test('computeVerdict: Strong BRR when everything is clean and confidences are medium+', () => {
+  const ruleResults = { pass: true, mandatoryFailures: [], advisoryFailures: [] };
+  const v = computeVerdict({ monthlyCashflow: 300, capitalRecycledPct: 95, metricNotes: {} }, ruleResults, [{ code: 'W-ZERORATE', severity: 'info' }], { rental: 'high', valuation: 'high' }, [], 0, 'Expected');
+  assert.equal(v.label, 'Strong BRR');
+});
+
+test('computeVerdict: Viable BRR — mandatory pass with a single minor advisory, otherwise clean', () => {
+  const ruleResults = { pass: true, mandatoryFailures: [], advisoryFailures: [{ ruleKey: 'a' }] };
+  const v = computeVerdict({ monthlyCashflow: 150, capitalRecycledPct: 80, metricNotes: {} }, ruleResults, [], { rental: 'high', valuation: 'high' }, [], 0, 'Expected');
+  assert.equal(v.label, 'Viable BRR');
+});
+
+test('computeVerdict: explanation names the scenario and includes £ figures', () => {
+  const ruleResults = { pass: true, mandatoryFailures: [], advisoryFailures: [{ ruleKey: 'a' }] };
+  const v = computeVerdict({ monthlyCashflow: 150, capitalRecycledPct: 80, metricNotes: {} }, ruleResults, [], {}, [], 0, 'Conservative');
+  assert.match(v.explanation, /Conservative/);
+  assert.match(v.explanation, /£150/);
+});
+
+test('computeVerdict: cross-check clause names the failing scenario and its rule-note figures', () => {
+  const ruleResults = { pass: true, mandatoryFailures: [], advisoryFailures: [] };
+  const scenarios = [{ name: 'Conservative', type: 'conservative', isActive: false, mandatoryFailureCount: 1, worstNote: 'leaves £26,400 invested, exceeding your £20,000 target' }];
+  const v = computeVerdict({ monthlyCashflow: 300, capitalRecycledPct: 95, metricNotes: {} }, ruleResults, [], { rental: 'high', valuation: 'high' }, scenarios, 0, 'Expected');
+  assert.equal(v.label, 'Marginal BRR');
+  assert.match(v.explanation, /Conservative scenario/);
+  assert.match(v.explanation, /£26,400/);
+});
+
+test('deriveConfidences: prefers a fresh rent recommendation over the (possibly stale) defaults confidence', () => {
+  const brr = { rentRecommendation: { confidence: 'high' }, defaults: { rent: { confidence: 'low' }, endValue: { confidence: 'medium' } } };
+  const c = deriveConfidences(brr);
+  assert.equal(c.rental, 'high');
+  assert.equal(c.valuation, 'medium');
+});
+
+test('deriveConfidences: falls back to defaults.rent.confidence when the recommendation is insufficient/absent', () => {
+  const brr1 = { rentRecommendation: { confidence: 'insufficient' }, defaults: { rent: { confidence: 'low' }, endValue: {} } };
+  assert.equal(deriveConfidences(brr1).rental, 'low');
+  const brr2 = { rentRecommendation: null, defaults: { rent: { confidence: 'medium' }, endValue: {} } };
+  assert.equal(deriveConfidences(brr2).rental, 'medium');
+});
+
+test('resolveScenario: maxBrrBid priceBasis now resolves to the solver\'s max bid once one exists (phase 5)', () => {
+  const { property, brr } = makeBrrFixture();
+  const expected = brr.scenarios.find(s => s.type === 'expected');
+  const scenario = { ...expected, priceBasis: 'maxBrrBid' };
+  const rules = [{ id: 'r', key: 'maxCashLeftIn', enabled: true, mandatory: true, target: 15000 }];
+  const brrWithRule = { ...brr, rules };
+  const { inputs, sources } = resolveScenario(property, brrWithRule, scenario);
+  const direct = solveMaxBid({ property, brr: brrWithRule, scenario: { ...scenario, priceBasis: 'guide' }, rules, minPrice: 5000, increment: 500 });
+  assert.equal(inputs.hammer, direct.maxBid);
+  assert.equal(sources.hammer, 'scenario');
+  assert.match(sources.hammerNote, /solver/);
 });

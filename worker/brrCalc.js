@@ -524,10 +524,18 @@ export function resolveScenario(property, brr, scenario) {
     hammer = pf(scenario.assumedHammerPrice);
     sources.hammer = 'scenario';
   } else if (scenario.priceBasis === 'maxBrrBid') {
-    // Solver arrives in phase 5 — accept the enum value now, resolve to guide with a note.
-    hammer = pf(property && property.guidePrice);
-    sources.hammer = 'listing';
-    sources.hammerNote = 'Max BRR bid solver not available until phase 5 — using guide price';
+    // Resolve against the solver's own fallback basis ('guide') to avoid recursion —
+    // solveMaxBid calls resolveScenario internally for every candidate hammer.
+    const solved = solveMaxBid({ property, brr, scenario: { ...scenario, priceBasis: 'guide', assumedHammerPrice: null }, rules: (brr && brr.rules) || DEFAULT_BRR_RULES, minPrice: 5000, increment: 500 });
+    if (solved.maxBid != null) {
+      hammer = solved.maxBid;
+      sources.hammer = 'scenario';
+      sources.hammerNote = 'Resolved from the maximum BRR bid solver';
+    } else {
+      hammer = pf(property && property.guidePrice);
+      sources.hammer = 'listing';
+      sources.hammerNote = 'Max BRR bid solver found no passing bid under this scenario — using guide price';
+    }
   } else {
     const basis = scenario.priceBasis;
     const basisMap = {
@@ -961,3 +969,314 @@ export const SENSITIVITY_PRESETS = [
   { key: 'ltvCashReturned', label: 'LTV × cash returned', rowAxis: { field: 'ltvPct' }, colAxis: { field: 'ratePct', single: true }, metric: 'netCashReturned' },
   { key: 'ltvEquity', label: 'LTV × equity retained', rowAxis: { field: 'ltvPct' }, colAxis: { field: 'ratePct', single: true }, metric: 'equityRetained' },
 ];
+
+// --- Investment rules, max-bid solver, warnings, verdict (04, 07 docs) -----
+
+const gbp = v => (v == null || Number.isNaN(v)) ? '—' : `£${Math.round(v).toLocaleString()}`;
+const pctf = v => (v == null || Number.isNaN(v)) ? '—' : `${round1(v)}%`;
+const CONFIDENCE_RANK = { low: 1, medium: 2, high: 3 };
+
+const RULE_METRIC_MAP = {
+  maxCashLeftIn: { metric: 'cashLeftIn', cmp: 'lte' },
+  minCapitalRecycledPct: { metric: 'capitalRecycledPct', cmp: 'gte' },
+  minMonthlyCashflow: { metric: 'monthlyCashflow', cmp: 'gte' },
+  minAnnualCashflow: { metric: 'annualCashflow', cmp: 'gte' },
+  minEquityRetained: { metric: 'equityRetained', cmp: 'gte' },
+  minEquityRetainedPct: { metric: 'equityRetainedPct', cmp: 'gte' },
+  minRefinanceBuffer: { metric: 'refinanceBuffer', cmp: 'gte' },
+  minGrossYieldPct: { metric: 'grossYieldOnHammer', cmp: 'gte' },
+  minNetYieldPct: { metric: 'netYield', cmp: 'gte' },
+  minICR: { metric: 'interestCoverage', cmp: 'gte' },
+  minDSCR: { metric: 'debtServiceCoverage', cmp: 'gte' },
+  maxTotalCashInvested: { metric: 'totalCashInvested', cmp: 'lte' },
+  maxProjectCostPctOfValue: { metric: 'projectCostPctOfValue', cmp: 'lte' },
+};
+
+/** Human failure clause per rule key, worded to match the cross-check examples in 07-warnings-verdict.md. */
+function describeRuleFailure(ruleKey, actual, target) {
+  switch (ruleKey) {
+    case 'maxCashLeftIn': return `leaves ${gbp(actual)} invested, exceeding your ${gbp(target)} target`;
+    case 'minCapitalRecycledPct': return `recycles only ${pctf(actual)} of capital, below your ${target}% target`;
+    case 'minMonthlyCashflow': return `produces ${gbp(actual)}/mo cash flow, below your ${gbp(target)}/mo target`;
+    case 'minAnnualCashflow': return `produces ${gbp(actual)}/yr cash flow, below your ${gbp(target)}/yr target`;
+    case 'minEquityRetained': return `retains only ${gbp(actual)} equity, below your ${gbp(target)} target`;
+    case 'minEquityRetainedPct': return `retains only ${pctf(actual)} equity, below your ${target}% target`;
+    case 'minRefinanceBuffer': return `leaves only ${gbp(actual)} refinance buffer, below your ${gbp(target)} target`;
+    case 'minGrossYieldPct': return `gross yield is ${pctf(actual)}, below your ${target}% target`;
+    case 'minNetYieldPct': return `net yield is ${pctf(actual)}, below your ${target}% target`;
+    case 'minICR': return `interest cover is ${round2(actual)}×, below your ${target}× target`;
+    case 'minDSCR': return `debt-service cover is ${round2(actual)}×, below your ${target}× target`;
+    case 'maxTotalCashInvested': return `requires ${gbp(actual)} total cash, exceeding your ${gbp(target)} target`;
+    case 'maxProjectCostPctOfValue': return `project cost is ${pctf(actual)} of value, exceeding your ${target}% target`;
+    case 'minRentalConfidence': return 'rental evidence confidence is below your target';
+    case 'minValuationConfidence': return 'valuation confidence is below your target';
+    default: return `is outside your ${target} target`;
+  }
+}
+
+/**
+ * Evaluate every enabled InvestmentRule against a BrrOutputs object (04-rules-solver-ladder.md
+ * §Investment-rule framework). Disabled rules are skipped everywhere; a mandatory rule over a
+ * null metric is "not satisfied" (cannot evaluate); advisory failures never fail the deal.
+ * @param {object} outputs BrrOutputs
+ * @param {object[]} rules InvestmentRule[]
+ * @param {{ rental?: string|null, valuation?: string|null }} [confidences]
+ */
+export function evaluateRules(outputs, rules, confidences = {}) {
+  const results = [];
+  for (const rule of rules || []) {
+    if (!rule.enabled) {
+      results.push({ ruleKey: rule.key, enabled: false, mandatory: rule.mandatory, target: rule.target, actual: null, satisfied: true, note: null });
+      continue;
+    }
+    let actual = null, satisfied, note = null;
+    if (rule.key === 'minRentalConfidence' || rule.key === 'minValuationConfidence') {
+      const confVal = rule.key === 'minRentalConfidence' ? confidences.rental : confidences.valuation;
+      actual = CONFIDENCE_RANK[confVal] || 0;
+      satisfied = actual >= rule.target;
+      if (!satisfied) note = describeRuleFailure(rule.key, actual, rule.target);
+    } else {
+      const map = RULE_METRIC_MAP[rule.key];
+      if (!map) {
+        results.push({ ruleKey: rule.key, enabled: true, mandatory: rule.mandatory, target: rule.target, actual: null, satisfied: true, note: null });
+        continue;
+      }
+      actual = outputs[map.metric];
+      if (actual == null) {
+        satisfied = false;
+        const metricNote = outputs.metricNotes && outputs.metricNotes[map.metric];
+        note = `cannot evaluate — ${metricNote || 'metric unavailable'}`;
+      } else {
+        satisfied = map.cmp === 'lte' ? actual <= rule.target : actual >= rule.target;
+        if (!satisfied) note = describeRuleFailure(rule.key, actual, rule.target);
+      }
+    }
+    results.push({ ruleKey: rule.key, enabled: true, mandatory: rule.mandatory, target: rule.target, actual, satisfied, note });
+  }
+  const enabledResults = results.filter(r => r.enabled);
+  const mandatoryFailures = enabledResults.filter(r => r.mandatory && !r.satisfied);
+  const advisoryFailures = enabledResults.filter(r => !r.mandatory && !r.satisfied);
+  return { pass: mandatoryFailures.length === 0, results, mandatoryFailures, advisoryFailures };
+}
+
+/** Rental/valuation confidence, preferring the freshly-computed rent recommendation over the
+ * (possibly stale, manually-set) BrrDefaults confidence field. */
+export function deriveConfidences(brr) {
+  const rec = brr.rentRecommendation;
+  const rental = (rec && rec.confidence && rec.confidence !== 'insufficient') ? rec.confidence : ((brr.defaults && brr.defaults.rent && brr.defaults.rent.confidence) || null);
+  const valuation = (brr.defaults && brr.defaults.endValue && brr.defaults.endValue.confidence) || null;
+  return { rental, valuation };
+}
+
+/**
+ * Iterative maximum-BRR-bid solver (04-rules-solver-ladder.md §Maximum BRR bid solver).
+ * Never assumes monotonicity — walks from minPrice by increment and stops at the first
+ * mandatory-rule failure. Price-dependent costs (SDLT, %-fees) are rebuilt at every step by
+ * feeding the candidate hammer straight into computeBrr (which recomputes them internally).
+ * @param {{ property: object, brr: object, scenario: object, rules?: object[],
+ *   minPrice?: number, increment?: number, ceiling?: number }} opts
+ */
+export function solveMaxBid({ property, brr, scenario, rules, minPrice = 5000, increment = 500, ceiling = 2000000 }) {
+  const { inputs: baseInputs } = resolveScenario(property, brr, scenario);
+  const effRules = rules || (brr && brr.rules) || DEFAULT_BRR_RULES;
+  const confidences = deriveConfidences(brr);
+  const evalAt = h => {
+    const out = computeBrr({ ...baseInputs, hammer: h });
+    return { out, ruleEval: evaluateRules(out, effRules, confidences) };
+  };
+  const failPhrase = f => f.ruleKey === 'maxCashLeftIn'
+    ? `cash left in becomes ${gbp(f.actual)}, exceeding your ${gbp(f.target)} maximum`
+    : (f.note || describeRuleFailure(f.ruleKey, f.actual, f.target));
+
+  const first = evalAt(minPrice);
+  if (first.ruleEval.mandatoryFailures.length > 0) {
+    const limiting = first.ruleEval.mandatoryFailures[0];
+    return {
+      maxBid: null, limitingRuleKey: limiting.ruleKey, firstFailingBid: minPrice,
+      failReason: `No bid passes your mandatory rules under this scenario — at ${gbp(minPrice)} (your minimum price) ${failPhrase(limiting)}.`,
+      outputsAtMax: null, rows: [],
+    };
+  }
+
+  let lastPassing = minPrice, lastPassingOut = first.out;
+  let h = minPrice + increment;
+  while (h <= ceiling) {
+    const { out, ruleEval } = evalAt(h);
+    if (ruleEval.mandatoryFailures.length > 0) {
+      const limiting = ruleEval.mandatoryFailures[0];
+      const reason = ruleEval.mandatoryFailures.map(failPhrase).join('; ');
+      return {
+        maxBid: lastPassing, limitingRuleKey: limiting.ruleKey, firstFailingBid: h,
+        failReason: `At ${gbp(h)} ${reason}.`,
+        outputsAtMax: lastPassingOut, rows: [],
+      };
+    }
+    lastPassing = h; lastPassingOut = out;
+    h += increment;
+  }
+  return {
+    maxBid: ceiling, limitingRuleKey: null, firstFailingBid: null,
+    failReason: 'Every tested bid up to the ceiling passes — check your rules.',
+    outputsAtMax: lastPassingOut, rows: [],
+  };
+}
+
+/**
+ * Full warnings catalogue (07-warnings-verdict.md §Catalogue). `property` is optional — pass
+ * it to unlock the sales-comps/tenure/lease-length checks that live outside `resolved`/`brr`;
+ * omitting it just leaves those specific codes dormant, everything else is unaffected.
+ * @param {object} resolved ResolvedInputs (from resolveScenario)
+ * @param {object} outputs BrrOutputs (from computeBrr(resolved))
+ * @param {object} brr property.brr
+ * @param {object[]} rules InvestmentRule[]
+ * @param {object} [property]
+ */
+export function computeWarnings(resolved, outputs, brr, rules, property) {
+  const warnings = [];
+  const push = (code, severity, message, section) => warnings.push({ code, severity, message, section });
+  const effRules = rules || (brr && brr.rules) || DEFAULT_BRR_RULES;
+  const ruleByKey = key => (effRules || []).find(r => r.key === key);
+
+  // Re-surface computeBrr's own calculation-validity warnings with catalogue severity.
+  const lowLevelCodes = new Set((outputs.warnings || []).map(w => w.code));
+  if (lowLevelCodes.has('W-NOVAL')) push('W-NOVAL', 'info', 'Current value unknown — value uplift cannot be shown.', 'endValue');
+  if (lowLevelCodes.has('W-BADLTV')) push('W-BADLTV', 'blocked', 'LTV must be between 0 and 100.', 'mortgage');
+  if (lowLevelCodes.has('W-BADTERM')) push('W-BADTERM', 'blocked', 'Mortgage term must be a whole number of years (1-40) for a repayment mortgage.', 'mortgage');
+  if (lowLevelCodes.has('W-ZERORATE')) push('W-ZERORATE', 'info', 'Interest rate is 0% — interest-only payment is £0.', 'mortgage');
+  if (lowLevelCodes.has('W-OCC100')) push('W-OCC100', 'high', 'Break-even occupancy exceeds 100% — rent alone cannot cover costs even fully let.', 'rent');
+
+  if (pf(resolved.hammer) <= 0) push('W-NOHAMMER', 'blocked', 'No hammer price set.', 'price');
+  if (pf(resolved.grossMonthlyRent) <= 0) push('W-ZERORENT', 'blocked', 'No rent set — cash-flow metrics cannot be shown (recycling metrics still shown).', 'rent');
+
+  // Evidence
+  const includedComps = ((brr && brr.rentalComps) || []).filter(c => c.included !== false);
+  if (includedComps.length === 0) push('W-NORENTCOMPS', 'caution', 'No included rental comparables.', 'rent');
+  const confidences = deriveConfidences(brr || {});
+  if (confidences.rental === 'low') push('W-WEAKRENT', 'caution', 'Rental evidence confidence is low.', 'rent');
+  if (includedComps.length > 0 && includedComps.every(c => compQuality(c, {}, new Date()).staleFlag != null)) push('W-STALERENT', 'caution', 'All included rental comparables are stale (>90 days old).', 'rent');
+  if (includedComps.length > 0 && includedComps.every(c => c.evidenceType === 'asking' || c.evidenceType === 'reducedAsking')) push('W-ASKONLY', 'caution', 'Rental evidence is asking-only — treated as achieved with a 3% haircut.', 'rent');
+  const rec = brr && brr.rentRecommendation;
+  if (rec && rec.optimistic != null && pf(resolved.grossMonthlyRent) > rec.optimistic * 1.05) push('W-RENTHIGH', 'high', 'Selected rent is more than 5% above the optimistic evidence estimate.', 'rent');
+
+  const salesCompCount = property ? ((property.analytics && property.analytics.compsList && property.analytics.compsList.length) || 0) + ((property.comparables && property.comparables.length) || 0) : null;
+  if (salesCompCount === 0) push('W-NOSALESCOMPS', 'caution', 'No sales comparables backing the end value.', 'endValue');
+  if (confidences.valuation === 'low') push('W-WEAKVAL', 'caution', 'Valuation confidence is low.', 'endValue');
+  const reportOptimistic = resolved.endValue && resolved.endValue.optimistic;
+  if (reportOptimistic > 0 && pf(resolved.selectedEndValue) > reportOptimistic * 1.05) push('W-VALHIGH', 'high', 'Selected end value is more than 5% above the optimistic evidence estimate.', 'endValue');
+
+  // Cash flow & structure
+  if (outputs.monthlyCashflow != null && outputs.monthlyCashflow < 0) push('W-NEGCF', 'high', 'Monthly cash flow is negative.', 'cashflow');
+  const stress = (brr && brr.stress) || DEFAULT_STRESS;
+  const stressedOut = computeBrr(applyStress(resolved, stress));
+  if (stressedOut.monthlyCashflow != null && stressedOut.monthlyCashflow < 0) {
+    push('W-NEGSTRESSCF', (outputs.monthlyCashflow != null && outputs.monthlyCashflow < 0) ? 'high' : 'caution', 'Stressed cash flow (combined downside) is negative.', 'cashflow');
+  }
+  const maxCashLeftInRule = ruleByKey('maxCashLeftIn');
+  if (maxCashLeftInRule && maxCashLeftInRule.enabled && outputs.cashLeftIn > maxCashLeftInRule.target) push('W-CASHLEFTIN', 'high', `Cash left in (${gbp(outputs.cashLeftIn)}) exceeds your ${gbp(maxCashLeftInRule.target)} target.`, 'cashflow');
+  const recycledRule = ruleByKey('minCapitalRecycledPct');
+  if (recycledRule && recycledRule.enabled && outputs.capitalRecycledPct != null && outputs.capitalRecycledPct < recycledRule.target) push('W-LOWRECYCLE', 'caution', `Capital recycled (${pctf(outputs.capitalRecycledPct)}) is below your ${recycledRule.target}% target.`, 'cashflow');
+  const equityRule = ruleByKey('minEquityRetained') || ruleByKey('minEquityRetainedPct');
+  if (equityRule && equityRule.enabled) {
+    const actual = equityRule.key === 'minEquityRetainedPct' ? outputs.equityRetainedPct : outputs.equityRetained;
+    if (actual != null && actual < equityRule.target) push('W-LOWEQUITY', 'caution', 'Equity retained is below your target.', 'equity');
+  }
+  const bufferRule = ruleByKey('minRefinanceBuffer');
+  if (bufferRule && bufferRule.enabled && outputs.refinanceBuffer != null && outputs.refinanceBuffer < bufferRule.target) push('W-LOWBUFFER', 'caution', `Refinance buffer (${gbp(outputs.refinanceBuffer)}) is below your ${gbp(bufferRule.target)} target.`, 'mortgage');
+  if (resolved.mortgage && resolved.mortgage.maxMortgageOverride != null && outputs.grossMortgage > outputs.finalMortgage) push('W-MTGCAP', 'info', 'Mortgage is capped by your manual maximum override.', 'mortgage');
+  if (outputs.valueUplift != null && (pf(resolved.refurbBudget) + outputs.contingency) > outputs.valueUplift) push('W-REFURBGTUPLIFT', 'high', 'Refurb + contingency exceeds the value uplift over current value.', 'costs');
+  if (outputs.breakEvenMonthlyRent != null && pf(resolved.grossMonthlyRent) < outputs.breakEvenMonthlyRent) push('W-BREAKEVEN', 'high', `Selected rent (${gbp(resolved.grossMonthlyRent)}/mo) is below the break-even rent (${gbp(outputs.breakEvenMonthlyRent)}/mo).`, 'rent');
+
+  // Data completeness
+  if (property) {
+    const leasehold = String(property.tenure || '').toLowerCase() === 'leasehold';
+    if (leasehold && !property.serviceCharge) push('W-NOSC', 'caution', 'Leasehold with no service charge on record.', 'costs');
+    if (leasehold && !property.groundRent) push('W-NOGR', 'info', 'Leasehold with no ground rent on record.', 'costs');
+    if (property.leaseYears != null && pf(property.leaseYears) < 80) push('W-SHORTLEASE', 'high', `Lease length (${property.leaseYears} years) is under 80 years.`, 'costs');
+  }
+  if (brr && brr.manualUnmortgageableFlag) push('W-UNMORTGAGEABLE', 'high', 'Manually flagged as potentially unmortgageable (condition/EPC).', 'data');
+  if (pf(resolved.legalFees) + pf(resolved.surveyCost) + pf(resolved.adminFee) === 0) push('W-NOBUYCOSTS', 'caution', 'Legal, survey and admin fees are all zero.', 'costs');
+  const opex = resolved.opex || {};
+  const fixedOpexKeys = ['maintenance', 'insurance', 'serviceCharge', 'groundRent', 'licensing', 'compliance', 'utilities', 'councilTax', 'cleaning', 'gardening'];
+  const fixedOpexZero = fixedOpexKeys.every(k => pf(opex[k] && opex[k].value) === 0) && pf(opex.otherMonthly) === 0 && pf(opex.otherAnnual) === 0;
+  if (fixedOpexZero) push('W-NOOPEX', 'caution', 'Every operating-cost item is zero.', 'costs');
+  if (pf(resolved.contingencyPct) === 0) push('W-NOCONT', 'caution', 'Contingency is set to 0%.', 'costs');
+
+  // Bidding (dormant until brr.confirmed exists — phase 7)
+  if (brr && brr.confirmed && brr.confirmed.preAuctionMaxBid != null && brr.confirmed.hammerPrice > brr.confirmed.preAuctionMaxBid) {
+    push('W-OVERMAX', 'high', 'Confirmed hammer price exceeds the pre-auction max recommended bid.', 'bidding');
+  }
+  if (outputs.cashLeftIn === 0) push('W-ALLRECYCLED', 'info', 'All original capital recycled.', 'cashflow');
+  if (outputs.cashLeftIn < 0) push('W-SURPLUS', 'info', 'Surplus cash extracted above original investment.', 'cashflow');
+
+  // Any metric nulled by a zero/invalid denominator (division guards inside computeBrr).
+  Object.entries(outputs.metricNotes || {}).forEach(([key, note]) => {
+    push('W-DIV0', 'info', `${key}: ${note}.`, 'metrics');
+  });
+
+  return warnings;
+}
+
+/**
+ * Six-level verdict ladder (07-warnings-verdict.md §Verdict methodology), evaluated on the
+ * active scenario with cross-checks against `scenarios` (lightweight summaries the caller
+ * builds for every other non-archived, non-'actual' scenario — see BrrAnalysis.jsx). Extends
+ * the documented 5-arg signature with an optional trailing `stressFailCount` (0-4, how many of
+ * the combined-downside's four checks fail) since the ladder needs it and no other listed
+ * param carries it; omitting it just treats the stress test as fully passing.
+ * @param {object} outputs BrrOutputs for the active scenario
+ * @param {ReturnType<typeof evaluateRules>} ruleResults for the active scenario
+ * @param {Array<{code:string, severity:string}>} warnings for the active scenario
+ * @param {{ rental?: string|null, valuation?: string|null }} confidences
+ * @param {Array<{ name:string, type:string, isActive:boolean, mandatoryFailureCount:number, worstNote?:string }>} [scenarios]
+ * @param {number} [stressFailCount]
+ */
+export function computeVerdict(outputs, ruleResults, warnings, confidences, scenarios = [], stressFailCount = 0, scenarioName = 'This') {
+  const confRank = c => CONFIDENCE_RANK[c] || 0;
+  const hasBlocked = (warnings || []).some(w => w.severity === 'blocked');
+  const noEndValue = !!(outputs.metricNotes && outputs.metricNotes.grossYieldOnEndValue === 'No end value');
+  const noRentEvidence = (warnings || []).some(w => w.code === 'W-NORENTCOMPS') && pf(outputs.grossMonthlyRent) <= 0;
+
+  if (hasBlocked || noRentEvidence || noEndValue) {
+    return {
+      label: 'Insufficient evidence',
+      explanation: 'Not enough evidence yet to reach a verdict — a hammer price, a resolvable end value, and either rental comparables or a manual rent figure are all needed.',
+    };
+  }
+
+  const recycled = outputs.capitalRecycledPct;
+  const cashflow = outputs.monthlyCashflow;
+  const base = `The ${scenarioName} scenario recycles ${recycled != null ? pctf(recycled) : '—'} of capital and produces ${gbp(cashflow)} monthly cash flow.`;
+  const others = (scenarios || []).filter(s => !s.isActive && s.type !== 'actual');
+  const crossCheckClause = () => {
+    const worst = others.filter(s => s.mandatoryFailureCount > 0 && s.worstNote).sort((a, b) => b.mandatoryFailureCount - a.mandatoryFailureCount)[0];
+    return worst ? ` However, the ${worst.name} scenario ${worst.worstNote}.` : '';
+  };
+
+  if (!ruleResults.pass) {
+    const notes = ruleResults.mandatoryFailures.map(f => f.note).filter(Boolean).join('; ');
+    return { label: 'BRR does not meet criteria', explanation: `This scenario fails your mandatory investment rules: ${notes || 'see the rules panel'}.` };
+  }
+
+  const highWarningCount = (warnings || []).filter(w => w.severity === 'high').length;
+  const cautionPlusCount = (warnings || []).filter(w => w.severity === 'high' || w.severity === 'caution').length;
+  const conservative = others.find(s => s.type === 'conservative');
+  const conservativeFailCount = conservative ? conservative.mandatoryFailureCount : 0;
+
+  if (highWarningCount > 0 || stressFailCount >= 2 || conservativeFailCount >= 2) {
+    const reason = highWarningCount > 0 ? 'a high-severity warning is active'
+      : stressFailCount >= 2 ? `the stress test fails ${stressFailCount} of its four checks`
+      : `the Conservative scenario fails ${conservativeFailCount} mandatory rules`;
+    return { label: 'High-risk BRR', explanation: `${base}${crossCheckClause()} Mandatory rules pass, but ${reason}.` };
+  }
+
+  if (ruleResults.advisoryFailures.length >= 2 || stressFailCount === 1 || conservativeFailCount === 1) {
+    return { label: 'Marginal BRR', explanation: `${base}${crossCheckClause()}` };
+  }
+
+  const confidencesOk = confRank(confidences && confidences.rental) >= 2 && confRank(confidences && confidences.valuation) >= 2;
+  if (ruleResults.advisoryFailures.length === 0 && cautionPlusCount === 0 && stressFailCount === 0 && confidencesOk) {
+    return { label: 'Strong BRR', explanation: `${base} All investment rules pass, the stress test clears every check, and evidence confidence is solid.` };
+  }
+
+  return { label: 'Viable BRR', explanation: `${base}${crossCheckClause()}` };
+}

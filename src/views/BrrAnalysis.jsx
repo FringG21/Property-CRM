@@ -5,6 +5,8 @@ import {
   setActiveScenario, toggleLock, toggleArchive, setScenarioOverride, appendAudit,
   compQuality, findDuplicateGroups, recommendRent,
   applyStress, sensitivityGrid, SENSITIVITY_PRESETS, DEFAULT_STRESS,
+  evaluateRules, deriveConfidences, solveMaxBid, computeWarnings, computeVerdict,
+  DEFAULT_BRR_RULES, BRR_CALC_VERSION,
 } from '../../worker/brrCalc.js';
 
 const pf = v => parseFloat(v) || 0;
@@ -38,6 +40,23 @@ const SENS_METRIC_META = {
   equityRetained: { label: 'Equity retained', fmt: fmtGbp },
   monthlyCashflow: { label: 'Monthly cash flow', fmt: fmtGbp },
   netCashReturned: { label: 'Cash returned', fmt: fmtGbp },
+};
+const RULE_META = {
+  maxCashLeftIn: { label: 'Max cash left in', unit: '£' },
+  minCapitalRecycledPct: { label: 'Min capital recycled', unit: '%' },
+  minMonthlyCashflow: { label: 'Min monthly cash flow', unit: '£' },
+  minAnnualCashflow: { label: 'Min annual cash flow', unit: '£' },
+  minEquityRetained: { label: 'Min equity retained', unit: '£' },
+  minEquityRetainedPct: { label: 'Min equity retained', unit: '%' },
+  minRefinanceBuffer: { label: 'Min refinance buffer', unit: '£' },
+  minGrossYieldPct: { label: 'Min gross yield', unit: '%' },
+  minNetYieldPct: { label: 'Min net yield', unit: '%' },
+  minICR: { label: 'Min interest cover', unit: '×' },
+  minDSCR: { label: 'Min debt-service cover', unit: '×' },
+  maxTotalCashInvested: { label: 'Max total cash invested', unit: '£' },
+  maxProjectCostPctOfValue: { label: 'Max project cost % of value', unit: '%' },
+  minRentalConfidence: { label: 'Min rental confidence', unit: 'rank' },
+  minValuationConfidence: { label: 'Min valuation confidence', unit: 'rank' },
 };
 const BLANK_COMP = {
   address: '', postcode: '', distanceMiles: null, monthlyRent: null, evidenceType: 'asking',
@@ -151,29 +170,11 @@ function KpiTile({ label, value, valueColor, isMobile }) {
   );
 }
 
-function computeVerdict(out) {
-  const cashflow = out.monthlyCashflow;
-  const recycled = out.capitalRecycledPct;
-  if (cashflow == null) {
-    return { label: 'Insufficient data', color: COLORS.textFaint, explanation: 'Set a rent figure to compute cash flow.' };
-  }
-  if (cashflow > 0 && recycled != null && recycled >= 50) {
-    return {
-      label: 'Cash-flowing BRR', color: COLORS.good,
-      explanation: `Produces ${fmtGbp(cashflow)}/mo cash flow and recycles ${fmtPct(recycled)} of capital invested.`,
-    };
-  }
-  if (cashflow >= 0) {
-    return {
-      label: 'Marginal', color: COLORS.warn,
-      explanation: `Cash flow is ${fmtGbp(cashflow)}/mo but only ${recycled != null ? fmtPct(recycled) : '—'} of capital is recycled at refinance.`,
-    };
-  }
-  return {
-    label: 'Negative cash flow', color: COLORS.bad,
-    explanation: `Cash flow is ${fmtGbp(cashflow)}/mo — this scenario loses money every month at the assumed rent and mortgage terms.`,
-  };
-}
+const VERDICT_COLOR = {
+  'Strong BRR': COLORS.good, 'Viable BRR': COLORS.good, 'Marginal BRR': COLORS.warn,
+  'High-risk BRR': COLORS.bad, 'BRR does not meet criteria': COLORS.bad, 'Insufficient evidence': COLORS.textFaint,
+};
+const withVerdictColor = v => ({ ...v, color: VERDICT_COLOR[v.label] || COLORS.textFaint });
 
 const PRICE_BASIS_OPTIONS = [
   ['guide', 'Guide price'], ['currentBid', 'Current auction bid'],
@@ -209,7 +210,7 @@ const COMPARISON_COLUMNS = [
 ];
 
 export default function BrrAnalysis({ property, updateFieldInView, addBid, logTimeline, isMobile, isTablet, userName }) {
-  const [expanded, setExpanded] = useState({ price: true, costs: false, endValue: false, mortgage: false, rent: false, opex: false, comps: false, comparison: false, sensitivity: false, stress: false, audit: false });
+  const [expanded, setExpanded] = useState({ price: true, costs: false, endValue: false, mortgage: false, rent: false, opex: false, comps: false, comparison: false, sensitivity: false, stress: false, rules: false, maxbid: true, audit: false });
   const [renamingId, setRenamingId] = useState(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [auditPage, setAuditPage] = useState(1);
@@ -220,6 +221,8 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
   const [sensCustomCol, setSensCustomCol] = useState('ratePct');
   const [sensCustomMetric, setSensCustomMetric] = useState('cashLeftIn');
   const [sensCell, setSensCell] = useState(null);
+  const [solverMinPrice, setSolverMinPrice] = useState(null);
+  const [solverIncrement, setSolverIncrement] = useState(500);
   const toggle = key => setExpanded(e => ({ ...e, [key]: !e[key] }));
 
   if (!property) return null;
@@ -415,14 +418,17 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
 
   const { inputs: resolved, sources } = resolveScenario(property, brr, scenario);
   const out = computeBrr(resolved);
-  const verdict = computeVerdict(out);
   const blocked = resolved.hammer <= 0;
   const rec = brr.rentRecommendation;
   rentWarnings.rentHigh = !!(rec && rec.optimistic != null && resolved.grossMonthlyRent > rec.optimistic * 1.05);
 
+  const priceBasisLabel = scenario.assumedHammerPrice != null ? 'Assumed' : (PRICE_BASIS_LABEL[scenario.priceBasis] || 'Guide');
+  const nonArchived = brr.scenarios.filter(s => !s.archived);
+
   // --- Stress testing (section 10) — combined config drives the dashboard's
-  // "Stressed cash flow" KPI and the comparison table (phase 1's stress payment
-  // only stressed the mortgage rate; this replaces that for display purposes).
+  // "Stressed cash flow" KPI, the comparison table, and (below) the verdict's
+  // stress-fail count (phase 1's stress payment only stressed the mortgage rate;
+  // this replaces that for display purposes).
   const stressConfig = brr.stress || DEFAULT_STRESS;
   const stressedOut = computeBrr(applyStress(resolved, stressConfig));
   const patchStress = patch => {
@@ -439,12 +445,73 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
     { label: `Equity retained ≥ ${ruleTarget('minEquityRetainedPct', 20)}%`, pass: stressedOut.equityRetainedPct != null && stressedOut.equityRetainedPct >= ruleTarget('minEquityRetainedPct', 20), value: fmtPct(stressedOut.equityRetainedPct) },
     { label: `Cash left in ≤ ${fmtGbp(ruleTarget('maxCashLeftIn', 20000))}`, pass: stressedOut.cashLeftIn <= ruleTarget('maxCashLeftIn', 20000), value: fmtGbp(stressedOut.cashLeftIn) },
   ];
+  const stressFailCount = combinedChecks.filter(c => !c.pass).length;
 
-  // --- Sensitivity grids (section 9) — derived on demand, never persisted.
+  // --- Rules, warnings & verdict (sections 11, 14; dashboard verdict pill) ---
+  const confidences = deriveConfidences(brr);
+  const ruleResults = evaluateRules(out, brr.rules, confidences);
+  const warnings = computeWarnings(resolved, out, brr, brr.rules, property);
+  const otherScenarioSummaries = nonArchived
+    .filter(s => s.id !== scenario.id && s.type !== 'actual')
+    .map(s => {
+      const r = resolveScenario(property, brr, s);
+      const o = computeBrr(r.inputs);
+      const re = evaluateRules(o, brr.rules, confidences);
+      const worst = re.mandatoryFailures[0] || re.advisoryFailures[0];
+      return { name: s.name, type: s.type, isActive: false, mandatoryFailureCount: re.mandatoryFailures.length, worstNote: worst ? worst.note : null };
+    });
+  const verdict = withVerdictColor(computeVerdict(out, ruleResults, warnings, confidences, otherScenarioSummaries, stressFailCount, scenario.name));
+  const warningsBySeverity = { blocked: [], high: [], caution: [], info: [] };
+  warnings.forEach(w => { (warningsBySeverity[w.severity] || warningsBySeverity.info).push(w); });
+  const cautionPlusWarnings = [...warningsBySeverity.blocked, ...warningsBySeverity.high, ...warningsBySeverity.caution];
+
+  // --- Max-bid solver (section 12; dashboard "Max BRR bid"/"headroom"/"limiting rule") —
+  // runs live in local component state; nothing persists until "Save result".
+  const effectiveMinPrice = solverMinPrice != null ? solverMinPrice : Math.max(5000, Math.round((pf(property.guidePrice) * 0.5) / 100) * 100);
+  const solverRules = brr.rules;
+  // Runs on every render (dashboard KPIs are always visible) — cap the walk to ~200 steps
+  // so it stays cheap; solveMaxBid's own £2M default ceiling would be thousands of steps.
+  const solverCeiling = Math.min(2000000, effectiveMinPrice + 200 * solverIncrement);
+  const maxBidResult = blocked ? null : solveMaxBid({ property, brr, scenario, rules: solverRules, minPrice: effectiveMinPrice, increment: solverIncrement, ceiling: solverCeiling });
+  const currentAuctionBid = pf(brr.currentAuctionBid);
+  const biddingHeadroom = maxBidResult && maxBidResult.maxBid != null ? maxBidResult.maxBid - currentAuctionBid : null;
+  const stressedAtMaxBid = maxBidResult && maxBidResult.maxBid != null ? computeBrr(applyStress({ ...resolved, hammer: maxBidResult.maxBid }, stressConfig)) : null;
+  const limitingRuleLabel = maxBidResult
+    ? (maxBidResult.limitingRuleKey ? (RULE_META[maxBidResult.limitingRuleKey] || {}).label || maxBidResult.limitingRuleKey : (maxBidResult.maxBid != null ? 'None — every tested bid passes' : 'No bid passes your rules'))
+    : '—';
+
+  const saveSnapshot = (kind) => {
+    const snap = {
+      id: `bsnap_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+      kind, calcVersion: BRR_CALC_VERSION, scenarioId: scenario.id, scenarioName: scenario.name,
+      at: nowIso(), user: userName || 'You',
+      inputs: resolved, outputs: out, maxBid: kind === 'maxBid' ? maxBidResult : null,
+      warnings, verdict,
+    };
+    const nextBrr = stamp({ ...brr, snapshots: [...(brr.snapshots || []), snap] }, { scenarioId: scenario.id, field: 'snapshot', prev: null, next: kind, reason: null });
+    logTimeline(nextBrr, `${kind === 'maxBid' ? 'Max-bid result' : 'Pre-auction review'} snapshot saved: ${scenario.name}`);
+  };
+
+  // --- Investment rules (section 11) editing ----------------------------------
+  const patchRule = (key, patch) => {
+    const before = brr.rules.find(r => r.key === key);
+    const nextRules = brr.rules.map(r => r.key === key ? { ...r, ...patch } : r);
+    const nextBrr = stamp({ ...brr, rules: nextRules }, { scenarioId: null, field: `rule.${key}`, prev: before, next: { ...before, ...patch }, reason: null });
+    updateFieldInView('brr', nextBrr);
+  };
+  const resetRule = key => {
+    const def = DEFAULT_BRR_RULES.find(r => r.key === key);
+    if (def) patchRule(key, { enabled: def.enabled, mandatory: def.mandatory, target: def.target });
+  };
+
+  // --- Sensitivity grids (section 9) — derived on demand, never persisted;
+  // pass/fail now uses the enabled investment rules (was the basic phase-1
+  // condition) via the (out) => boolean hook sensitivityGrid was built for.
   const activeSens = sensPresetKey === 'custom'
     ? { rowAxis: { field: sensCustomRow }, colAxis: { field: sensCustomCol }, metric: sensCustomMetric }
     : SENSITIVITY_PRESETS.find(p => p.key === sensPresetKey) || SENSITIVITY_PRESETS[0];
-  const sensGrid = blocked ? null : sensitivityGrid({ inputs: resolved, rowAxis: activeSens.rowAxis, colAxis: activeSens.colAxis, metric: activeSens.metric });
+  const sensRulesFn = o => evaluateRules(o, brr.rules, confidences).pass;
+  const sensGrid = blocked ? null : sensitivityGrid({ inputs: resolved, rowAxis: activeSens.rowAxis, colAxis: activeSens.colAxis, metric: activeSens.metric, rules: sensRulesFn });
   const axisCurrentValue = field => {
     switch (field) {
       case 'hammer': return resolved.hammer;
@@ -458,13 +525,10 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
     }
   };
 
-  const priceBasisLabel = scenario.assumedHammerPrice != null ? 'Assumed' : (PRICE_BASIS_LABEL[scenario.priceBasis] || 'Guide');
-  const nonArchived = brr.scenarios.filter(s => !s.archived);
-
   const kpis = [
     { l: 'Assumed hammer', v: blocked ? '—' : fmtGbp(resolved.hammer) },
-    { l: 'Max BRR bid', v: '—' },
-    { l: 'Bidding headroom', v: '—' },
+    { l: 'Max BRR bid', v: maxBidResult && maxBidResult.maxBid != null ? fmtGbp(maxBidResult.maxBid) : (maxBidResult ? 'No bid passes' : '—') },
+    { l: 'Bidding headroom', v: biddingHeadroom == null ? '—' : fmtGbp(biddingHeadroom), c: biddingHeadroom != null && biddingHeadroom < 0 ? COLORS.bad : undefined },
     { l: 'Total cash invested', v: blocked ? '—' : fmtGbp(out.totalCashInvested) },
     { l: 'End value', v: fmtGbp(resolved.selectedEndValue) },
     { l: 'Refinance mortgage', v: fmtGbp(out.finalMortgage) },
@@ -478,9 +542,9 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
     { l: 'Stressed cash flow', v: stressedOut.monthlyCashflow == null ? '—' : fmtGbp(stressedOut.monthlyCashflow) + '/mo', c: stressedOut.monthlyCashflow != null && stressedOut.monthlyCashflow < 0 ? COLORS.bad : undefined },
     { l: 'Gross yield', v: fmtPct(out.grossYieldOnHammer) },
     { l: 'Net yield', v: fmtPct(out.netYield) },
-    { l: 'Rental confidence', v: brr.defaults.rent.confidence || '—' },
-    { l: 'Valuation confidence', v: brr.defaults.endValue.confidence || '—' },
-    { l: 'Limiting rule', v: '—' },
+    { l: 'Rental confidence', v: confidences.rental || '—' },
+    { l: 'Valuation confidence', v: confidences.valuation || '—' },
+    { l: 'Limiting rule', v: limitingRuleLabel },
   ];
 
   const opex = resolved.opex;
@@ -494,8 +558,18 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
   const comparisonRows = nonArchived.filter(s => s.includeInComparison).map(s => {
     const r = resolveScenario(property, brr, s);
     const o = computeBrr(r.inputs);
-    const v = computeVerdict(o);
+    const re = evaluateRules(o, brr.rules, confidences);
+    const rowWarnings = computeWarnings(r.inputs, o, brr, brr.rules, property);
     const stressedO = computeBrr(applyStress(r.inputs, stressConfig));
+    const rowStressFailCount = [
+      stressedO.monthlyCashflow != null && stressedO.monthlyCashflow > 0,
+      stressedO.capitalRecycledPct != null && stressedO.capitalRecycledPct >= ruleTarget('minCapitalRecycledPct', 75),
+      stressedO.equityRetainedPct != null && stressedO.equityRetainedPct >= ruleTarget('minEquityRetainedPct', 20),
+      stressedO.cashLeftIn <= ruleTarget('maxCashLeftIn', 20000),
+    ].filter(p => !p).length;
+    const v = withVerdictColor(computeVerdict(o, re, rowWarnings, confidences, [], rowStressFailCount, s.name));
+    // Solver is expensive (walks the full price range) — only run it for rows actually on screen.
+    const rowMaxBid = expanded.comparison && r.inputs.hammer > 0 ? solveMaxBid({ property, brr, scenario: s, rules: brr.rules, minPrice: effectiveMinPrice, increment: solverIncrement, ceiling: solverCeiling }) : null;
     return {
       id: s.id, name: s.name, locked: s.locked,
       hammer: r.inputs.hammer,
@@ -517,9 +591,9 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
       stressMonthlyCashflow: stressedO.monthlyCashflow,
       grossYieldOnHammer: o.grossYieldOnHammer,
       netYield: o.netYield,
-      maxBidResult: null,
-      valuationConfidence: brr.defaults.endValue.confidence,
-      rentalConfidence: brr.defaults.rent.confidence,
+      maxBidResult: rowMaxBid ? (rowMaxBid.maxBid != null ? fmtGbp(rowMaxBid.maxBid) : 'No bid passes') : null,
+      valuationConfidence: confidences.valuation,
+      rentalConfidence: confidences.rental,
       verdict: v.label,
     };
   });
@@ -560,11 +634,20 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
             {priceBasisLabel} price {scenario.priceBasis === 'confirmed' ? '🔒' : ''}
           </span>
           <span style={{ fontSize: '11px', fontWeight: '600', padding: '3px 9px', borderRadius: '10px', background: `${verdict.color}22`, color: verdict.color, border: `1px solid ${verdict.color}` }}>{verdict.label}</span>
+          <button onClick={() => saveSnapshot('review')} style={{ marginLeft: 'auto', fontSize: '11px', fontWeight: '600', color: COLORS.accent, background: 'transparent', border: `1px solid ${COLORS.accent}`, borderRadius: '6px', padding: '5px 10px', minHeight: '32px', cursor: 'pointer' }}>Save pre-auction snapshot</button>
         </div>
         <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '12px' }}>{verdict.explanation}</div>
         {blocked && (
           <div style={{ fontSize: '12px', color: COLORS.warnText, background: '#3a2a06', border: '0.5px solid #d97706', borderRadius: '6px', padding: '8px 10px', marginBottom: '12px' }}>
             No hammer price set — set a guide price or an assumed hammer to calculate.
+          </div>
+        )}
+        {cautionPlusWarnings.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', marginBottom: '12px', padding: '8px 10px', background: '#1e1005', border: '0.5px solid #7c2d12', borderRadius: '6px' }}>
+            {cautionPlusWarnings.slice(0, 4).map((w, i) => (
+              <span key={`${w.code}_${i}`} style={{ fontSize: '11px', color: w.severity === 'blocked' || w.severity === 'high' ? '#fca5a5' : COLORS.warnText }}>⚠ {w.message}</span>
+            ))}
+            {cautionPlusWarnings.length > 4 && <span style={{ fontSize: '11px', color: COLORS.textFaint }}>+{cautionPlusWarnings.length - 4} more — see section 14</span>}
           </div>
         )}
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2,1fr)' : 'repeat(4,1fr)', gap: '8px' }}>
@@ -1069,6 +1152,104 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
         </div>
       </Section>
 
+      {/* Section 11 — Investment rules */}
+      <Section title="11. Investment rules" expanded={expanded.rules} onToggle={() => toggle('rules')}>
+        {(brr.rules || []).map(rule => {
+          const meta = RULE_META[rule.key] || { label: rule.key, unit: '' };
+          const result = (ruleResults.results || []).find(r => r.ruleKey === rule.key);
+          return (
+            <div key={rule.key} style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', padding: '7px 0', borderBottom: `0.5px solid ${COLORS.border}`, opacity: rule.enabled ? 1 : 0.5 }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '5px', minHeight: '32px' }}>
+                <input type="checkbox" checked={rule.enabled} onChange={e => patchRule(rule.key, { enabled: e.target.checked })} />
+              </label>
+              <span style={{ fontSize: '12px', color: COLORS.textMuted, minWidth: '170px', flex: '1 1 170px' }}>{meta.label}</span>
+              <Select value={rule.mandatory ? 'mandatory' : 'advisory'} onChange={e => patchRule(rule.key, { mandatory: e.target.value === 'mandatory' })} options={[['mandatory', 'Mandatory'], ['advisory', 'Advisory']]} />
+              <NumInput width="100px" value={rule.target} onChange={v => patchRule(rule.key, { target: v == null ? 0 : v })} />
+              <span style={{ fontSize: '11px', color: COLORS.textFaint, minWidth: '20px' }}>{meta.unit}</span>
+              {rule.enabled && result && (
+                <span style={{ fontSize: '11px', fontWeight: '600', color: result.satisfied ? COLORS.good : COLORS.bad }}>{result.satisfied ? '✓ pass' : '✗ fail'}</span>
+              )}
+              <button onClick={() => resetRule(rule.key)} title="Reset to default" style={{ background: 'none', border: 'none', cursor: 'pointer', color: COLORS.accent, fontSize: '13px', padding: '2px 4px' }}>↺</button>
+            </div>
+          );
+        })}
+        <div style={{ fontSize: '11px', color: COLORS.textFaint, marginTop: '10px' }}>
+          {ruleResults.pass ? 'All enabled mandatory rules pass on this scenario.' : `${ruleResults.mandatoryFailures.length} mandatory rule(s) failing.`}
+          {ruleResults.advisoryFailures.length > 0 && ` ${ruleResults.advisoryFailures.length} advisory rule(s) failing.`}
+        </div>
+      </Section>
+
+      {/* Section 12 — Maximum-bid calculator */}
+      <Section title="12. Maximum-bid calculator" expanded={expanded.maxbid} onToggle={() => toggle('maxbid')}>
+        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '12px' }}>
+          <Row label="Min price to test">
+            <NumInput value={solverMinPrice != null ? solverMinPrice : effectiveMinPrice} onChange={v => setSolverMinPrice(v)} />
+          </Row>
+          <Row label="Increment">
+            <Select value={solverIncrement} onChange={e => setSolverIncrement(parseInt(e.target.value, 10))} options={[[250, '£250'], [500, '£500'], [1000, '£1,000'], [2500, '£2,500']]} />
+          </Row>
+        </div>
+
+        <div style={{ fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.05em', color: COLORS.textFaint, marginBottom: '8px' }}>Max bid by scenario</div>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2,1fr)' : 'repeat(4,1fr)', gap: '8px', marginBottom: '14px' }}>
+          {nonArchived.map(s => {
+            const r = resolveScenario(property, brr, s);
+            const tileResult = r.inputs.hammer > 0 || s.id === scenario.id ? solveMaxBid({ property, brr, scenario: s, rules: brr.rules, minPrice: effectiveMinPrice, increment: solverIncrement, ceiling: solverCeiling }) : null;
+            return (
+              <div key={s.id} style={{ padding: '8px 10px', background: '#0b1120', border: `0.5px solid ${s.id === scenario.id ? COLORS.accent : COLORS.border}`, borderRadius: '8px', minHeight: '44px' }}>
+                <div style={{ fontSize: '10px', color: COLORS.textFaint, textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '3px' }}>{s.name}</div>
+                <div style={{ fontSize: isMobile ? '14px' : '15px', fontWeight: '600', color: tileResult && tileResult.maxBid != null ? COLORS.text : COLORS.textFaint }}>
+                  {tileResult ? (tileResult.maxBid != null ? fmtGbp(tileResult.maxBid) : 'No bid passes') : '—'}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {maxBidResult && (
+          <>
+            <div style={{ fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.05em', color: COLORS.textFaint, marginBottom: '8px' }}>{scenario.name} — full result</div>
+            {maxBidResult.maxBid != null ? (
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2,1fr)' : 'repeat(4,1fr)', gap: '8px' }}>
+                <KpiTile label="Recommended max bid" value={fmtGbp(maxBidResult.maxBid)} isMobile={isMobile} />
+                <KpiTile label="Total cash at that bid" value={fmtGbp(maxBidResult.outputsAtMax.totalCashInvested)} isMobile={isMobile} />
+                <KpiTile label="Mortgage" value={fmtGbp(maxBidResult.outputsAtMax.finalMortgage)} isMobile={isMobile} />
+                <KpiTile label="Cash returned" value={fmtGbp(maxBidResult.outputsAtMax.netCashReturned)} isMobile={isMobile} />
+                <KpiTile label="Cash left in" value={maxBidResult.outputsAtMax.cashLeftIn > 0 ? fmtGbp(maxBidResult.outputsAtMax.cashLeftIn) : 'Recycled'} isMobile={isMobile} />
+                <KpiTile label="Capital recycled" value={fmtPct(maxBidResult.outputsAtMax.capitalRecycledPct)} isMobile={isMobile} />
+                <KpiTile label="Equity retained" value={fmtGbp(maxBidResult.outputsAtMax.equityRetained)} isMobile={isMobile} />
+                <KpiTile label="Expected cash flow" value={maxBidResult.outputsAtMax.monthlyCashflow == null ? '—' : fmtGbp(maxBidResult.outputsAtMax.monthlyCashflow) + '/mo'} isMobile={isMobile} />
+                <KpiTile label="Stressed cash flow" value={stressedAtMaxBid && stressedAtMaxBid.monthlyCashflow != null ? fmtGbp(stressedAtMaxBid.monthlyCashflow) + '/mo' : '—'} isMobile={isMobile} />
+                <KpiTile label="Limiting rule" value={maxBidResult.limitingRuleKey ? (RULE_META[maxBidResult.limitingRuleKey] || {}).label || maxBidResult.limitingRuleKey : 'None — ceiling reached'} isMobile={isMobile} />
+                <KpiTile label="First failing bid" value={maxBidResult.firstFailingBid != null ? fmtGbp(maxBidResult.firstFailingBid) : '—'} isMobile={isMobile} />
+              </div>
+            ) : (
+              <div style={{ fontSize: '12px', color: COLORS.bad }}>{maxBidResult.failReason}</div>
+            )}
+            <div style={{ fontSize: '11px', color: COLORS.textFaint, marginTop: '10px' }}>{maxBidResult.failReason}</div>
+            <button onClick={() => saveSnapshot('maxBid')} style={{ marginTop: '10px', fontSize: '12px', fontWeight: '600', color: '#fff', background: COLORS.accent, border: 'none', borderRadius: '6px', padding: '8px 14px', minHeight: '44px', cursor: 'pointer' }}>Save result</button>
+          </>
+        )}
+      </Section>
+
+      {/* Section 14 — Risks & warnings */}
+      <Section title="14. Risks & warnings" expanded={expanded.warnings ?? (cautionPlusWarnings.length > 0)} onToggle={() => toggle('warnings')}>
+        {warnings.length === 0 ? (
+          <div style={{ fontSize: '12px', color: COLORS.textFaint }}>No warnings — evidence and assumptions look complete.</div>
+        ) : (
+          ['blocked', 'high', 'caution', 'info'].map(sev => (warningsBySeverity[sev] || []).length > 0 && (
+            <div key={sev} style={{ marginBottom: '10px' }}>
+              <div style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.05em', color: sev === 'blocked' || sev === 'high' ? COLORS.bad : sev === 'caution' ? COLORS.warnText : COLORS.textFaint, marginBottom: '4px' }}>{sev}</div>
+              {warningsBySeverity[sev].map((w, i) => (
+                <div key={`${w.code}_${i}`} style={{ fontSize: '12px', color: COLORS.textMuted, padding: '4px 0', borderBottom: `0.5px solid ${COLORS.border}` }}>
+                  <span style={{ color: COLORS.accent, fontSize: '10px', marginRight: '6px' }}>{w.code}</span>{w.message}
+                </div>
+              ))}
+            </div>
+          ))
+        )}
+      </Section>
+
       {/* Section 15 — Audit history */}
       <Section title="15. Audit history" expanded={expanded.audit} onToggle={() => toggle('audit')}>
         {auditEntries.length === 0 ? (
@@ -1087,6 +1268,19 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
               <button onClick={() => setAuditPage(p => p + 1)} style={{ marginTop: '8px', fontSize: '11px', color: COLORS.accent, background: 'transparent', border: `1px solid ${COLORS.accent}`, borderRadius: '6px', padding: '5px 10px', minHeight: '32px', cursor: 'pointer' }}>Show more</button>
             )}
           </>
+        )}
+        {(brr.snapshots || []).length > 0 && (
+          <div style={{ marginTop: '14px', paddingTop: '12px', borderTop: `0.5px solid ${COLORS.border}` }}>
+            <div style={{ fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.05em', color: COLORS.textFaint, marginBottom: '8px' }}>Snapshots</div>
+            {[...brr.snapshots].reverse().map(snap => (
+              <div key={snap.id} style={{ padding: '6px 0', borderBottom: `0.5px solid ${COLORS.border}`, fontSize: '11px', color: COLORS.textMuted }}>
+                <span style={{ color: COLORS.textFaint }}>{new Date(snap.at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
+                {' — '}<strong style={{ color: COLORS.text }}>{snap.kind === 'maxBid' ? 'Max-bid result' : snap.kind === 'confirmed' ? 'Confirmed hammer' : 'Pre-auction review'}</strong>
+                {' · '}{snap.scenarioName}
+                <span style={{ fontSize: '9px', color: COLORS.textFaint, marginLeft: '6px' }}>calc v{snap.calcVersion}{snap.calcVersion !== BRR_CALC_VERSION ? ' (older version)' : ''}</span>
+              </div>
+            ))}
+          </div>
         )}
       </Section>
     </div>
