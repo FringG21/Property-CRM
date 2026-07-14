@@ -1280,3 +1280,68 @@ export function computeVerdict(outputs, ruleResults, warnings, confidences, scen
 
   return { label: 'Viable BRR', explanation: `${base}${crossCheckClause()}` };
 }
+
+// --- Bid ladder (04-rules-solver-ladder.md §Bid ladder) ---------------------
+
+export const BID_LADDER_INCREMENTS = [250, 500, 1000, 2500];
+const BID_LADDER_ROW_CAP = 400;
+
+/**
+ * Full-range bid ladder: one row per hammer price from startBid to endBid, each
+ * recomputed with `computeBrr`/`evaluateRules` exactly like the solver (never a static
+ * subtraction). Defaults: start = round-down(guide×0.8, increment), end = first failing
+ * bid + 5 increments (falls back to guide×1.3 when nothing fails in a quick probe walk).
+ * @param {{ property: object, brr: object, scenario: object, rules?: object[],
+ *   startBid?: number, endBid?: number, increment?: number }} opts
+ */
+export function buildBidLadder({ property, brr, scenario, rules, startBid, endBid, increment = 500 }) {
+  const { inputs: baseInputs } = resolveScenario(property, brr, scenario);
+  const effRules = rules || (brr && brr.rules) || DEFAULT_BRR_RULES;
+  const confidences = deriveConfidences(brr || {});
+  const guide = pf(property && property.guidePrice);
+
+  let start = startBid != null ? startBid : Math.max(increment, Math.floor((guide * 0.8) / increment) * increment);
+  let end = endBid;
+  if (end == null) {
+    const probeCeiling = Math.max(guide * 1.3, start + 400 * increment);
+    const probe = solveMaxBid({ property, brr, scenario, rules: effRules, minPrice: start, increment, ceiling: probeCeiling });
+    end = probe.firstFailingBid != null ? probe.firstFailingBid + 5 * increment : Math.round((guide * 1.3) / increment) * increment;
+  }
+  if (end < start) end = start;
+
+  const rowCount = Math.floor((end - start) / increment) + 1;
+  if (rowCount > BID_LADDER_ROW_CAP) {
+    return { rows: [], markers: {}, start, end, increment, error: `Range too large: ${rowCount} rows exceeds the ${BID_LADDER_ROW_CAP}-row cap. Narrow the range or use a larger increment.` };
+  }
+
+  const rows = [];
+  let lastPassingBid = null, firstFailingBid = null;
+  for (let h = start; h <= end; h += increment) {
+    const out = computeBrr({ ...baseInputs, hammer: h });
+    const re = evaluateRules(out, effRules, confidences);
+    if (firstFailingBid == null) {
+      if (re.pass) lastPassingBid = h; else firstFailingBid = h;
+    }
+    rows.push({
+      hammer: h, sdlt: out.sdlt, auctionFees: out.buyersPremium, totalBuyingCosts: out.totalBuyingCosts,
+      totalCashInvested: out.totalCashInvested, mortgage: out.finalMortgage, cashReturned: out.netCashReturned,
+      cashLeftIn: out.cashLeftIn, capitalRecycledPct: out.capitalRecycledPct, surplusExtracted: out.surplusExtracted,
+      equityRetained: out.equityRetained, grossYield: out.grossYieldOnHammer, netYield: out.netYield,
+      monthlyPayment: out.monthlyMortgagePayment, monthlyCashflow: out.monthlyCashflow, stressMonthlyCashflow: out.stressMonthlyCashflow,
+      pass: re.pass, failedRuleKeys: re.mandatoryFailures.map(f => f.ruleKey), failNote: re.mandatoryFailures.map(f => f.note).filter(Boolean).join('; ') || null,
+    });
+  }
+
+  const an = (property && property.analytics) || {};
+  const markers = {
+    guide: guide > 0 ? guide : null,
+    currentBid: (brr && brr.currentAuctionBid != null) ? pf(brr.currentAuctionBid) : null,
+    target: an.targetBid != null ? pf(an.targetBid) : null,
+    stretch: an.stretchBid != null ? pf(an.stretchBid) : null,
+    lastPassing: lastPassingBid,
+    firstFailing: firstFailingBid,
+    maxRecommended: lastPassingBid,
+  };
+
+  return { rows, markers, start, end, increment, error: null };
+}

@@ -67,3 +67,46 @@ status + notes.
 
 ---
 _Post-phase notes:_
+
+Shipped 2026-07-14. `worker/brrCalc.js`: `buildBidLadder` (full-range table, one
+`computeBrr`+`evaluateRules` per row — no static subtraction, same non-linearity guarantee as
+the solver), `BID_LADDER_INCREMENTS` exported. Markers (guide/currentBid/target/stretch/
+lastPassing/firstFailing/maxRecommended) are derived from the SAME row scan (no duplicate
+solver call) — `maxRecommended`/`firstFailing` are guaranteed consistent with `solveMaxBid`
+whenever the ladder's `start` equals the solver's `minPrice`. 7 new tests (163 total),
+including the exact worked example from phase 5 (`markers.firstFailing`/`maxRecommended` match
+`solveMaxBid`'s output bit-for-bit) and a row-cap validation test.
+
+`BrrAnalysis.jsx`: section 13 (config inputs, `BidLadderTable` — desktop full column set /
+mobile compact set, marker icons, first-fail row tinted red + later fails dimmed, mobile
+full-screen overlay). Live Auction mode: dashboard toggle + pulsing "Bid day — go live"
+auto-suggest chip; when on, the whole sections 1-15 block is replaced by a dedicated one-handed
+panel (state banner, numbers row, quick facts recomputed at hammer=nextBid, scenario chip
+switcher, current/next-bid inputs, big `+increment` button, "Log bid" → calls `addBid()` prop
+AND persists `brr.currentAuctionBid`). Verified the 4-state walk (Safe→Caution→Limit
+reached→Do not bid) numerically against a real `solveMaxBid` result before shipping — matches
+06's spec exactly.
+
+**Deviations/gotchas (flag to user if undesired):**
+- The bid-day auto-suggest condition is a **simplified** mirror of `src/App.jsx:3517`'s
+  `normaliseStatus`-based check — it compares `property.status` directly against the excluded-
+  status list rather than replicating the full legacy-status mapping (`LEGACY_STATUS_MAP`).
+  This is a minor UX nicety (whether the pulsing chip appears), not safety-critical; a property
+  with an old legacy status string might not trigger the auto-suggest chip, but the user can
+  still toggle Live Auction mode manually regardless.
+- `nextBid`/`currentAuctionBid` writes: `currentAuctionBid` is audited (via `stamp`) since it's
+  a meaningful bid-tracking figure; `nextBid` is NOT audited — it's explicitly "a live-auction
+  working value, never used in calcs directly" per 01-data-model.md, so treating it as a quiet
+  field (no audit spam per keystroke while thumbing the increment button) was the right call.
+- Ladder/live-mode share one `bidIncrement` state (not two separate increment pickers) since
+  both are the same "auction increment" concept in this UI; the max-bid **solver's** own
+  `solverIncrement` (section 12, search-granularity) stays a separate state var — different
+  concern (walk step size vs. real auction bid step size).
+- Assumption/rule editing is unavailable in Live Auction mode by construction — the whole
+  sections 1-15 block (including sections 2/4/5/11 where those live) is swapped out entirely
+  while `liveMode` is true, so there's no edit surface to lock separately.
+
+`npm test` (163/163) and `npm run build` verified; deployed live. Live browser walkthrough
+(incl. mobile-width one-handed screenshot) not done this session — same auth-wall reason as
+phases 3-5; verified the live-state machine numerically against a real solver result instead
+(Safe→Caution→Limit reached→Do not bid, all four transitions confirmed via script).

@@ -7,6 +7,7 @@ import {
   applyStress, sensitivityGrid, SENSITIVITY_PRESETS, DEFAULT_STRESS,
   evaluateRules, deriveConfidences, solveMaxBid, computeWarnings, computeVerdict,
   DEFAULT_BRR_RULES, BRR_CALC_VERSION,
+  buildBidLadder, BID_LADDER_INCREMENTS,
 } from '../../worker/brrCalc.js';
 
 const pf = v => parseFloat(v) || 0;
@@ -170,6 +171,66 @@ function KpiTile({ label, value, valueColor, isMobile }) {
   );
 }
 
+const LADDER_MARKER_ICONS = { guide: '📋', currentBid: '📍', target: '🎯', stretch: '🔺', lastPassing: '✅', firstFailing: '⛔', maxRecommended: '👑' };
+const LADDER_DESKTOP_COLS = [
+  ['hammer', 'Hammer', fmtGbp], ['sdlt', 'SDLT', fmtGbp], ['auctionFees', 'Premium', fmtGbp], ['totalBuyingCosts', 'Buying costs', fmtGbp],
+  ['totalCashInvested', 'Total cash', fmtGbp], ['mortgage', 'Mortgage', fmtGbp], ['cashReturned', 'Returned', fmtGbp],
+  ['cashLeftIn', 'Cash left in', fmtGbp], ['capitalRecycledPct', 'Recycled', fmtPct], ['equityRetained', 'Equity', fmtGbp],
+  ['grossYield', 'Gross yield', fmtPct], ['netYield', 'Net yield', fmtPct], ['monthlyPayment', 'Mtg pmt', fmtGbp],
+  ['monthlyCashflow', 'Cash flow', fmtGbp], ['stressMonthlyCashflow', 'Stressed CF', fmtGbp],
+];
+const LADDER_MOBILE_COLS = [
+  ['hammer', 'Hammer', fmtGbp], ['totalCashInvested', 'Cash in', fmtGbp], ['cashReturned', 'Returned', fmtGbp],
+  ['cashLeftIn', 'Left in', fmtGbp], ['capitalRecycledPct', 'Recycled', fmtPct], ['monthlyCashflow', 'Cash flow', fmtGbp],
+];
+
+/** 04-rules-solver-ladder.md §Bid ladder: pass rows normal, first-fail row tinted, later fails dimmed. */
+function BidLadderTable({ ladder, isMobile }) {
+  const markersByHammer = {};
+  Object.entries(ladder.markers).forEach(([key, val]) => {
+    if (val == null) return;
+    (markersByHammer[val] = markersByHammer[val] || []).push(key);
+  });
+  const cols = isMobile ? LADDER_MOBILE_COLS : LADDER_DESKTOP_COLS;
+  let passedFirstFail = false;
+  return (
+    <div className="crm-table-wrap" style={{ overflowX: 'auto', maxWidth: '100%' }}>
+      <table style={{ borderCollapse: 'collapse', fontSize: '11px', minWidth: isMobile ? '760px' : '100%' }}>
+        <thead>
+          <tr>
+            <th style={{ padding: '6px 6px', borderBottom: `1px solid ${COLORS.borderLight}` }} />
+            {cols.map(([k, l]) => <th key={k} style={{ textAlign: 'left', padding: '6px 8px', color: COLORS.textFaint, textTransform: 'uppercase', fontSize: '9px', letterSpacing: '.04em', whiteSpace: 'nowrap', borderBottom: `1px solid ${COLORS.borderLight}` }}>{l}</th>)}
+            <th style={{ textAlign: 'left', padding: '6px 8px', color: COLORS.textFaint, textTransform: 'uppercase', fontSize: '9px', letterSpacing: '.04em', borderBottom: `1px solid ${COLORS.borderLight}` }}>Result</th>
+          </tr>
+        </thead>
+        <tbody>
+          {ladder.rows.map(row => {
+            const isFirstFail = row.hammer === ladder.markers.firstFailing;
+            if (isFirstFail) passedFirstFail = true;
+            const rowMarkers = markersByHammer[row.hammer] || [];
+            const bg = isFirstFail ? '#3f0d0d' : (!row.pass && passedFirstFail ? '#1e0a0a' : 'transparent');
+            return (
+              <tr key={row.hammer} style={{ background: bg, opacity: !row.pass && passedFirstFail && !isFirstFail ? 0.6 : 1 }}>
+                <td style={{ padding: '6px 6px', borderBottom: `0.5px solid ${COLORS.border}`, whiteSpace: 'nowrap' }}>
+                  {rowMarkers.map(m => <span key={m} title={m}>{LADDER_MARKER_ICONS[m]}</span>)}
+                </td>
+                {cols.map(([k, , fmt]) => (
+                  <td key={k} style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, color: COLORS.text, whiteSpace: 'nowrap' }}>{fmt(row[k])}</td>
+                ))}
+                <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, whiteSpace: 'nowrap' }}>
+                  {row.pass
+                    ? <span style={{ color: COLORS.good }}>✓ Pass</span>
+                    : <span style={{ color: COLORS.bad }} title={row.failNote || ''}>✗ {row.failedRuleKeys.map(k => (RULE_META[k] || {}).label || k).join(', ')}</span>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 const VERDICT_COLOR = {
   'Strong BRR': COLORS.good, 'Viable BRR': COLORS.good, 'Marginal BRR': COLORS.warn,
   'High-risk BRR': COLORS.bad, 'BRR does not meet criteria': COLORS.bad, 'Insufficient evidence': COLORS.textFaint,
@@ -210,7 +271,7 @@ const COMPARISON_COLUMNS = [
 ];
 
 export default function BrrAnalysis({ property, updateFieldInView, addBid, logTimeline, isMobile, isTablet, userName }) {
-  const [expanded, setExpanded] = useState({ price: true, costs: false, endValue: false, mortgage: false, rent: false, opex: false, comps: false, comparison: false, sensitivity: false, stress: false, rules: false, maxbid: true, audit: false });
+  const [expanded, setExpanded] = useState({ price: true, costs: false, endValue: false, mortgage: false, rent: false, opex: false, comps: false, comparison: false, sensitivity: false, stress: false, rules: false, maxbid: true, ladder: false, audit: false });
   const [renamingId, setRenamingId] = useState(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [auditPage, setAuditPage] = useState(1);
@@ -223,6 +284,11 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
   const [sensCell, setSensCell] = useState(null);
   const [solverMinPrice, setSolverMinPrice] = useState(null);
   const [solverIncrement, setSolverIncrement] = useState(500);
+  const [bidIncrement, setBidIncrement] = useState(500);
+  const [ladderStart, setLadderStart] = useState(null);
+  const [ladderEnd, setLadderEnd] = useState(null);
+  const [ladderFullScreen, setLadderFullScreen] = useState(false);
+  const [liveMode, setLiveMode] = useState(false);
   const toggle = key => setExpanded(e => ({ ...e, [key]: !e[key] }));
 
   if (!property) return null;
@@ -480,6 +546,50 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
     ? (maxBidResult.limitingRuleKey ? (RULE_META[maxBidResult.limitingRuleKey] || {}).label || maxBidResult.limitingRuleKey : (maxBidResult.maxBid != null ? 'None — every tested bid passes' : 'No bid passes your rules'))
     : '—';
 
+  // --- Bid ladder (section 13) — full-range table, only computed while visible.
+  const ladder = expanded.ladder ? buildBidLadder({ property, brr, scenario, rules: brr.rules, startBid: ladderStart, endBid: ladderEnd, increment: bidIncrement }) : null;
+
+  // --- Live Auction mode (06-live-auction-and-confirmed.md) ------------------
+  // Simplified mirror of src/App.jsx:3517's bid-day condition (not the full
+  // normaliseStatus legacy mapping — just enough for an "auto-suggest" nicety).
+  const auctionDateObj = property.auctionDate ? new Date(property.auctionDate) : null;
+  const daysLeft = auctionDateObj ? Math.ceil((auctionDateObj - new Date()) / 86400000) : null;
+  const bidDayCondition = daysLeft !== null && daysLeft <= 0 && !['Won', 'Lost', 'Refurb', 'For Sale', 'Completed', 'Not Proceeding'].includes(property.status);
+  const nextBid = pf(brr.nextBid);
+  const nextBidOut = nextBid > 0 ? computeBrr({ ...resolved, hammer: nextBid }) : null;
+  const nextBidRuleEval = nextBidOut ? evaluateRules(nextBidOut, brr.rules, confidences) : null;
+  let liveState = 'Safe';
+  if (!maxBidResult || maxBidResult.maxBid == null) {
+    liveState = 'Do not bid';
+  } else {
+    const max = maxBidResult.maxBid;
+    const doNotBid = (nextBid > 0 && nextBid > max) || (nextBidRuleEval && !nextBidRuleEval.pass);
+    const limitReached = currentAuctionBid === max || nextBid === max;
+    if (doNotBid) liveState = 'Do not bid';
+    else if (limitReached) liveState = 'Limit reached';
+    else if (currentAuctionBid > max * 0.9) liveState = 'Caution';
+    else liveState = 'Safe';
+  }
+  const LIVE_STATE_META = {
+    Safe: { bg: '#052e16', border: COLORS.good, fg: '#4ade80' },
+    Caution: { bg: '#3a2a06', border: COLORS.warn, fg: COLORS.warnText },
+    'Limit reached': { bg: '#0b1120', border: COLORS.bad, fg: COLORS.bad },
+    'Do not bid': { bg: '#3f0d0d', border: COLORS.bad, fg: '#fca5a5' },
+  };
+  const setCurrentBid = v => {
+    const nextBrr = stamp({ ...brr, currentAuctionBid: v }, { scenarioId: null, field: 'currentAuctionBid', prev: brr.currentAuctionBid, next: v, reason: null });
+    updateFieldInView('brr', nextBrr);
+  };
+  const setNextBidValue = v => updateFieldInView('brr', { ...brr, nextBid: v });
+  const bumpNextBid = () => setNextBidValue((pf(brr.currentAuctionBid) || 0) + bidIncrement);
+  const logCurrentBid = () => {
+    const amount = nextBid > 0 ? nextBid : currentAuctionBid;
+    if (!(amount > 0)) return;
+    if (addBid) addBid(amount, 'BRR live auction');
+    setCurrentBid(amount);
+    setNextBidValue(null);
+  };
+
   const saveSnapshot = (kind) => {
     const snap = {
       id: `bsnap_${Date.now()}_${Math.random().toString(16).slice(2)}`,
@@ -634,7 +744,16 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
             {priceBasisLabel} price {scenario.priceBasis === 'confirmed' ? '🔒' : ''}
           </span>
           <span style={{ fontSize: '11px', fontWeight: '600', padding: '3px 9px', borderRadius: '10px', background: `${verdict.color}22`, color: verdict.color, border: `1px solid ${verdict.color}` }}>{verdict.label}</span>
-          <button onClick={() => saveSnapshot('review')} style={{ marginLeft: 'auto', fontSize: '11px', fontWeight: '600', color: COLORS.accent, background: 'transparent', border: `1px solid ${COLORS.accent}`, borderRadius: '6px', padding: '5px 10px', minHeight: '32px', cursor: 'pointer' }}>Save pre-auction snapshot</button>
+          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {!liveMode && bidDayCondition && (
+              <button onClick={() => setLiveMode(true)} style={{ fontSize: '11px', fontWeight: '700', color: '#fff', background: COLORS.bad, border: 'none', borderRadius: '14px', padding: '6px 12px', minHeight: '32px', cursor: 'pointer', animation: 'brrPulse 1.6s ease-in-out infinite' }}>
+                <style>{'@keyframes brrPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }'}</style>
+                🔴 Bid day — go live
+              </button>
+            )}
+            {!liveMode && <button onClick={() => saveSnapshot('review')} style={{ fontSize: '11px', fontWeight: '600', color: COLORS.accent, background: 'transparent', border: `1px solid ${COLORS.accent}`, borderRadius: '6px', padding: '5px 10px', minHeight: '32px', cursor: 'pointer' }}>Save pre-auction snapshot</button>}
+            <button onClick={() => setLiveMode(m => !m)} style={{ fontSize: '11px', fontWeight: '600', color: liveMode ? '#fff' : COLORS.textMuted, background: liveMode ? COLORS.accent : 'transparent', border: `1px solid ${liveMode ? COLORS.accent : COLORS.borderLight}`, borderRadius: '6px', padding: '5px 10px', minHeight: '32px', cursor: 'pointer' }}>{liveMode ? '✕ Exit Live Auction' : 'Live Auction mode'}</button>
+          </div>
         </div>
         <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '12px' }}>{verdict.explanation}</div>
         {blocked && (
@@ -655,6 +774,64 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
         </div>
       </div>
 
+      {liveMode ? (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        {/* Live Auction — state banner */}
+        <div style={{ border: `2px solid ${LIVE_STATE_META[liveState].border}`, borderRadius: '10px', padding: '14px 16px', background: LIVE_STATE_META[liveState].bg, textAlign: 'center' }}>
+          <div style={{ fontSize: isMobile ? '20px' : '24px', fontWeight: '800', color: LIVE_STATE_META[liveState].fg, letterSpacing: '.02em' }}>{liveState.toUpperCase()}</div>
+          {maxBidResult && maxBidResult.maxBid == null && <div style={{ fontSize: '11px', color: COLORS.textFaint, marginTop: '4px' }}>No bid passes your mandatory rules under this scenario.</div>}
+        </div>
+
+        {/* Numbers row */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: '8px' }}>
+          <KpiTile label="Current bid" value={currentAuctionBid > 0 ? fmtGbp(currentAuctionBid) : '—'} isMobile={isMobile} />
+          <KpiTile label="Next bid" value={nextBid > 0 ? fmtGbp(nextBid) : '—'} isMobile={isMobile} />
+          <KpiTile label="Max BRR bid" value={maxBidResult && maxBidResult.maxBid != null ? fmtGbp(maxBidResult.maxBid) : '—'} isMobile={isMobile} />
+          <KpiTile label="Headroom" value={biddingHeadroom == null ? '—' : fmtGbp(Math.max(0, biddingHeadroom))} valueColor={biddingHeadroom != null && biddingHeadroom <= 0 ? COLORS.bad : undefined} isMobile={isMobile} />
+        </div>
+
+        {/* Quick facts — recomputed at hammer = next bid */}
+        <div style={{ fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.05em', color: COLORS.textFaint }}>At next bid</div>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2,1fr)' : 'repeat(3,1fr)', gap: '8px' }}>
+          <KpiTile label="Total cash required" value={nextBidOut ? fmtGbp(nextBidOut.totalCashInvested) : '—'} isMobile={isMobile} />
+          <KpiTile label="Cash left in" value={nextBidOut ? (nextBidOut.cashLeftIn > 0 ? fmtGbp(nextBidOut.cashLeftIn) : 'Recycled') : '—'} isMobile={isMobile} />
+          <KpiTile label="Capital recycled" value={nextBidOut ? fmtPct(nextBidOut.capitalRecycledPct) : '—'} isMobile={isMobile} />
+          <KpiTile label="Equity retained" value={nextBidOut ? fmtGbp(nextBidOut.equityRetained) : '—'} isMobile={isMobile} />
+          <KpiTile label="Expected cash flow" value={nextBidOut && nextBidOut.monthlyCashflow != null ? fmtGbp(nextBidOut.monthlyCashflow) + '/mo' : '—'} isMobile={isMobile} />
+          <KpiTile label="Limiting rule" value={nextBidRuleEval && !nextBidRuleEval.pass ? ((RULE_META[nextBidRuleEval.mandatoryFailures[0].ruleKey] || {}).label || nextBidRuleEval.mandatoryFailures[0].ruleKey) : '—'} isMobile={isMobile} />
+        </div>
+
+        {cautionPlusWarnings.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', padding: '8px 10px', background: '#1e1005', border: '0.5px solid #7c2d12', borderRadius: '6px' }}>
+            {cautionPlusWarnings.slice(0, 3).map((w, i) => <span key={`${w.code}_${i}`} style={{ fontSize: '11px', color: w.severity === 'blocked' || w.severity === 'high' ? '#fca5a5' : COLORS.warnText }}>⚠ {w.message}</span>)}
+          </div>
+        )}
+
+        {/* Controls — bottom half, one-handed */}
+        <div style={{ borderTop: `0.5px solid ${COLORS.border}`, paddingTop: '12px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+          <div style={{ display: 'flex', gap: '6px', overflowX: 'auto' }}>
+            {nonArchived.map(s => (
+              <button key={s.id} onClick={() => doSetActive(s.id)} style={{ flexShrink: 0, fontSize: '12px', fontWeight: '600', padding: '8px 14px', minHeight: '44px', borderRadius: '14px', border: `1px solid ${s.id === scenario.id ? COLORS.accent : COLORS.borderLight}`, background: s.id === scenario.id ? COLORS.accent : 'transparent', color: s.id === scenario.id ? '#fff' : COLORS.textMuted, cursor: 'pointer', whiteSpace: 'nowrap' }}>{s.name}</button>
+            ))}
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: '3px', fontSize: '11px', color: COLORS.textFaint }}>Current bid (£)
+              <NumInput value={brr.currentAuctionBid} onChange={setCurrentBid} width="100%" />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: '3px', fontSize: '11px', color: COLORS.textFaint }}>Next bid (£)
+              <NumInput value={brr.nextBid} onChange={setNextBidValue} width="100%" />
+            </label>
+          </div>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <span style={{ fontSize: '11px', color: COLORS.textFaint }}>Increment</span>
+            <Select value={bidIncrement} onChange={e => setBidIncrement(parseInt(e.target.value, 10))} options={BID_LADDER_INCREMENTS.map(v => [v, fmtGbp(v)])} />
+          </div>
+          <button onClick={bumpNextBid} style={{ fontSize: '18px', fontWeight: '700', color: '#fff', background: COLORS.accent, border: 'none', borderRadius: '10px', padding: '16px', minHeight: '56px', cursor: 'pointer' }}>+{fmtGbp(bidIncrement)}</button>
+          <button onClick={logCurrentBid} style={{ fontSize: '15px', fontWeight: '700', color: '#fff', background: COLORS.good, border: 'none', borderRadius: '10px', padding: '14px', minHeight: '52px', cursor: 'pointer' }}>Log bid</button>
+        </div>
+      </div>
+      ) : (
+      <>
       {/* Section 1 — Purchase-price scenario + manager */}
       <Section title="1. Purchase-price scenario" expanded={expanded.price} onToggle={() => toggle('price')}>
         <Row label="Price basis">
@@ -1232,6 +1409,35 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
         )}
       </Section>
 
+      {/* Section 13 — Bid ladder */}
+      <Section title="13. Bid ladder" expanded={expanded.ladder} onToggle={() => toggle('ladder')}>
+        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '10px' }}>
+          <Row label="Start bid">
+            <NumInput value={ladderStart != null ? ladderStart : (ladder ? ladder.start : null)} onChange={setLadderStart} />
+          </Row>
+          <Row label="End bid">
+            <NumInput value={ladderEnd != null ? ladderEnd : (ladder ? ladder.end : null)} onChange={setLadderEnd} />
+          </Row>
+          <Row label="Increment">
+            <Select value={bidIncrement} onChange={e => setBidIncrement(parseInt(e.target.value, 10))} options={BID_LADDER_INCREMENTS.map(v => [v, fmtGbp(v)])} />
+          </Row>
+          {isMobile && <button onClick={() => setLadderFullScreen(true)} style={{ fontSize: '11px', fontWeight: '600', color: COLORS.accent, background: 'transparent', border: `1px solid ${COLORS.accent}`, borderRadius: '6px', padding: '6px 10px', minHeight: '32px', cursor: 'pointer' }}>Full screen</button>}
+        </div>
+
+        {ladder && ladder.error ? (
+          <div style={{ fontSize: '12px', color: COLORS.bad }}>{ladder.error}</div>
+        ) : ladder && (
+          <BidLadderTable ladder={ladder} isMobile={isMobile} />
+        )}
+      </Section>
+
+      {ladderFullScreen && ladder && !ladder.error && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 50, background: '#0b1120', padding: '10px', overflowY: 'auto' }}>
+          <button onClick={() => setLadderFullScreen(false)} style={{ marginBottom: '10px', fontSize: '12px', fontWeight: '600', color: '#fff', background: COLORS.accent, border: 'none', borderRadius: '6px', padding: '8px 14px', minHeight: '44px', cursor: 'pointer' }}>✕ Close</button>
+          <BidLadderTable ladder={ladder} isMobile={isMobile} />
+        </div>
+      )}
+
       {/* Section 14 — Risks & warnings */}
       <Section title="14. Risks & warnings" expanded={expanded.warnings ?? (cautionPlusWarnings.length > 0)} onToggle={() => toggle('warnings')}>
         {warnings.length === 0 ? (
@@ -1283,6 +1489,8 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
           </div>
         )}
       </Section>
+      </>
+      )}
     </div>
   );
 }

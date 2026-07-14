@@ -45,7 +45,7 @@ canvas in this CRM. Written 2026-07-14. Planning only — no code exists yet.
 | 3 | Rental-comparables module | shipped 2026-07-14 |
 | 4 | Sensitivity + stress testing | shipped 2026-07-14 |
 | 5 | Investment rules + maximum-bid solver | shipped 2026-07-14 |
-| 6 | Bid ladder + Live Auction mode | not started |
+| 6 | Bid ladder + Live Auction mode | shipped 2026-07-14 |
 | 7 | Actual purchase tracking (confirmed hammer, forecast-vs-actual) | not started |
 
 ### Reference docs (read only what the phase file lists)

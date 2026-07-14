@@ -33,6 +33,8 @@ import {
   solveMaxBid,
   computeWarnings,
   computeVerdict,
+  buildBidLadder,
+  BID_LADDER_INCREMENTS,
 } from './brrCalc.js';
 
 // Baseline worked example (docs/brr/08-testing.md):
@@ -1232,4 +1234,67 @@ test('resolveScenario: maxBrrBid priceBasis now resolves to the solver\'s max bi
   assert.equal(inputs.hammer, direct.maxBid);
   assert.equal(sources.hammer, 'scenario');
   assert.match(sources.hammerNote, /solver/);
+});
+
+// --- Suite 9 — Bid ladder (buildBidLadder) ----------------------------------
+
+test('buildBidLadder: row count = (end-start)/increment + 1', () => {
+  const { property, brr, scenario } = makeBrrFixture();
+  const brrWithRule = { ...brr, rules: [{ id: 'r', key: 'maxCashLeftIn', enabled: true, mandatory: true, target: 15000 }] };
+  const ladder = buildBidLadder({ property, brr: brrWithRule, scenario, startBid: 90000, endBid: 96000, increment: 500 });
+  assert.equal(ladder.rows.length, (96000 - 90000) / 500 + 1);
+  assert.equal(ladder.rows[0].hammer, 90000);
+  assert.equal(ladder.rows[ladder.rows.length - 1].hammer, 96000);
+});
+
+test('buildBidLadder: a range exceeding the 400-row cap returns a validation error and no rows', () => {
+  const { property, brr, scenario } = makeBrrFixture();
+  const ladder = buildBidLadder({ property, brr, scenario, startBid: 1000, endBid: 1000 + 401 * 250, increment: 250 });
+  assert.ok(ladder.error);
+  assert.equal(ladder.rows.length, 0);
+});
+
+test('buildBidLadder: the pass/fail transition matches the solver\'s firstFailingBid for the same config', () => {
+  const { property, brr, scenario } = makeBrrFixture();
+  const rules = [{ id: 'r', key: 'maxCashLeftIn', enabled: true, mandatory: true, target: 15000 }];
+  const brrWithRule = { ...brr, rules };
+  const ladder = buildBidLadder({ property, brr: brrWithRule, scenario, startBid: 90000, increment: 500 });
+  const solved = solveMaxBid({ property, brr: brrWithRule, scenario, rules, minPrice: 90000, increment: 500 });
+  assert.equal(ladder.markers.firstFailing, solved.firstFailingBid);
+  assert.equal(ladder.markers.maxRecommended, solved.maxBid);
+  const firstFailRow = ladder.rows.find(r => r.hammer === ladder.markers.firstFailing);
+  assert.equal(firstFailRow.pass, false);
+  assert.ok(firstFailRow.failedRuleKeys.includes('maxCashLeftIn'));
+});
+
+test('buildBidLadder: markers pick up guide/current/target/stretch from property + brr', () => {
+  const { property: baseProperty, brr: baseBrr, scenario } = makeBrrFixture();
+  const property = { ...baseProperty, analytics: { ...baseProperty.analytics, targetBid: 85000, stretchBid: 92000 } };
+  const brr = { ...baseBrr, currentAuctionBid: 91000 };
+  const ladder = buildBidLadder({ property, brr, scenario, startBid: 90000, endBid: 96000, increment: 500 });
+  assert.equal(ladder.markers.guide, 90000);
+  assert.equal(ladder.markers.currentBid, 91000);
+  assert.equal(ladder.markers.target, 85000);
+  assert.equal(ladder.markers.stretch, 92000);
+});
+
+test('buildBidLadder: current bid above the max recommended bid does not break marker ordering', () => {
+  const { property, brr: baseBrr, scenario } = makeBrrFixture();
+  const brr = { ...baseBrr, currentAuctionBid: 500000, rules: [{ id: 'r', key: 'maxCashLeftIn', enabled: true, mandatory: true, target: 15000 }] };
+  const ladder = buildBidLadder({ property, brr, scenario, startBid: 90000, increment: 500 });
+  assert.equal(ladder.markers.currentBid, 500000);
+  assert.ok(ladder.markers.maxRecommended < ladder.markers.currentBid);
+  assert.ok(ladder.markers.maxRecommended <= ladder.markers.firstFailing);
+});
+
+test('buildBidLadder: default start/end — round-down(guide×0.8, increment) to firstFailing+5 increments', () => {
+  const { property, brr: baseBrr, scenario } = makeBrrFixture();
+  const brr = { ...baseBrr, rules: [{ id: 'r', key: 'maxCashLeftIn', enabled: true, mandatory: true, target: 15000 }] };
+  const ladder = buildBidLadder({ property, brr, scenario, increment: 500 });
+  assert.equal(ladder.start, Math.floor((property.guidePrice * 0.8) / 500) * 500);
+  assert.equal(ladder.end, ladder.markers.firstFailing + 5 * 500);
+});
+
+test('buildBidLadder: BID_LADDER_INCREMENTS exposes the four preset step sizes', () => {
+  assert.deepEqual(BID_LADDER_INCREMENTS, [250, 500, 1000, 2500]);
 });
