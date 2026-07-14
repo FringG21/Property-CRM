@@ -1,9 +1,14 @@
 import React, { useState } from 'react';
-import { seedBrr, resolveScenario, computeBrr } from '../../worker/brrCalc.js';
+import {
+  seedBrr, migrateBrrShape, resolveScenario, computeBrr,
+  createScenario, duplicateScenario, renameScenario, deleteScenario,
+  setActiveScenario, toggleLock, toggleArchive, setScenarioOverride, appendAudit,
+} from '../../worker/brrCalc.js';
 
-// BRR Analysis — phase 1: core calculator + tab. Single 'expected' scenario,
-// no picker/comparison/solver/ladder/rules yet (phases 2+). Dark palette +
-// inline styles matching the existing canvas cards (docs/brr/03-ux-screens.md).
+// BRR Analysis — phase 2: flexible scenarios. Full scenario engine (create/
+// rename/duplicate/delete/lock/archive/set-active), sparse per-scenario
+// overrides, comparison table, audit trail. Dark palette + inline styles
+// matching the existing canvas cards (docs/brr/03-ux-screens.md).
 
 const COLORS = {
   cardBg: '#0f172a', panelBg: '#1e293b', border: '#1e293b', borderLight: '#334155',
@@ -13,7 +18,6 @@ const COLORS = {
 
 const fmtGbp = v => (v == null || Number.isNaN(v)) ? '—' : `£${Math.round(v).toLocaleString()}`;
 const fmtPct = v => (v == null || Number.isNaN(v)) ? '—' : `${v.toFixed(1)}%`;
-const pf = v => parseFloat(v) || 0;
 
 const SOURCE_BADGE = {
   manual: { l: 'Manual', bg: '#1e293b', fg: '#94a3b8' },
@@ -66,6 +70,14 @@ function NumInput({ value, onChange, width, min }) {
   );
 }
 
+function Select({ value, onChange, options, style }) {
+  return (
+    <select value={value} onChange={onChange} style={{ minHeight: '32px', fontSize: '13px', background: '#0b1120', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px', ...style }}>
+      {options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+    </select>
+  );
+}
+
 function KpiTile({ label, value, valueColor, isMobile }) {
   return (
     <div style={{ padding: '8px 10px', background: '#0b1120', border: `0.5px solid ${COLORS.border}`, borderRadius: '8px', minHeight: '44px' }}>
@@ -99,8 +111,44 @@ function computeVerdict(out) {
   };
 }
 
-export default function BrrAnalysis({ property, updateFieldInView, addBid, isMobile, isTablet, userName }) {
-  const [expanded, setExpanded] = useState({ price: true, costs: false, endValue: false, mortgage: false, rent: false, opex: false });
+const PRICE_BASIS_OPTIONS = [
+  ['guide', 'Guide price'], ['currentBid', 'Current auction bid'],
+  ['target', 'Target purchase price'], ['stretch', 'Stretch purchase price'],
+];
+const PRICE_BASIS_LABEL = { guide: 'Guide', currentBid: 'Current bid', target: 'Target', stretch: 'Stretch', assumed: 'Assumed', maxBrrBid: 'Max BRR bid', confirmed: 'Confirmed' };
+
+const COMPARISON_COLUMNS = [
+  { k: 'name', l: 'Scenario' },
+  { k: 'hammer', l: 'Assumed hammer', fmt: fmtGbp },
+  { k: 'refurbPlusContingency', l: 'Refurb + contingency', fmt: fmtGbp },
+  { k: 'totalBuyingCosts', l: 'Total buying costs', fmt: fmtGbp },
+  { k: 'totalCashInvested', l: 'Total cash invested', fmt: fmtGbp, lowerBetter: true },
+  { k: 'endValue', l: 'End value', fmt: fmtGbp },
+  { k: 'ltvPct', l: 'LTV', fmt: fmtPct },
+  { k: 'ratePct', l: 'Rate', fmt: fmtPct },
+  { k: 'finalMortgage', l: 'Mortgage', fmt: fmtGbp },
+  { k: 'netCashReturned', l: 'Cash returned', fmt: fmtGbp },
+  { k: 'cashLeftIn', l: 'Cash left in', fmt: fmtGbp, lowerBetter: true },
+  { k: 'capitalRecycledPct', l: 'Recycled %', fmt: fmtPct, higherBetter: true },
+  { k: 'surplusExtracted', l: 'Surplus', fmt: fmtGbp },
+  { k: 'equityRetained', l: 'Equity retained', fmt: fmtGbp, higherBetter: true },
+  { k: 'grossMonthlyRent', l: 'Rent', fmt: fmtGbp },
+  { k: 'monthlyMortgagePayment', l: 'Mortgage payment', fmt: fmtGbp },
+  { k: 'monthlyCashflow', l: 'Monthly cash flow', fmt: fmtGbp, higherBetter: true },
+  { k: 'stressMonthlyCashflow', l: 'Stressed cash flow', fmt: fmtGbp, higherBetter: true },
+  { k: 'grossYieldOnHammer', l: 'Gross yield', fmt: fmtPct, higherBetter: true },
+  { k: 'netYield', l: 'Net yield', fmt: fmtPct, higherBetter: true },
+  { k: 'maxBidResult', l: 'Max-bid result', fmt: v => v || '—' },
+  { k: 'valuationConfidence', l: 'Valuation confidence', fmt: v => v || '—' },
+  { k: 'rentalConfidence', l: 'Rental confidence', fmt: v => v || '—' },
+  { k: 'verdict', l: 'Verdict', fmt: v => v || '—' },
+];
+
+export default function BrrAnalysis({ property, updateFieldInView, addBid, logTimeline, isMobile, isTablet, userName }) {
+  const [expanded, setExpanded] = useState({ price: true, costs: false, endValue: false, mortgage: false, rent: false, opex: false, comparison: false, audit: false });
+  const [renamingId, setRenamingId] = useState(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  const [auditPage, setAuditPage] = useState(1);
   const toggle = key => setExpanded(e => ({ ...e, [key]: !e[key] }));
 
   if (!property) return null;
@@ -111,42 +159,124 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, isMob
     return <div style={{ padding: '20px', color: COLORS.textMuted, fontSize: '13px' }}>Setting up BRR analysis…</div>;
   }
 
+  if (property.brr.scenarios.length < 4) {
+    const migrated = migrateBrrShape(property.brr);
+    updateFieldInView('brr', migrated);
+    return <div style={{ padding: '20px', color: COLORS.textMuted, fontSize: '13px' }}>Upgrading BRR analysis…</div>;
+  }
+
   const brr = property.brr;
   const scenario = brr.scenarios.find(s => s.id === brr.activeScenarioId) || brr.scenarios[0];
+  const nowIso = () => new Date().toISOString();
+  const stamp = (b, patch) => appendAudit(b, { at: nowIso(), user: userName || 'You', ...patch });
 
-  const patchOverrides = patch => {
-    const nextOverrides = { ...scenario.overrides, ...patch };
-    const nextScenario = { ...scenario, overrides: nextOverrides, updatedAt: new Date().toISOString() };
-    const nextScenarios = brr.scenarios.map(s => s.id === scenario.id ? nextScenario : s);
-    updateFieldInView('brr', { ...brr, scenarios: nextScenarios });
+  // Every mutation funnels through exactly one App-level write per action:
+  // logTimeline() for coarse scenario events (also lands on the Timeline tab),
+  // updateFieldInView('brr', …) for quiet per-field edits.
+  const applyOverride = (path, value) => {
+    let workingBrr = brr;
+    let sc = scenario;
+    let timelineDetail = null;
+    if (sc.locked) {
+      if (!window.confirm('Scenario is locked — unlock and edit?')) return;
+      workingBrr = toggleLock(workingBrr, sc.id);
+      workingBrr = stamp(workingBrr, { scenarioId: sc.id, field: 'locked', prev: true, next: false, reason: null });
+      sc = workingBrr.scenarios.find(s => s.id === sc.id);
+      timelineDetail = `Scenario unlocked: ${sc.name}`;
+    }
+    const before = sc.overrides;
+    const result = setScenarioOverride(workingBrr, sc.id, path, value);
+    if (result.error) return;
+    workingBrr = stamp(result.brr, { scenarioId: sc.id, field: path, prev: before, next: value, reason: null });
+    if (timelineDetail && logTimeline) logTimeline(workingBrr, timelineDetail);
+    else updateFieldInView('brr', workingBrr);
   };
-  const patchDeepOverride = (group, patch) => {
-    patchOverrides({ [group]: { ...(scenario.overrides[group] || {}), ...patch } });
+
+  const applyScenarioField = (fields) => {
+    let workingBrr = brr;
+    let sc = scenario;
+    let timelineDetail = null;
+    if (sc.locked) {
+      if (!window.confirm('Scenario is locked — unlock and edit?')) return;
+      workingBrr = toggleLock(workingBrr, sc.id);
+      workingBrr = stamp(workingBrr, { scenarioId: sc.id, field: 'locked', prev: true, next: false, reason: null });
+      sc = workingBrr.scenarios.find(s => s.id === sc.id);
+      timelineDetail = `Scenario unlocked: ${sc.name}`;
+    }
+    const nextScenario = { ...sc, ...fields, updatedAt: nowIso() };
+    const nextScenarios = workingBrr.scenarios.map(s => s.id === sc.id ? nextScenario : s);
+    workingBrr = { ...workingBrr, scenarios: nextScenarios };
+    if (timelineDetail && logTimeline) logTimeline(workingBrr, timelineDetail);
+    else updateFieldInView('brr', workingBrr);
   };
+
+  const patchOverrides = patch => Object.entries(patch).forEach(([k, v]) => applyOverride(k, v));
+  const patchDeepOverride = (group, patch) => applyOverride(group, { ...(scenario.overrides[group] || {}), ...patch });
   const resetOverride = key => {
-    const nextOverrides = { ...scenario.overrides };
-    delete nextOverrides[key];
-    const nextScenario = { ...scenario, overrides: nextOverrides, updatedAt: new Date().toISOString() };
-    const nextScenarios = brr.scenarios.map(s => s.id === scenario.id ? nextScenario : s);
-    updateFieldInView('brr', { ...brr, scenarios: nextScenarios });
+    const next = { ...scenario.overrides };
+    delete next[key];
+    applyScenarioField({ overrides: next });
   };
-  const setAssumedHammer = value => {
-    const nextScenario = { ...scenario, assumedHammerPrice: value, priceBasis: value != null ? 'assumed' : scenario.priceBasis, updatedAt: new Date().toISOString() };
-    const nextScenarios = brr.scenarios.map(s => s.id === scenario.id ? nextScenario : s);
-    updateFieldInView('brr', { ...brr, scenarios: nextScenarios });
+  const setAssumedHammer = value => applyScenarioField({ assumedHammerPrice: value, priceBasis: value != null ? 'assumed' : scenario.priceBasis });
+  const setPriceBasis = basis => applyScenarioField({ priceBasis: basis, assumedHammerPrice: null });
+
+  // Scenario manager actions — coarse, always logged to the property Timeline.
+  const doSetActive = id => updateFieldInView('brr', setActiveScenario(brr, id));
+  const doCreate = () => {
+    const { brr: next, scenario: created } = createScenario(brr, 'custom');
+    const withAudit = stamp(next, { scenarioId: created.id, field: 'scenario', prev: null, next: created.name, reason: null });
+    logTimeline(withAudit, `Scenario created: ${created.name}`);
   };
-  const setPriceBasis = basis => {
-    const nextScenario = { ...scenario, priceBasis: basis, assumedHammerPrice: null, updatedAt: new Date().toISOString() };
-    const nextScenarios = brr.scenarios.map(s => s.id === scenario.id ? nextScenario : s);
-    updateFieldInView('brr', { ...brr, scenarios: nextScenarios });
+  const doDuplicate = id => {
+    const src = brr.scenarios.find(s => s.id === id);
+    const { brr: next, scenario: dup, error } = duplicateScenario(brr, id);
+    if (error) return;
+    const withAudit = stamp(next, { scenarioId: dup.id, field: 'scenario', prev: null, next: dup.name, reason: null });
+    logTimeline(withAudit, `Scenario duplicated from ${src.name}: ${dup.name}`);
   };
+  const startRename = s => { setRenamingId(s.id); setRenameDraft(s.name); };
+  const commitRename = () => {
+    const { brr: next, error } = renameScenario(brr, renamingId, renameDraft.trim() || 'Untitled');
+    setRenamingId(null);
+    if (error) { window.alert(error); return; }
+    updateFieldInView('brr', next);
+  };
+  const doDelete = id => {
+    const target = brr.scenarios.find(s => s.id === id);
+    if (!window.confirm(`Delete scenario "${target.name}"? This cannot be undone.`)) return;
+    const { brr: next, error } = deleteScenario(brr, id);
+    if (error) { window.alert(error); return; }
+    const withAudit = stamp(next, { scenarioId: id, field: 'scenario', prev: target.name, next: null, reason: null });
+    logTimeline(withAudit, `Scenario deleted: ${target.name}`);
+  };
+  const doToggleLock = id => {
+    const target = brr.scenarios.find(s => s.id === id);
+    const next = toggleLock(brr, id);
+    const withAudit = stamp(next, { scenarioId: id, field: 'locked', prev: target.locked, next: !target.locked, reason: null });
+    logTimeline(withAudit, `Scenario ${!target.locked ? 'locked' : 'unlocked'}: ${target.name}`);
+  };
+  const doToggleArchive = id => {
+    const target = brr.scenarios.find(s => s.id === id);
+    const next = toggleArchive(brr, id);
+    const withAudit = stamp(next, { scenarioId: id, field: 'archived', prev: target.archived, next: !target.archived, reason: null });
+    updateFieldInView('brr', withAudit);
+  };
+  const doToggleIncludeInComparison = id => {
+    const target = brr.scenarios.find(s => s.id === id);
+    applyScenarioFieldFor(id, { includeInComparison: !target.includeInComparison });
+  };
+  function applyScenarioFieldFor(id, fields) {
+    const nextScenarios = brr.scenarios.map(s => s.id === id ? { ...s, ...fields, updatedAt: nowIso() } : s);
+    updateFieldInView('brr', { ...brr, scenarios: nextScenarios });
+  }
 
   const { inputs: resolved, sources } = resolveScenario(property, brr, scenario);
   const out = computeBrr(resolved);
   const verdict = computeVerdict(out);
   const blocked = resolved.hammer <= 0;
 
-  const priceBasisLabel = scenario.assumedHammerPrice != null ? 'Assumed' : { guide: 'Guide', currentBid: 'Current bid', target: 'Target', stretch: 'Stretch', confirmed: 'Confirmed' }[scenario.priceBasis] || 'Guide';
+  const priceBasisLabel = scenario.assumedHammerPrice != null ? 'Assumed' : (PRICE_BASIS_LABEL[scenario.priceBasis] || 'Guide');
+  const nonArchived = brr.scenarios.filter(s => !s.archived);
 
   const kpis = [
     { l: 'Assumed hammer', v: blocked ? '—' : fmtGbp(resolved.hammer) },
@@ -177,12 +307,71 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, isMob
     ['utilities', 'Utilities'], ['councilTax', 'Council tax'], ['cleaning', 'Cleaning'], ['gardening', 'Gardening'],
   ];
 
+  // Comparison table rows: resolve + compute every included, non-archived scenario.
+  const comparisonRows = nonArchived.filter(s => s.includeInComparison).map(s => {
+    const r = resolveScenario(property, brr, s);
+    const o = computeBrr(r.inputs);
+    const v = computeVerdict(o);
+    return {
+      id: s.id, name: s.name, locked: s.locked,
+      hammer: r.inputs.hammer,
+      refurbPlusContingency: r.inputs.refurbBudget + (r.inputs.refurbBudget * r.inputs.contingencyPct / 100),
+      totalBuyingCosts: o.totalBuyingCosts,
+      totalCashInvested: o.totalCashInvested,
+      endValue: r.inputs.selectedEndValue,
+      ltvPct: r.inputs.mortgage.ltvPct,
+      ratePct: r.inputs.mortgage.ratePct,
+      finalMortgage: o.finalMortgage,
+      netCashReturned: o.netCashReturned,
+      cashLeftIn: o.cashLeftIn > 0 ? o.cashLeftIn : 0,
+      capitalRecycledPct: o.capitalRecycledPct,
+      surplusExtracted: o.surplusExtracted,
+      equityRetained: o.equityRetained,
+      grossMonthlyRent: r.inputs.grossMonthlyRent,
+      monthlyMortgagePayment: o.monthlyMortgagePayment,
+      monthlyCashflow: o.monthlyCashflow,
+      stressMonthlyCashflow: o.stressMonthlyCashflow,
+      grossYieldOnHammer: o.grossYieldOnHammer,
+      netYield: o.netYield,
+      maxBidResult: null,
+      valuationConfidence: brr.defaults.endValue.confidence,
+      rentalConfidence: brr.defaults.rent.confidence,
+      verdict: v.label,
+    };
+  });
+  const bestWorst = {};
+  if (comparisonRows.length >= 2) {
+    for (const col of COMPARISON_COLUMNS) {
+      if (!col.higherBetter && !col.lowerBetter) continue;
+      const values = comparisonRows.map(r => r[col.k]).filter(v => v != null && !Number.isNaN(v));
+      if (values.length < 2) continue;
+      const best = col.higherBetter ? Math.max(...values) : Math.min(...values);
+      const worst = col.higherBetter ? Math.min(...values) : Math.max(...values);
+      bestWorst[col.k] = { best, worst };
+    }
+  }
+
+  const auditEntries = brr.audit || [];
+  const auditVisible = auditEntries.slice(0, auditPage * 20);
+
   return (
     <div style={{ padding: isMobile ? '10px' : '16px 20px', background: '#0b1120' }}>
       {/* Sticky summary dashboard */}
       <div style={{ position: 'sticky', top: 0, zIndex: 5, background: COLORS.cardBg, border: `0.5px solid ${COLORS.borderLight}`, borderRadius: '10px', padding: '12px 16px', marginBottom: '14px' }}>
         <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '10px', marginBottom: '10px' }}>
-          <span style={{ fontSize: '13px', fontWeight: '600', color: COLORS.text }}>{scenario.name}</span>
+          {isMobile ? (
+            <div style={{ display: 'flex', gap: '6px', overflowX: 'auto', flex: '1 1 100%' }}>
+              {nonArchived.map(s => (
+                <button key={s.id} onClick={() => doSetActive(s.id)} style={{ flexShrink: 0, fontSize: '12px', fontWeight: '600', padding: '6px 12px', minHeight: '32px', borderRadius: '14px', border: `1px solid ${s.id === scenario.id ? COLORS.accent : COLORS.borderLight}`, background: s.id === scenario.id ? COLORS.accent : 'transparent', color: s.id === scenario.id ? '#fff' : COLORS.textMuted, cursor: 'pointer', whiteSpace: 'nowrap' }}>
+                  {s.name}{s.locked ? ' 🔒' : ''}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <select value={scenario.id} onChange={e => doSetActive(e.target.value)} style={{ minHeight: '32px', fontSize: '13px', fontWeight: '600', background: '#0b1120', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 10px' }}>
+              {nonArchived.map(s => <option key={s.id} value={s.id}>{s.name}{s.locked ? ' 🔒' : ''}</option>)}
+            </select>
+          )}
           <span style={{ fontSize: '10px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.04em', padding: '2px 7px', borderRadius: '10px', background: scenario.priceBasis === 'confirmed' ? '#052e16' : '#1e293b', color: scenario.priceBasis === 'confirmed' ? '#4ade80' : '#a78bfa' }}>
             {priceBasisLabel} price {scenario.priceBasis === 'confirmed' ? '🔒' : ''}
           </span>
@@ -199,15 +388,10 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, isMob
         </div>
       </div>
 
-      {/* Section 1 — Purchase-price scenario */}
+      {/* Section 1 — Purchase-price scenario + manager */}
       <Section title="1. Purchase-price scenario" expanded={expanded.price} onToggle={() => toggle('price')}>
         <Row label="Price basis">
-          <select value={scenario.priceBasis} onChange={e => setPriceBasis(e.target.value)} style={{ minHeight: '32px', fontSize: '13px', background: '#0b1120', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px' }}>
-            <option value="guide">Guide price</option>
-            <option value="currentBid">Current auction bid</option>
-            <option value="target">Target purchase price</option>
-            <option value="stretch">Stretch purchase price</option>
-          </select>
+          <Select value={scenario.priceBasis} onChange={e => setPriceBasis(e.target.value)} options={PRICE_BASIS_OPTIONS} />
         </Row>
         <Row label="Assumed hammer price override" source={scenario.assumedHammerPrice != null ? 'scenario' : null} overridden={scenario.assumedHammerPrice != null} onReset={() => setAssumedHammer(null)}>
           <NumInput value={scenario.assumedHammerPrice} onChange={setAssumedHammer} />
@@ -215,6 +399,32 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, isMob
         <Row label="Effective hammer used in calc" source={sources.hammer}>
           <span style={{ fontSize: '14px', fontWeight: '600', color: COLORS.text }}>{fmtGbp(resolved.hammer)}</span>
         </Row>
+
+        <div style={{ marginTop: '14px', paddingTop: '12px', borderTop: `0.5px solid ${COLORS.border}` }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <span style={{ fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.05em', color: COLORS.textFaint }}>Scenario manager</span>
+            <button onClick={doCreate} style={{ fontSize: '11px', fontWeight: '600', color: COLORS.accent, background: 'transparent', border: `1px solid ${COLORS.accent}`, borderRadius: '6px', padding: '5px 10px', minHeight: '32px', cursor: 'pointer' }}>+ New scenario</button>
+          </div>
+          {brr.scenarios.map(s => (
+            <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', padding: '7px 0', borderBottom: `0.5px solid ${COLORS.border}`, opacity: s.archived ? 0.5 : 1 }}>
+              {renamingId === s.id ? (
+                <input autoFocus value={renameDraft} onChange={e => setRenameDraft(e.target.value)} onBlur={commitRename} onKeyDown={e => e.key === 'Enter' && commitRename()} style={{ minHeight: '32px', fontSize: '13px', background: '#0b1120', color: COLORS.text, border: `1px solid ${COLORS.accent}`, borderRadius: '6px', padding: '4px 8px', flex: '1 1 140px' }} />
+              ) : (
+                <button onClick={() => doSetActive(s.id)} style={{ flex: '1 1 140px', textAlign: 'left', fontSize: '13px', fontWeight: s.id === scenario.id ? '700' : '400', color: s.id === scenario.id ? COLORS.text : COLORS.textMuted, background: 'transparent', border: 'none', cursor: 'pointer', padding: '4px 0' }}>
+                  {s.id === scenario.id ? '● ' : '○ '}{s.name} <span style={{ fontSize: '10px', color: COLORS.textFaint }}>({s.type})</span>{s.locked ? ' 🔒' : ''}{s.archived ? ' (archived)' : ''}
+                </button>
+              )}
+              <button onClick={() => startRename(s)} title="Rename" style={{ background: 'none', border: 'none', cursor: 'pointer', color: COLORS.textFaint, fontSize: '13px', padding: '4px' }}>✏️</button>
+              <button onClick={() => doDuplicate(s.id)} title="Duplicate" style={{ background: 'none', border: 'none', cursor: 'pointer', color: COLORS.textFaint, fontSize: '13px', padding: '4px' }}>⧉</button>
+              <button onClick={() => doToggleLock(s.id)} title={s.locked ? 'Unlock' : 'Lock'} style={{ background: 'none', border: 'none', cursor: 'pointer', color: s.locked ? COLORS.warnText : COLORS.textFaint, fontSize: '13px', padding: '4px' }}>{s.locked ? '🔒' : '🔓'}</button>
+              <button onClick={() => doToggleArchive(s.id)} title={s.archived ? 'Unarchive' : 'Archive'} style={{ background: 'none', border: 'none', cursor: 'pointer', color: COLORS.textFaint, fontSize: '13px', padding: '4px' }}>{s.archived ? '📤' : '📥'}</button>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px', color: COLORS.textFaint }}>
+                <input type="checkbox" checked={s.includeInComparison} onChange={() => doToggleIncludeInComparison(s.id)} /> Compare
+              </label>
+              <button onClick={() => doDelete(s.id)} title="Delete" style={{ background: 'none', border: 'none', cursor: 'pointer', color: COLORS.bad, fontSize: '13px', padding: '4px' }}>🗑</button>
+            </div>
+          ))}
+        </div>
       </Section>
 
       {/* Section 2 — Purchase & refurb costs */}
@@ -260,12 +470,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, isMob
           <NumInput value={resolved.endValue.custom} onChange={v => patchDeepOverride('endValue', { custom: v })} />
         </Row>
         <Row label="Selected basis">
-          <select value={resolved.endValue.selected} onChange={e => patchDeepOverride('endValue', { selected: e.target.value })} style={{ minHeight: '32px', fontSize: '13px', background: '#0b1120', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px' }}>
-            <option value="conservative">Conservative</option>
-            <option value="expected">Expected</option>
-            <option value="optimistic">Optimistic</option>
-            <option value="custom">Custom</option>
-          </select>
+          <Select value={resolved.endValue.selected} onChange={e => patchDeepOverride('endValue', { selected: e.target.value })} options={[['conservative', 'Conservative'], ['expected', 'Expected'], ['optimistic', 'Optimistic'], ['custom', 'Custom']]} />
         </Row>
       </Section>
 
@@ -278,10 +483,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, isMob
           <NumInput value={resolved.mortgage.ratePct} onChange={v => patchDeepOverride('mortgage', { ratePct: v })} />
         </Row>
         <Row label="Type">
-          <select value={resolved.mortgage.type} onChange={e => patchDeepOverride('mortgage', { type: e.target.value })} style={{ minHeight: '32px', fontSize: '13px', background: '#0b1120', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px' }}>
-            <option value="io">Interest-only</option>
-            <option value="repayment">Repayment</option>
-          </select>
+          <Select value={resolved.mortgage.type} onChange={e => patchDeepOverride('mortgage', { type: e.target.value })} options={[['io', 'Interest-only'], ['repayment', 'Repayment']]} />
         </Row>
         <Row label="Term (years)">
           <NumInput value={resolved.mortgage.termYears} onChange={v => patchDeepOverride('mortgage', { termYears: v })} />
@@ -309,12 +511,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, isMob
           <NumInput value={resolved.rent.custom} onChange={v => patchDeepOverride('rent', { custom: v })} />
         </Row>
         <Row label="Selected basis">
-          <select value={resolved.rent.selected} onChange={e => patchDeepOverride('rent', { selected: e.target.value })} style={{ minHeight: '32px', fontSize: '13px', background: '#0b1120', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 8px' }}>
-            <option value="conservative">Conservative</option>
-            <option value="expected">Expected</option>
-            <option value="optimistic">Optimistic</option>
-            <option value="custom">Custom</option>
-          </select>
+          <Select value={resolved.rent.selected} onChange={e => patchDeepOverride('rent', { selected: e.target.value })} options={[['conservative', 'Conservative'], ['expected', 'Expected'], ['optimistic', 'Optimistic'], ['custom', 'Custom']]} />
         </Row>
       </Section>
 
@@ -330,11 +527,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, isMob
           const item = opex[key] || { mode: 'annual', value: 0 };
           return (
             <Row key={key} label={label}>
-              <select value={item.mode} onChange={e => patchDeepOverride('opex', { [key]: { ...item, mode: e.target.value } })} style={{ minHeight: '32px', fontSize: '12px', background: '#0b1120', color: COLORS.text, border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '4px 6px' }}>
-                <option value="pct">% of rent</option>
-                <option value="monthly">£/month</option>
-                <option value="annual">£/year</option>
-              </select>
+              <Select value={item.mode} onChange={e => patchDeepOverride('opex', { [key]: { ...item, mode: e.target.value } })} options={[['pct', '% of rent'], ['monthly', '£/month'], ['annual', '£/year']]} style={{ fontSize: '12px', padding: '4px 6px' }} />
               <NumInput width="90px" value={item.value} onChange={v => patchDeepOverride('opex', { [key]: { ...item, value: v == null ? 0 : v } })} />
             </Row>
           );
@@ -345,6 +538,66 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, isMob
         <Row label="Other (£/year)">
           <NumInput value={opex.otherAnnual} onChange={v => patchDeepOverride('opex', { otherAnnual: v == null ? 0 : v })} />
         </Row>
+      </Section>
+
+      {/* Section 8 — Scenario comparison table */}
+      <Section title="8. Scenario comparison" expanded={expanded.comparison} onToggle={() => toggle('comparison')}>
+        {comparisonRows.length === 0 ? (
+          <div style={{ fontSize: '12px', color: COLORS.textFaint }}>No scenarios marked "Compare" above.</div>
+        ) : (
+          <div className="crm-table-wrap" style={{ overflowX: 'auto', maxWidth: '100%' }}>
+            <table style={{ borderCollapse: 'collapse', fontSize: '11px', minWidth: isMobile ? '900px' : '100%' }}>
+              <thead>
+                <tr>
+                  {COMPARISON_COLUMNS.map((col, i) => (
+                    <th key={col.k} style={{ position: i === 0 ? 'sticky' : 'static', left: i === 0 ? 0 : undefined, background: COLORS.cardBg, textAlign: 'left', padding: '6px 10px', color: COLORS.textFaint, textTransform: 'uppercase', fontSize: '9px', letterSpacing: '.04em', whiteSpace: 'nowrap', borderBottom: `1px solid ${COLORS.borderLight}` }}>{col.l}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {comparisonRows.map(row => (
+                  <tr key={row.id}>
+                    {COMPARISON_COLUMNS.map((col, i) => {
+                      const raw = row[col.k];
+                      const bw = bestWorst[col.k];
+                      let tint;
+                      if (bw && raw != null) {
+                        if (raw === bw.best) tint = COLORS.good;
+                        else if (raw === bw.worst) tint = COLORS.bad;
+                      }
+                      return (
+                        <td key={col.k} style={{ position: i === 0 ? 'sticky' : 'static', left: i === 0 ? 0 : undefined, background: i === 0 ? COLORS.cardBg : 'transparent', padding: '6px 10px', color: tint || COLORS.text, fontWeight: i === 0 ? '600' : '400', whiteSpace: 'nowrap', borderBottom: `0.5px solid ${COLORS.border}` }}>
+                          {col.k === 'name' ? `${row.name}${row.locked ? ' 🔒' : ''}` : (col.fmt ? col.fmt(raw) : raw)}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Section>
+
+      {/* Section 15 — Audit history */}
+      <Section title="15. Audit history" expanded={expanded.audit} onToggle={() => toggle('audit')}>
+        {auditEntries.length === 0 ? (
+          <div style={{ fontSize: '12px', color: COLORS.textFaint }}>No changes recorded yet.</div>
+        ) : (
+          <>
+            {auditVisible.map(entry => (
+              <div key={entry.id} style={{ padding: '6px 0', borderBottom: `0.5px solid ${COLORS.border}`, fontSize: '11px', color: COLORS.textMuted }}>
+                <span style={{ color: COLORS.textFaint }}>{new Date(entry.at).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
+                {' — '}<strong style={{ color: COLORS.text }}>{entry.user}</strong>{' changed '}
+                <span style={{ color: COLORS.accent }}>{entry.field}</span>
+                {entry.reason ? ` (${entry.reason})` : ''}
+              </div>
+            ))}
+            {auditEntries.length > auditVisible.length && (
+              <button onClick={() => setAuditPage(p => p + 1)} style={{ marginTop: '8px', fontSize: '11px', color: COLORS.accent, background: 'transparent', border: `1px solid ${COLORS.accent}`, borderRadius: '6px', padding: '5px 10px', minHeight: '32px', cursor: 'pointer' }}>Show more</button>
+            )}
+          </>
+        )}
       </Section>
     </div>
   );

@@ -77,4 +77,43 @@ acceptance list → commit `BRR Analysis phase 2: scenario engine + comparison` 
 status table + notes below.
 
 ---
-_Post-phase notes:_
+_Post-phase notes (shipped 2026-07-14):_
+
+- `worker/brrCalc.js`: `seedBrr` now seeds all four scenarios (concrete Conservative/Optimistic
+  offsets, Expected/Custom as plain clones); added `migrateBrrShape`, `createScenario`,
+  `duplicateScenario`, `renameScenario`, `deleteScenario`, `setActiveScenario`, `toggleLock`,
+  `toggleArchive`, `setScenarioOverride` (deep-sparse merge, refuses when locked), `appendAudit`
+  (cap 200). `resolveScenario` now also resolves `priceBasis: 'maxBrrBid'` to guide price with a
+  `sources.hammerNote` (solver arrives phase 5). 13 new suite-12 tests, 90 total across
+  `npm test`, all green.
+- `src/views/BrrAnalysis.jsx`: scenario picker (select on desktop, horizontal chip row on
+  mobile) in the sticky dashboard header; scenario manager list in section 1 (rename inline,
+  duplicate, lock/unlock, archive, delete-with-confirm, includeInComparison checkbox); every
+  assumption write now funnels through `setScenarioOverride`, with a `window.confirm` prompt to
+  unlock-and-edit when the active scenario is locked; new section 8 (scenario comparison table,
+  `crm-table-wrap` + sticky first column, best/worst tinting on cash-left-in/cash-flow/
+  recycled%/equity/yields) and section 15 (audit history, newest first, 20-per-page "show more").
+- `src/App.jsx`: added `brr: '🧮'` to `AICONS`; added one `logBrrTimeline(nextBrr, detail)`
+  helper next to the panel that folds the `brr` field write and `withActivity()` into a single
+  `setCurrentViewProperty`/`setProperties` call — calling `updateFieldInView('brr', …)` and a
+  separate timeline-log update in the same handler would both read the same stale
+  `currentViewProperty` closure and the second call would silently clobber the first. Coarse
+  events (scenario created/duplicated/deleted/locked/unlocked) go through `logTimeline`; quiet
+  per-field overrides and rename/archive go through `updateFieldInView` alone (still recorded in
+  `brr.audit`, just not surfaced on the property Timeline tab — a narrower reading of "coarse
+  events" than 01-data-model.md's full list, kept deliberately small for this phase).
+- Deviation from 01-data-model.md: did NOT implement the "reason REQUIRED" prompt gate on every
+  end-value/rent override — blocking every keystroke behind a mandatory `window.prompt` was too
+  disruptive for v1 UX. Overrides are still fully audited (field/prev/next) without a reason.
+  Flag to the user if they want reason-gating added in a later phase.
+- Browser-verified live: migration path confirmed on the phase-1 property (single 'Expected'
+  scenario with a user-set rent override survived the upgrade to 4 scenarios unchanged);
+  switching scenarios recomputes every KPI; lock blocks edits via confirm, unlock proceeds;
+  create/duplicate/rename/delete all verified and cleaned up; comparison table matches the
+  per-scenario dashboard exactly; audit history entries appear newest-first; coarse events
+  (scenario locked) appear on the Timeline tab with the 🧮 icon; no horizontal overflow at
+  375/768/1280px with the comparison table expanded.
+- Browser-tool gotcha (same as phase 1): drove all interaction via `javascript_tool` dispatching
+  native `input`/`change` events and stubbing `window.confirm`/`window.alert` — the Browser
+  pane's native `confirm()` dialog has no user present to click it, so tests that exercise the
+  lock-edit or delete confirm flows must stub it first (`window.confirm = () => true`).

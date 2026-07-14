@@ -8,6 +8,17 @@ import {
   normaliseOpexItem,
   computeBrr,
   seedBrr,
+  migrateBrrShape,
+  resolveScenario,
+  createScenario,
+  duplicateScenario,
+  renameScenario,
+  deleteScenario,
+  setActiveScenario,
+  toggleLock,
+  toggleArchive,
+  setScenarioOverride,
+  appendAudit,
   DEFAULT_BRR_RULES,
 } from './brrCalc.js';
 
@@ -373,12 +384,13 @@ test('Refurb % of value, project cost % of value', () => {
 
 // --- Shape / seed sanity (supports the view component, not a numbered suite) --
 
-test('seedBrr: produces the v1 shape with one expected scenario', () => {
+test('seedBrr: produces the v1 shape with four seeded scenarios', () => {
   const brr = seedBrr({ guidePrice: 100000 });
   assert.equal(brr.shapeVersion, 1);
-  assert.equal(brr.scenarios.length, 1);
-  assert.equal(brr.scenarios[0].type, 'expected');
-  assert.equal(brr.activeScenarioId, brr.scenarios[0].id);
+  assert.equal(brr.scenarios.length, 4);
+  assert.deepEqual(brr.scenarios.map(s => s.type).sort(), ['conservative', 'custom', 'expected', 'optimistic']);
+  const expected = brr.scenarios.find(s => s.type === 'expected');
+  assert.equal(brr.activeScenarioId, expected.id);
   assert.deepEqual(brr.rentalComps, []);
   assert.deepEqual(brr.snapshots, []);
   assert.deepEqual(brr.audit, []);
@@ -387,4 +399,188 @@ test('seedBrr: produces the v1 shape with one expected scenario', () => {
 
 test('BRR_CALC_VERSION is exported', () => {
   assert.equal(BRR_CALC_VERSION, 1);
+});
+
+// --- Suite 12 — Scenario engine, migration, audit --------------------------
+
+test('seedBrr: seeds concrete Conservative/Optimistic offsets, Expected/Custom as plain clones', () => {
+  const brr = seedBrr({ guidePrice: 100000 });
+  const cons = brr.scenarios.find(s => s.type === 'conservative');
+  const opt = brr.scenarios.find(s => s.type === 'optimistic');
+  const exp = brr.scenarios.find(s => s.type === 'expected');
+  const custom = brr.scenarios.find(s => s.type === 'custom');
+
+  assert.equal(cons.overrides.endValue.selected, 'conservative');
+  assert.equal(cons.overrides.rent.selected, 'conservative');
+  assert.equal(cons.overrides.mortgage.ltvPct, 75 - 5);
+  assert.equal(cons.overrides.mortgage.ratePct, 5.5 + 1);
+  assert.equal(cons.overrides.opex.voidPct, 8 + 4);
+
+  assert.equal(opt.overrides.endValue.selected, 'optimistic');
+  assert.equal(opt.overrides.rent.selected, 'optimistic');
+  assert.equal(opt.overrides.mortgage.ratePct, 5.5 - 0.5);
+  assert.equal(opt.overrides.opex.voidPct, 8 - 3);
+  assert.equal(opt.overrides.mortgage.ltvPct, undefined);
+
+  assert.deepEqual(exp.overrides, {});
+  assert.deepEqual(custom.overrides, {});
+});
+
+test('resolveScenario precedence: scenario override > brr default > manual > report', () => {
+  const property = { guidePrice: 100000, dealCalc: { legalFees: 1000 }, analytics: { gdvBase: 150000 } };
+  const brr = seedBrr(property);
+  const expected = brr.scenarios.find(s => s.type === 'expected');
+  const withOverride = { ...expected, overrides: { legalFees: 2000 } };
+  const { inputs, sources } = resolveScenario(property, brr, withOverride);
+  assert.equal(inputs.legalFees, 2000);
+  assert.equal(sources.legalFees, 'scenario');
+
+  const noOverride = { ...expected, overrides: {} };
+  const resolvedNoOverride = resolveScenario(property, brr, noOverride);
+  assert.equal(resolvedNoOverride.inputs.legalFees, 1000);
+  assert.equal(resolvedNoOverride.sources.legalFees, 'manual');
+});
+
+test('Editing scenario A leaves scenario B resolved inputs unchanged (isolation)', () => {
+  const property = { guidePrice: 100000, analytics: { gdvBase: 150000 } };
+  const brr = seedBrr(property);
+  const [scenarioA, scenarioB] = brr.scenarios;
+  Object.freeze(scenarioB);
+  Object.freeze(scenarioB.overrides);
+
+  const { brr: nextBrr, error } = setScenarioOverride(brr, scenarioA.id, 'refurbBudget', 40000);
+  assert.equal(error, null);
+
+  const resolvedB = resolveScenario(property, nextBrr, scenarioB);
+  assert.equal(resolvedB.inputs.refurbBudget, 0);
+});
+
+test('Shared property change flows into scenarios without an override; overridden scenario unaffected', () => {
+  const property = { guidePrice: 100000, dealCalc: { refurbCost: 20000 } };
+  const brr = seedBrr(property);
+  const expected = brr.scenarios.find(s => s.type === 'expected');
+  const { brr: overriddenBrr } = setScenarioOverride(brr, expected.id, 'refurbBudget', 99999);
+  const overriddenScenario = overriddenBrr.scenarios.find(s => s.id === expected.id);
+
+  const updatedProperty = { ...property, dealCalc: { refurbCost: 30000 } };
+  const conservative = brr.scenarios.find(s => s.type === 'conservative');
+  const resolvedConservative = resolveScenario(updatedProperty, brr, conservative);
+  assert.equal(resolvedConservative.inputs.refurbBudget, 30000);
+
+  const resolvedOverridden = resolveScenario(updatedProperty, overriddenBrr, overriddenScenario);
+  assert.equal(resolvedOverridden.inputs.refurbBudget, 99999);
+});
+
+test('setScenarioOverride refuses on a locked scenario', () => {
+  const property = { guidePrice: 100000 };
+  const brr = seedBrr(property);
+  const expected = brr.scenarios.find(s => s.type === 'expected');
+  const locked = toggleLock(brr, expected.id);
+  assert.ok(locked.scenarios.find(s => s.id === expected.id).locked);
+
+  const { brr: unchanged, error } = setScenarioOverride(locked, expected.id, 'refurbBudget', 1000);
+  assert.equal(error, 'Scenario is locked');
+  assert.deepEqual(unchanged, locked);
+});
+
+test('toggleLock unlocks and allows the edit to proceed', () => {
+  const brr = seedBrr({ guidePrice: 100000 });
+  const expected = brr.scenarios.find(s => s.type === 'expected');
+  const locked = toggleLock(brr, expected.id);
+  const unlocked = toggleLock(locked, expected.id);
+  assert.equal(unlocked.scenarios.find(s => s.id === expected.id).locked, false);
+  const { error } = setScenarioOverride(unlocked, expected.id, 'refurbBudget', 1000);
+  assert.equal(error, null);
+});
+
+test('migrateBrrShape: upgrades a phase-1 single-scenario brr to 4 scenarios, preserving the existing one', () => {
+  const now = new Date().toISOString();
+  const phase1Brr = {
+    shapeVersion: 1,
+    activeScenarioId: 'bsc_existing',
+    defaults: seedBrr({}).defaults,
+    scenarios: [{ id: 'bsc_existing', name: 'Expected', type: 'expected', priceBasis: 'guide', assumedHammerPrice: null, locked: false, archived: false, includeInComparison: true, createdAt: now, updatedAt: now, overrides: { refurbBudget: 12345 } }],
+    rentalComps: [], rentRecommendation: null, rules: DEFAULT_BRR_RULES, bidLadder: { startBid: null, endBid: null, increment: 1000 },
+    stress: {}, confirmed: null, snapshots: [], audit: [],
+  };
+  const migrated = migrateBrrShape(phase1Brr);
+  assert.equal(migrated.scenarios.length, 4);
+  const preserved = migrated.scenarios.find(s => s.id === 'bsc_existing');
+  assert.equal(preserved.overrides.refurbBudget, 12345);
+  assert.equal(migrated.activeScenarioId, 'bsc_existing');
+  assert.deepEqual(migrated.scenarios.map(s => s.type).sort(), ['conservative', 'custom', 'expected', 'optimistic']);
+
+  const idempotent = migrateBrrShape(migrated);
+  assert.equal(idempotent.scenarios.length, 4);
+});
+
+test('createScenario / duplicateScenario / renameScenario / deleteScenario', () => {
+  const brr = seedBrr({ guidePrice: 100000 });
+  const { brr: withNew, scenario: created } = createScenario(brr, 'custom', 'My Scenario');
+  assert.equal(withNew.scenarios.length, 5);
+  assert.equal(created.name, 'My Scenario');
+  assert.equal(created.overrides && Object.keys(created.overrides).length, 0);
+
+  const { brr: withDup, scenario: dup } = duplicateScenario(withNew, created.id);
+  assert.equal(withDup.scenarios.length, 6);
+  assert.equal(dup.name, 'My Scenario (copy)');
+  assert.notEqual(dup.id, created.id);
+
+  const { brr: renamed, error: renameErr } = renameScenario(withDup, dup.id, 'Renamed');
+  assert.equal(renameErr, null);
+  assert.equal(renamed.scenarios.find(s => s.id === dup.id).name, 'Renamed');
+
+  const { brr: afterDelete, error: deleteErr } = deleteScenario(renamed, dup.id);
+  assert.equal(deleteErr, null);
+  assert.equal(afterDelete.scenarios.length, 5);
+});
+
+test('deleteScenario refuses to delete the last remaining scenario', () => {
+  let brr = seedBrr({ guidePrice: 100000 });
+  // Whittle down to one scenario first.
+  for (const s of brr.scenarios.slice(1)) {
+    brr = deleteScenario(brr, s.id).brr;
+  }
+  assert.equal(brr.scenarios.length, 1);
+  const { error } = deleteScenario(brr, brr.scenarios[0].id);
+  assert.equal(error, 'Cannot delete the last remaining scenario');
+});
+
+test('deleteScenario reassigns activeScenarioId when the active scenario is removed', () => {
+  const brr = seedBrr({ guidePrice: 100000 });
+  const expected = brr.scenarios.find(s => s.type === 'expected');
+  assert.equal(brr.activeScenarioId, expected.id);
+  const { brr: next } = deleteScenario(brr, expected.id);
+  assert.notEqual(next.activeScenarioId, expected.id);
+  assert.ok(next.scenarios.some(s => s.id === next.activeScenarioId));
+});
+
+test('setActiveScenario switches the active id; toggleArchive falls back active off an archived scenario', () => {
+  const brr = seedBrr({ guidePrice: 100000 });
+  const conservative = brr.scenarios.find(s => s.type === 'conservative');
+  const switched = setActiveScenario(brr, conservative.id);
+  assert.equal(switched.activeScenarioId, conservative.id);
+
+  const archived = toggleArchive(switched, conservative.id);
+  assert.ok(archived.scenarios.find(s => s.id === conservative.id).archived);
+  assert.notEqual(archived.activeScenarioId, conservative.id);
+});
+
+test('appendAudit caps at 200 entries, newest first', () => {
+  let brr = seedBrr({ guidePrice: 100000 });
+  for (let i = 0; i < 210; i++) {
+    brr = appendAudit(brr, { at: new Date().toISOString(), user: 'Test', scenarioId: null, field: 'x', prev: i, next: i + 1, reason: null });
+  }
+  assert.equal(brr.audit.length, 200);
+  assert.equal(brr.audit[0].next, 210);
+});
+
+test('resolveScenario: maxBrrBid priceBasis resolves to guide price with a note (solver arrives phase 5)', () => {
+  const property = { guidePrice: 80000 };
+  const brr = seedBrr(property);
+  const expected = brr.scenarios.find(s => s.type === 'expected');
+  const scenario = { ...expected, priceBasis: 'maxBrrBid' };
+  const { inputs, sources } = resolveScenario(property, brr, scenario);
+  assert.equal(inputs.hammer, 80000);
+  assert.ok(sources.hammerNote);
 });

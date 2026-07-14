@@ -41,7 +41,7 @@ canvas in this CRM. Written 2026-07-14. Planning only — no code exists yet.
 | Phase | Scope | Status |
 |---|---|---|
 | 1 | Core BRR calculator + tab (`worker/brrCalc.js`, `src/views/BrrAnalysis.jsx`) | shipped 2026-07-14 |
-| 2 | Flexible scenarios (create/duplicate/lock/compare) | not started |
+| 2 | Flexible scenarios (create/duplicate/lock/compare) | shipped 2026-07-14 |
 | 3 | Rental-comparables module | not started |
 | 4 | Sensitivity + stress testing | not started |
 | 5 | Investment rules + maximum-bid solver | not started |

@@ -129,15 +129,29 @@ function uuid() {
   return (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-/**
- * Build the initial property.brr shape (phase 1: one 'expected' scenario, empty
- * rentalComps/rules seeded from DEFAULT_BRR_RULES/snapshots/audit).
- * @param {object} property
- */
-export function seedBrr(property) {
-  const now = new Date().toISOString();
-  const seed = SEED_SCENARIOS[1]; // 'expected' — phase 1 seeds a single scenario
-  const scenario = {
+/** Seeding writes the offsets as concrete override values, never formulas (01-data-model.md). */
+function buildSeedOverrides(seed, mortgageDefaults) {
+  if (seed.type === 'conservative') {
+    return {
+      endValue: { selected: 'conservative' },
+      rent: { selected: 'conservative' },
+      mortgage: { ltvPct: pf(mortgageDefaults.ltvPct) + seed.ltvDelta, ratePct: pf(mortgageDefaults.ratePct) + seed.rateDelta },
+      opex: { voidPct: DEFAULT_OPEX.voidPct + seed.voidDelta },
+    };
+  }
+  if (seed.type === 'optimistic') {
+    return {
+      endValue: { selected: 'optimistic' },
+      rent: { selected: 'optimistic' },
+      mortgage: { ratePct: pf(mortgageDefaults.ratePct) + seed.rateDelta },
+      opex: { voidPct: DEFAULT_OPEX.voidPct + seed.voidDelta },
+    };
+  }
+  return {}; // 'expected' and 'custom' start as plain clones of the BRR defaults
+}
+
+function buildScenario(seed, mortgageDefaults, now) {
+  return {
     id: `bsc_${uuid()}`,
     name: seed.name,
     type: seed.type,
@@ -148,18 +162,30 @@ export function seedBrr(property) {
     includeInComparison: true,
     createdAt: now,
     updatedAt: now,
-    overrides: {},
+    overrides: buildSeedOverrides(seed, mortgageDefaults),
   };
+}
+
+/**
+ * Build the initial property.brr shape: four seeded scenarios (Conservative,
+ * Expected, Optimistic, Custom), empty rentalComps/rules seeded from
+ * DEFAULT_BRR_RULES/snapshots/audit.
+ * @param {object} property
+ */
+export function seedBrr(property) {
+  const now = new Date().toISOString();
+  const scenarios = SEED_SCENARIOS.map(seed => buildScenario(seed, DEFAULT_MORTGAGE, now));
+  const expected = scenarios.find(s => s.type === 'expected');
   return {
     shapeVersion: 1,
-    activeScenarioId: scenario.id,
+    activeScenarioId: expected.id,
     defaults: {
       endValue: { conservative: null, expected: null, optimistic: null, custom: null, selected: 'expected', confidence: null, overrideReason: null, notes: null },
       mortgage: { ...DEFAULT_MORTGAGE },
       rent: { conservative: null, expected: null, optimistic: null, custom: null, selected: 'expected', confidence: null, overrideReason: null, notes: null },
       opex: { ...DEFAULT_OPEX },
     },
-    scenarios: [scenario],
+    scenarios,
     rentalComps: [],
     rentRecommendation: null,
     rules: DEFAULT_BRR_RULES.map(r => ({ ...r })),
@@ -169,6 +195,126 @@ export function seedBrr(property) {
     snapshots: [],
     audit: [],
   };
+}
+
+/**
+ * Upgrade a phase-1 single-scenario `property.brr` (or any object missing
+ * seeded scenario types) to carry all four seeded types, without touching or
+ * losing any existing scenario's overrides/id/audit history.
+ * @param {object} brr
+ */
+export function migrateBrrShape(brr) {
+  if (!brr || !Array.isArray(brr.scenarios)) return brr;
+  const existingTypes = new Set(brr.scenarios.map(s => s.type));
+  const missing = SEED_SCENARIOS.filter(seed => !existingTypes.has(seed.type));
+  if (missing.length === 0) return brr;
+  const now = new Date().toISOString();
+  const mortgageDefaults = (brr.defaults && brr.defaults.mortgage) || DEFAULT_MORTGAGE;
+  const added = missing.map(seed => buildScenario(seed, mortgageDefaults, now));
+  return { ...brr, scenarios: [...brr.scenarios, ...added] };
+}
+
+function deepMergeOverride(base, patch) {
+  if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return patch;
+  const out = { ...(base && typeof base === 'object' ? base : {}) };
+  for (const key of Object.keys(patch)) {
+    out[key] = deepMergeOverride(out[key], patch[key]);
+  }
+  return out;
+}
+
+function findScenario(brr, id) {
+  return (brr.scenarios || []).find(s => s.id === id) || null;
+}
+
+/**
+ * Create a new scenario (default type 'custom', empty overrides).
+ * @returns {{ brr: object, scenario: object }}
+ */
+export function createScenario(brr, type = 'custom', name) {
+  const now = new Date().toISOString();
+  const sameType = brr.scenarios.filter(s => s.type === type).length;
+  const label = name || `${type.charAt(0).toUpperCase()}${type.slice(1)}${sameType ? ` ${sameType + 1}` : ''}`;
+  const scenario = { id: `bsc_${uuid()}`, name: label, type, priceBasis: 'guide', assumedHammerPrice: null, locked: false, archived: false, includeInComparison: true, createdAt: now, updatedAt: now, overrides: {} };
+  return { brr: { ...brr, scenarios: [...brr.scenarios, scenario] }, scenario };
+}
+
+/**
+ * Duplicate an existing scenario (deep-copy overrides, new id, unlocked).
+ * @returns {{ brr: object, scenario: object|null, error: string|null }}
+ */
+export function duplicateScenario(brr, id) {
+  const src = findScenario(brr, id);
+  if (!src) return { brr, scenario: null, error: 'Scenario not found' };
+  const now = new Date().toISOString();
+  const scenario = { ...src, id: `bsc_${uuid()}`, name: `${src.name} (copy)`, locked: false, createdAt: now, updatedAt: now, overrides: JSON.parse(JSON.stringify(src.overrides || {})) };
+  return { brr: { ...brr, scenarios: [...brr.scenarios, scenario] }, scenario, error: null };
+}
+
+/** @returns {{ brr: object, error: string|null }} */
+export function renameScenario(brr, id, name) {
+  const scenario = findScenario(brr, id);
+  if (!scenario) return { brr, error: 'Scenario not found' };
+  if (scenario.locked) return { brr, error: 'Scenario is locked' };
+  const nextScenarios = brr.scenarios.map(s => s.id === id ? { ...s, name, updatedAt: new Date().toISOString() } : s);
+  return { brr: { ...brr, scenarios: nextScenarios }, error: null };
+}
+
+/** Refuses to delete the last remaining scenario; reassigns active if needed. */
+export function deleteScenario(brr, id) {
+  if (brr.scenarios.length <= 1) return { brr, error: 'Cannot delete the last remaining scenario' };
+  const nextScenarios = brr.scenarios.filter(s => s.id !== id);
+  let activeScenarioId = brr.activeScenarioId;
+  if (activeScenarioId === id) activeScenarioId = nextScenarios[0].id;
+  return { brr: { ...brr, scenarios: nextScenarios, activeScenarioId }, error: null };
+}
+
+export function setActiveScenario(brr, id) {
+  if (!findScenario(brr, id)) return brr;
+  return { ...brr, activeScenarioId: id };
+}
+
+export function toggleLock(brr, id) {
+  const nextScenarios = brr.scenarios.map(s => s.id === id ? { ...s, locked: !s.locked, updatedAt: new Date().toISOString() } : s);
+  return { ...brr, scenarios: nextScenarios };
+}
+
+/** Archiving the active scenario falls back the active id to the first non-archived one. */
+export function toggleArchive(brr, id) {
+  const scenario = findScenario(brr, id);
+  if (!scenario) return brr;
+  const archived = !scenario.archived;
+  const nextScenarios = brr.scenarios.map(s => s.id === id ? { ...s, archived, updatedAt: new Date().toISOString() } : s);
+  let activeScenarioId = brr.activeScenarioId;
+  if (archived && activeScenarioId === id) {
+    const fallback = nextScenarios.find(s => !s.archived);
+    if (fallback) activeScenarioId = fallback.id;
+  }
+  return { ...brr, scenarios: nextScenarios, activeScenarioId };
+}
+
+/**
+ * Deep-sparse merge a value into a scenario's overrides at a dot-notation path
+ * (e.g. 'mortgage.ltvPct' or 'refurbBudget'). Refuses when the scenario is locked.
+ * @returns {{ brr: object, error: string|null }}
+ */
+export function setScenarioOverride(brr, id, path, value) {
+  const scenario = findScenario(brr, id);
+  if (!scenario) return { brr, error: 'Scenario not found' };
+  if (scenario.locked) return { brr, error: 'Scenario is locked' };
+  const keys = path.split('.');
+  const patch = keys.reduceRight((acc, key) => ({ [key]: acc }), value);
+  const nextOverrides = deepMergeOverride(scenario.overrides, patch);
+  const nextScenario = { ...scenario, overrides: nextOverrides, updatedAt: new Date().toISOString() };
+  const nextScenarios = brr.scenarios.map(s => s.id === id ? nextScenario : s);
+  return { brr: { ...brr, scenarios: nextScenarios }, error: null };
+}
+
+/** Appends a BrrAuditEntry (newest first), capped at 200. `entry.at` must be supplied by the caller. */
+export function appendAudit(brr, entry) {
+  const full = { id: `baud_${uuid()}`, ...entry };
+  const audit = [full, ...(brr.audit || [])].slice(0, 200);
+  return { ...brr, audit };
 }
 
 /**
@@ -191,6 +337,11 @@ export function resolveScenario(property, brr, scenario) {
   if (scenario.assumedHammerPrice != null) {
     hammer = pf(scenario.assumedHammerPrice);
     sources.hammer = 'scenario';
+  } else if (scenario.priceBasis === 'maxBrrBid') {
+    // Solver arrives in phase 5 — accept the enum value now, resolve to guide with a note.
+    hammer = pf(property && property.guidePrice);
+    sources.hammer = 'listing';
+    sources.hammerNote = 'Max BRR bid solver not available until phase 5 — using guide price';
   } else {
     const basis = scenario.priceBasis;
     const basisMap = {

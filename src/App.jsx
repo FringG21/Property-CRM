@@ -3546,7 +3546,17 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
             const surveyJobs = currentViewProperty.surveyJobs || [];
             const latestJob = surveyJobs[surveyJobs.length - 1];
             const actLog = currentViewProperty.activityLog || [];
-            const AICONS = { created: '🆕', stage: '🔀', note: '📝', document: '📄', survey: '📋', intelligence: '🔍', bid: '🔨' };
+            const AICONS = { created: '🆕', stage: '🔀', note: '📝', document: '📄', survey: '📋', intelligence: '🔍', bid: '🔨', brr: '🧮' };
+            // BRR coarse timeline events need to land alongside the brr field write in ONE
+            // update (two separate updateFieldInView calls in the same handler would race on
+            // the stale currentViewProperty closure) — so BrrAnalysis hands us the complete
+            // next `brr` object and we fold it into the withActivity update ourselves.
+            const logBrrTimeline = (nextBrr, detail) => {
+              if (!currentViewProperty) return;
+              const updated = withActivity({ ...currentViewProperty, brr: nextBrr }, 'brr', detail);
+              setCurrentViewProperty(updated);
+              setProperties(properties.map(p => p.id === currentViewProperty.id ? updated : p));
+            };
             const propPostcode = currentViewProperty.postcode || extractPostcode(currentViewProperty.address || '') || extractPostcode(currentViewProperty.dealName || '');
             const propLotLink = lotLinkFor(currentViewProperty);
             const intel = currentViewProperty.intelligence || {};
@@ -5222,7 +5232,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                   )}
 
                   {propCanvasTab === 'brr' && (
-                    <BrrAnalysis property={currentViewProperty} updateFieldInView={updateFieldInView} addBid={addBid} isMobile={isMobile} isTablet={isTablet} userName={user.name || 'You'} />
+                    <BrrAnalysis property={currentViewProperty} updateFieldInView={updateFieldInView} addBid={addBid} logTimeline={logBrrTimeline} isMobile={isMobile} isTablet={isTablet} userName={user.name || 'You'} />
                   )}
 
                   {/* Documents — Documents tab */}
