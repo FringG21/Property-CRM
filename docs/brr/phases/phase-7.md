@@ -74,3 +74,51 @@ feature-complete; append a summary line to the project memory doc if asked.
 
 ---
 _Post-phase notes:_
+
+Shipped 2026-07-14. **BRR Analysis is now feature-complete (phases 1-7).** `worker/brrCalc.js`:
+`confirmHammer(brr, {hammerPrice, activeScenario, snapshot, solverResult, user, at})` (pure —
+has no `property` in scope, so the caller supplies the fully-computed snapshot payload;
+preserves every existing scenario/snapshot untouched, appends a `kind:'confirmed'` snapshot,
+creates+activates a locked-in `type:'actual'` scenario cloning the active scenario's
+overrides) and `varianceReport(preSnapshot, actualOutputs, actualVerdict)` (two-column Δ£/Δ%
+diff + a text-only verdict row). 8 new tests (171 total), including byte-identical
+preservation of pre-existing scenarios/snapshots and price-dependent recomputation at the
+confirmed price (`priceBasis:'confirmed'` already read `property.hammerPrice` since phase 1/2
+— no resolver change needed).
+
+`BrrAnalysis.jsx`: a "🏆 Property won — confirm hammer price" card auto-offered when
+`property.bidOutcome?.result === 'won'` or `property.hammerPrice` is already set but
+`brr.confirmed` isn't; Section 12 is replaced by a Forecast-vs-actual panel once confirmed
+(hammer vs target bid, hammer vs preserved max bid with W-OVERMAX, the variance table, and a
+"Post-completion actuals" quick-entry block that reuses the EXISTING rent/endValue/mortgage
+override inputs — no new field types, exactly as 06 specifies). Editing a historical
+(non-'actual') scenario after confirmation now prompts a confirm dialog first.
+
+**Two real engineering constraints worth flagging:**
+1. **Stale-closure limit on `property.hammerPrice` + `brr` writes.** `updateFieldInView` and
+   `logTimeline` (props from App.jsx) both spread over the same `currentViewProperty` closure
+   independently — calling both in one synchronous handler means the second call silently
+   drops the first's change (this is the same class of bug flagged in the phase-2 memory note
+   about `logBrrTimeline`, just hitting two DIFFERENT top-level fields instead of the same
+   one). Rather than touch App.jsx (out of this phase's file scope) to make it accept a
+   multi-field atomic update, "Confirm hammer price" is a two-click flow when
+   `property.hammerPrice` isn't set yet: click 1 sets `hammerPrice` alone and asks the user to
+   click again; click 2 (now that `property.hammerPrice` is populated) runs `confirmHammer` via
+   a single `logTimeline` call. When `property.hammerPrice` is already set, it's one click. If
+   this two-click UX is unwanted, the real fix is extending `updateFieldInView`/
+   `logBrrTimeline` in App.jsx to accept a multi-field patch — flag if that's wanted.
+2. **`confirmHammer` needs a fully pre-computed snapshot** (`{inputs, outputs, warnings,
+   verdict}`) passed in by the caller rather than deriving it from `property`, since the
+   documented signature `confirmHammer(brr, {...})` has no `property` param to run
+   `resolveScenario` with. The UI already has all four pieces computed for the dashboard, so
+   this costs nothing extra — noted here only because it's a deviation from a strictly
+   self-contained pure function.
+
+Regression check: **no changes were made to `src/App.jsx`** this phase (only read the three
+listed ranges) — the flip tab's `computeActuals`/Overview auction-result card are provably
+untouched by construction, not just by inspection.
+
+`npm test` (171/171) and `npm run build` verified; deployed live. Live browser walkthrough not
+done this session — same auth-wall reason as phases 3-6; this is the final phase, so a full
+end-to-end browser pass (all three widths, the flip-tab regression check, and the actual
+confirm-hammer flow) is still worth doing once you're logged in.

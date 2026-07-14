@@ -8,6 +8,7 @@ import {
   evaluateRules, deriveConfidences, solveMaxBid, computeWarnings, computeVerdict,
   DEFAULT_BRR_RULES, BRR_CALC_VERSION,
   buildBidLadder, BID_LADDER_INCREMENTS,
+  confirmHammer, varianceReport,
 } from '../../worker/brrCalc.js';
 
 const pf = v => parseFloat(v) || 0;
@@ -289,6 +290,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
   const [ladderEnd, setLadderEnd] = useState(null);
   const [ladderFullScreen, setLadderFullScreen] = useState(false);
   const [liveMode, setLiveMode] = useState(false);
+  const [confirmHammerDraft, setConfirmHammerDraft] = useState(null);
   const toggle = key => setExpanded(e => ({ ...e, [key]: !e[key] }));
 
   if (!property) return null;
@@ -313,7 +315,17 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
   // Every mutation funnels through exactly one App-level write per action:
   // logTimeline() for coarse scenario events (also lands on the Timeline tab),
   // updateFieldInView('brr', …) for quiet per-field edits.
+  // Once confirmed, pre-auction (non-'actual') scenarios are historical — warn before editing
+  // rather than silently letting the forecast drift after the fact (06 §Confirmed hammer price).
+  const confirmHistoricalEdit = () => {
+    if (brr.confirmed && scenario.type !== 'actual') {
+      return window.confirm('This is a historical pre-auction scenario — editing it won\'t affect your actual purchase. Duplicate it instead, or continue editing anyway?');
+    }
+    return true;
+  };
+
   const applyOverride = (path, value, opts = {}) => {
+    if (!confirmHistoricalEdit()) return;
     let workingBrr = brr;
     let sc = scenario;
     let timelineDetail = null;
@@ -338,6 +350,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
   };
 
   const applyScenarioField = (fields) => {
+    if (!confirmHistoricalEdit()) return;
     let workingBrr = brr;
     let sc = scenario;
     let timelineDetail = null;
@@ -602,6 +615,37 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
     logTimeline(nextBrr, `${kind === 'maxBid' ? 'Max-bid result' : 'Pre-auction review'} snapshot saved: ${scenario.name}`);
   };
 
+  // --- Confirmed hammer price & forecast vs actual (06-live-auction-and-confirmed.md) ----
+  const wonOrHammerSet = (property.bidOutcome && property.bidOutcome.result === 'won') || !!property.hammerPrice;
+  const showConfirmCard = !brr.confirmed && wonOrHammerSet;
+  const hammerMismatch = !!(brr.confirmed && property.hammerPrice != null && pf(property.hammerPrice) !== pf(brr.confirmed.hammerPrice));
+  const preSnapshot = brr.confirmed ? (brr.snapshots || []).find(s => s.id === brr.confirmed.preAuctionSnapshotId) : null;
+  const varianceRows = brr.confirmed ? varianceReport(preSnapshot, out, verdict) : [];
+  const targetBidVal = pf(property.analytics && property.analytics.targetBid);
+  const hammerVsTargetDelta = brr.confirmed && targetBidVal > 0 ? resolved.hammer - targetBidVal : null;
+  const hammerVsTargetPct = hammerVsTargetDelta != null && targetBidVal > 0 ? (hammerVsTargetDelta / targetBidVal) * 100 : null;
+  const preAuctionMaxBid = brr.confirmed ? brr.confirmed.preAuctionMaxBid : null;
+  const hammerVsMaxDelta = brr.confirmed && preAuctionMaxBid != null ? resolved.hammer - preAuctionMaxBid : null;
+  const overMax = hammerVsMaxDelta != null && hammerVsMaxDelta > 0;
+
+  const doConfirmHammer = () => {
+    const price = pf(confirmHammerDraft != null ? confirmHammerDraft : property.hammerPrice) || resolved.hammer;
+    if (!(price > 0)) { window.alert('Enter a hammer price to confirm.'); return; }
+    if (!property.hammerPrice) {
+      // Two-step to avoid a stale-closure clobber: updateFieldInView('hammerPrice',…) and
+      // logTimeline(nextBrr,…) both read the same currentViewProperty snapshot in App.jsx —
+      // calling both in one handler would silently drop one write. Setting hammerPrice first
+      // and asking for a second click lets the property prop refresh in between.
+      updateFieldInView('hammerPrice', price);
+      window.alert('Hammer price set on the property. Click "Confirm hammer price" again to lock in the actual-purchase scenario.');
+      return;
+    }
+    const at = nowIso();
+    const snapshotPayload = { inputs: resolved, outputs: out, warnings, verdict };
+    const nextBrr = confirmHammer(brr, { hammerPrice: price, activeScenario: scenario, snapshot: snapshotPayload, solverResult: maxBidResult, user: userName || 'You', at });
+    logTimeline(nextBrr, `Hammer price confirmed at ${fmtGbp(price)} — actual-purchase scenario created`);
+  };
+
   // --- Investment rules (section 11) editing ----------------------------------
   const patchRule = (key, patch) => {
     const before = brr.rules.find(r => r.key === key);
@@ -759,6 +803,13 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
         {blocked && (
           <div style={{ fontSize: '12px', color: COLORS.warnText, background: '#3a2a06', border: '0.5px solid #d97706', borderRadius: '6px', padding: '8px 10px', marginBottom: '12px' }}>
             No hammer price set — set a guide price or an assumed hammer to calculate.
+          </div>
+        )}
+        {showConfirmCard && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', fontSize: '12px', color: '#4ade80', background: '#052e16', border: '0.5px solid #059669', borderRadius: '6px', padding: '10px', marginBottom: '12px' }}>
+            <span>🏆 Property won — confirm the hammer price to lock in the actual-purchase scenario.</span>
+            <NumInput value={confirmHammerDraft != null ? confirmHammerDraft : property.hammerPrice} onChange={setConfirmHammerDraft} width="110px" />
+            <button onClick={doConfirmHammer} style={{ fontSize: '11px', fontWeight: '600', color: '#fff', background: COLORS.good, border: 'none', borderRadius: '6px', padding: '6px 12px', minHeight: '32px', cursor: 'pointer' }}>Confirm hammer price</button>
           </div>
         )}
         {cautionPlusWarnings.length > 0 && (
@@ -1356,8 +1407,59 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
         </div>
       </Section>
 
-      {/* Section 12 — Maximum-bid calculator */}
-      <Section title="12. Maximum-bid calculator" expanded={expanded.maxbid} onToggle={() => toggle('maxbid')}>
+      {/* Section 12 — Maximum-bid calculator / Forecast vs actual (once confirmed) */}
+      <Section title={brr.confirmed ? '12. Forecast vs actual' : '12. Maximum-bid calculator'} expanded={expanded.maxbid} onToggle={() => toggle('maxbid')}>
+        {brr.confirmed ? (
+          <>
+            {hammerMismatch && (
+              <div style={{ fontSize: '12px', color: COLORS.warnText, background: '#3a2a06', border: '0.5px solid #d97706', borderRadius: '6px', padding: '8px 10px', marginBottom: '12px' }}>
+                ⚠ Confirmed at {fmtGbp(brr.confirmed.hammerPrice)}, but the property's hammer price is {fmtGbp(pf(property.hammerPrice))} — not overwritten. Reconcile manually if this is wrong.
+              </div>
+            )}
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '8px', marginBottom: '12px' }}>
+              <KpiTile label="Hammer vs target bid" value={hammerVsTargetDelta == null ? '—' : `${hammerVsTargetDelta >= 0 ? '+' : ''}${fmtGbp(hammerVsTargetDelta)} (${hammerVsTargetPct.toFixed(1)}%)`} valueColor={hammerVsTargetDelta != null ? (hammerVsTargetDelta > 0 ? COLORS.warn : COLORS.good) : undefined} isMobile={isMobile} />
+              <KpiTile label="Hammer vs preserved max bid" value={preAuctionMaxBid == null ? '—' : `${hammerVsMaxDelta >= 0 ? '+' : ''}${fmtGbp(hammerVsMaxDelta)}`} valueColor={preAuctionMaxBid != null ? (overMax ? COLORS.bad : COLORS.good) : undefined} isMobile={isMobile} />
+            </div>
+            {overMax && (
+              <div style={{ fontSize: '12px', color: COLORS.bad, marginBottom: '12px' }}>⚠ W-OVERMAX — confirmed hammer exceeds your preserved pre-auction max bid ({fmtGbp(preAuctionMaxBid)}) by {fmtGbp(hammerVsMaxDelta)}.</div>
+            )}
+            <div className="crm-table-wrap" style={{ overflowX: 'auto', maxWidth: '100%', marginBottom: '14px' }}>
+              <table style={{ borderCollapse: 'collapse', fontSize: '11px', minWidth: '100%' }}>
+                <thead>
+                  <tr>
+                    {['Metric', 'Forecast', 'Actual', 'Δ'].map(h => <th key={h} style={{ textAlign: 'left', padding: '6px 8px', color: COLORS.textFaint, textTransform: 'uppercase', fontSize: '9px', letterSpacing: '.04em', borderBottom: `1px solid ${COLORS.borderLight}` }}>{h}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {varianceRows.map(r => (
+                    <tr key={r.key}>
+                      <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, color: COLORS.textMuted }}>{r.label}</td>
+                      <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, color: COLORS.text }}>{r.unit === 'text' ? (r.forecast || '—') : r.unit === 'pct' ? fmtPct(r.forecast) : fmtGbp(r.forecast)}</td>
+                      <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, color: COLORS.text, fontWeight: '600' }}>{r.unit === 'text' ? (r.actual || '—') : r.unit === 'pct' ? fmtPct(r.actual) : fmtGbp(r.actual)}</td>
+                      <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, color: r.deltaAbs == null ? COLORS.textFaint : r.deltaAbs > 0 ? COLORS.good : r.deltaAbs < 0 ? COLORS.bad : COLORS.textMuted }}>
+                        {r.deltaAbs == null ? '—' : `${r.deltaAbs >= 0 ? '+' : ''}${r.unit === 'pct' ? r.deltaAbs.toFixed(1) + '%' : fmtGbp(r.deltaAbs)}`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            <div style={{ paddingTop: '12px', borderTop: `0.5px solid ${COLORS.border}` }}>
+              <div style={{ fontSize: '11px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.05em', color: COLORS.textFaint, marginBottom: '8px' }}>Post-completion actuals</div>
+              <Row label="Actual rent achieved">
+                <NumInput value={resolved.rent.custom} onChange={v => patchDeepOverride('rent', { custom: v, selected: 'custom' })} />
+              </Row>
+              <Row label="Actual refinance valuation">
+                <NumInput value={resolved.endValue.custom} onChange={v => patchDeepOverride('endValue', { custom: v, selected: 'custom' })} />
+              </Row>
+              <Row label="Actual mortgage advance">
+                <NumInput value={resolved.mortgage.maxMortgageOverride} onChange={v => patchDeepOverride('mortgage', { maxMortgageOverride: v })} />
+              </Row>
+            </div>
+          </>
+        ) : (
+          <>
         <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginBottom: '12px' }}>
           <Row label="Min price to test">
             <NumInput value={solverMinPrice != null ? solverMinPrice : effectiveMinPrice} onChange={v => setSolverMinPrice(v)} />
@@ -1405,6 +1507,8 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
             )}
             <div style={{ fontSize: '11px', color: COLORS.textFaint, marginTop: '10px' }}>{maxBidResult.failReason}</div>
             <button onClick={() => saveSnapshot('maxBid')} style={{ marginTop: '10px', fontSize: '12px', fontWeight: '600', color: '#fff', background: COLORS.accent, border: 'none', borderRadius: '6px', padding: '8px 14px', minHeight: '44px', cursor: 'pointer' }}>Save result</button>
+          </>
+        )}
           </>
         )}
       </Section>

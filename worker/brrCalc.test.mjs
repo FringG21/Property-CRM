@@ -35,6 +35,8 @@ import {
   computeVerdict,
   buildBidLadder,
   BID_LADDER_INCREMENTS,
+  confirmHammer,
+  varianceReport,
 } from './brrCalc.js';
 
 // Baseline worked example (docs/brr/08-testing.md):
@@ -1297,4 +1299,103 @@ test('buildBidLadder: default start/end — round-down(guide×0.8, increment) to
 
 test('buildBidLadder: BID_LADDER_INCREMENTS exposes the four preset step sizes', () => {
   assert.deepEqual(BID_LADDER_INCREMENTS, [250, 500, 1000, 2500]);
+});
+
+// --- Suite 12b — Confirmed hammer price (confirmHammer, varianceReport) ----
+
+function makeConfirmCtx(brr, scenario, overrides = {}) {
+  const resolved = resolveScenario({ guidePrice: 90000 }, brr, scenario).inputs;
+  const outputs = computeBrr(resolved);
+  return {
+    hammerPrice: 95000, activeScenario: scenario,
+    snapshot: { inputs: resolved, outputs, warnings: [], verdict: { label: 'Viable BRR', explanation: 'x' } },
+    solverResult: { maxBid: 95000 }, user: 'Tester', at: '2026-07-14T12:00:00.000Z',
+    ...overrides,
+  };
+}
+
+test('confirmHammer: preserves every existing scenario and snapshot byte-identically', () => {
+  const { brr } = makeBrrFixture();
+  const scenario = brr.scenarios.find(s => s.type === 'expected');
+  const brrWithSnap = { ...brr, snapshots: [{ id: 'bsnap_pre', kind: 'review', outputs: { cashLeftIn: 5000 } }] };
+  const before = JSON.parse(JSON.stringify(brrWithSnap.scenarios));
+  const beforeSnap = JSON.parse(JSON.stringify(brrWithSnap.snapshots[0]));
+  const next = confirmHammer(brrWithSnap, makeConfirmCtx(brrWithSnap, scenario));
+  assert.deepEqual(next.scenarios.filter(s => s.type !== 'actual'), before);
+  assert.deepEqual(next.snapshots.find(s => s.id === 'bsnap_pre'), beforeSnap);
+});
+
+test('confirmHammer: creates and activates a locked-in "actual" scenario with priceBasis confirmed', () => {
+  const { brr } = makeBrrFixture();
+  const scenario = brr.scenarios.find(s => s.type === 'expected');
+  const next = confirmHammer(brr, makeConfirmCtx(brr, scenario));
+  const actual = next.scenarios.find(s => s.type === 'actual');
+  assert.ok(actual);
+  assert.equal(actual.name, 'Actual purchase');
+  assert.equal(actual.priceBasis, 'confirmed');
+  assert.equal(actual.assumedHammerPrice, null);
+  assert.equal(actual.locked, false);
+  assert.equal(next.activeScenarioId, actual.id);
+});
+
+test('confirmHammer: writes brr.confirmed with the preserved max bid and the new snapshot id', () => {
+  const { brr } = makeBrrFixture();
+  const scenario = brr.scenarios.find(s => s.type === 'expected');
+  const next = confirmHammer(brr, makeConfirmCtx(brr, scenario));
+  assert.equal(next.confirmed.hammerPrice, 95000);
+  assert.equal(next.confirmed.preAuctionMaxBid, 95000);
+  const snap = next.snapshots.find(s => s.id === next.confirmed.preAuctionSnapshotId);
+  assert.ok(snap);
+  assert.equal(snap.kind, 'confirmed');
+  assert.equal(snap.scenarioId, scenario.id);
+});
+
+test('confirmHammer: appends an audit entry for the confirmation', () => {
+  const { brr } = makeBrrFixture();
+  const scenario = brr.scenarios.find(s => s.type === 'expected');
+  const next = confirmHammer(brr, makeConfirmCtx(brr, scenario));
+  assert.equal(next.audit[0].field, 'confirmed');
+  assert.equal(next.audit[0].next, 95000);
+});
+
+test('confirmHammer: the actual scenario resolves its hammer from property.hammerPrice (priceBasis=confirmed)', () => {
+  const { brr } = makeBrrFixture();
+  const scenario = brr.scenarios.find(s => s.type === 'expected');
+  const next = confirmHammer(brr, makeConfirmCtx(brr, scenario));
+  const actual = next.scenarios.find(s => s.type === 'actual');
+  const property = { guidePrice: 90000, hammerPrice: 95000, refurbLevel: 'medium', analytics: { refurbMedium: 25000, gdvBase: 150000 } };
+  const { inputs } = resolveScenario(property, next, actual);
+  assert.equal(inputs.hammer, 95000);
+  const out = computeBrr(inputs);
+  assert.ok(out.totalCashInvested > 95000); // price-dependent costs (SDLT etc.) recomputed at the confirmed price
+});
+
+test('confirmHammer: actual scenario clones the active scenario\'s overrides (not a blank slate)', () => {
+  const { brr: baseBrr } = makeBrrFixture();
+  const scenario = { ...baseBrr.scenarios.find(s => s.type === 'expected'), overrides: { refurbBudget: 30000 } };
+  const brr = { ...baseBrr, scenarios: baseBrr.scenarios.map(s => s.id === scenario.id ? scenario : s) };
+  const next = confirmHammer(brr, makeConfirmCtx(brr, scenario));
+  const actual = next.scenarios.find(s => s.type === 'actual');
+  assert.equal(actual.overrides.refurbBudget, 30000);
+});
+
+test('varianceReport: computes Δ£ and Δ% per row, and a text-only verdict row', () => {
+  const preSnapshot = { outputs: { totalCashInvested: 100000, finalMortgage: 80000, netCashReturned: 80000, cashLeftIn: 20000, capitalRecycledPct: 80, equityRetained: 40000, monthlyCashflow: 100 }, verdict: { label: 'Viable BRR' } };
+  const actualOutputs = { totalCashInvested: 110000, finalMortgage: 85000, netCashReturned: 85000, cashLeftIn: 25000, capitalRecycledPct: 77.3, equityRetained: 42000, monthlyCashflow: 80 };
+  const rows = varianceReport(preSnapshot, actualOutputs, { label: 'Marginal BRR' });
+  const cashLeftInRow = rows.find(r => r.key === 'cashLeftIn');
+  assert.equal(cashLeftInRow.forecast, 20000);
+  assert.equal(cashLeftInRow.actual, 25000);
+  assert.equal(cashLeftInRow.deltaAbs, 5000);
+  assert.equal(cashLeftInRow.deltaPct, 25);
+  const verdictRow = rows.find(r => r.key === 'verdict');
+  assert.equal(verdictRow.forecast, 'Viable BRR');
+  assert.equal(verdictRow.actual, 'Marginal BRR');
+  assert.equal(verdictRow.deltaAbs, null);
+});
+
+test('varianceReport: null preSnapshot -> every forecast is null, no throw', () => {
+  const rows = varianceReport(null, { totalCashInvested: 100000, cashLeftIn: 5000 }, { label: 'Viable BRR' });
+  assert.ok(rows.every(r => r.forecast == null));
+  assert.doesNotThrow(() => varianceReport(null, null, null));
 });

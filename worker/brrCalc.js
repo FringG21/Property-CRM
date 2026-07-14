@@ -1345,3 +1345,84 @@ export function buildBidLadder({ property, brr, scenario, rules, startBid, endBi
 
   return { rows, markers, start, end, increment, error: null };
 }
+
+// --- Confirmed hammer price & forecast-vs-actual (06 §Confirmed hammer price) ----
+
+/**
+ * Pure confirm-hammer transition (06 steps 1-3): records `brr.confirmed`, appends a
+ * `kind:'confirmed'` snapshot preserving the active scenario exactly as it stood, and
+ * creates+activates the locked-in 'actual' scenario (a clone of the active scenario's
+ * overrides, `priceBasis:'confirmed'`). Never touches pre-existing scenarios/snapshots.
+ * This function has no `property` in scope, so the caller supplies the fully-computed
+ * `snapshot` payload (inputs/outputs/warnings/verdict) for the active scenario at confirm
+ * time — everything `computeWarnings`/`computeVerdict` need that this function can't derive.
+ * @param {object} brr
+ * @param {{ hammerPrice: number, activeScenario: object,
+ *   snapshot: { inputs: object, outputs: object, warnings: object[], verdict: object },
+ *   solverResult?: { maxBid: number|null }, user: string, at: string }} ctx
+ */
+export function confirmHammer(brr, { hammerPrice, activeScenario, snapshot, solverResult, user, at }) {
+  const confirmedSnapshot = {
+    id: `bsnap_${uuid()}`, kind: 'confirmed', calcVersion: BRR_CALC_VERSION,
+    scenarioId: activeScenario.id, scenarioName: activeScenario.name, at, user,
+    inputs: snapshot.inputs, outputs: snapshot.outputs, maxBid: solverResult || null,
+    warnings: snapshot.warnings, verdict: snapshot.verdict,
+  };
+  const actualScenario = {
+    id: `bsc_${uuid()}`, name: 'Actual purchase', type: 'actual', priceBasis: 'confirmed',
+    assumedHammerPrice: null, locked: false, archived: false, includeInComparison: true,
+    createdAt: at, updatedAt: at,
+    overrides: JSON.parse(JSON.stringify(activeScenario.overrides || {})),
+  };
+  const nextBrr = {
+    ...brr,
+    scenarios: [...brr.scenarios, actualScenario],
+    activeScenarioId: actualScenario.id,
+    snapshots: [...(brr.snapshots || []), confirmedSnapshot],
+    confirmed: {
+      hammerPrice, confirmedAt: at, actualScenarioId: actualScenario.id,
+      preAuctionMaxBid: solverResult ? solverResult.maxBid : null,
+      preAuctionSnapshotId: confirmedSnapshot.id,
+    },
+  };
+  return appendAudit(nextBrr, { at, user, scenarioId: actualScenario.id, field: 'confirmed', prev: null, next: hammerPrice, reason: null });
+}
+
+const VARIANCE_ROWS = [
+  ['totalCashInvested', 'Total cash invested', 'gbp'],
+  ['finalMortgage', 'Mortgage', 'gbp'],
+  ['netCashReturned', 'Cash returned', 'gbp'],
+  ['cashLeftIn', 'Cash left in', 'gbp'],
+  ['capitalRecycledPct', 'Capital recycled %', 'pct'],
+  ['equityRetained', 'Equity retained', 'gbp'],
+  ['monthlyCashflow', 'Monthly cash flow', 'gbp'],
+];
+
+/**
+ * Two-column forecast-vs-actual diff (06 §Forecast-vs-actual panel). `preSnapshot` is the
+ * `kind:'confirmed'` BrrSnapshot (or null); `actualOutputs` is the current actual scenario's
+ * BrrOutputs; `actualVerdict` is optional (verdict row is text-only, no Δ).
+ * @param {object|null} preSnapshot
+ * @param {object} actualOutputs
+ * @param {object} [actualVerdict]
+ */
+export function varianceReport(preSnapshot, actualOutputs, actualVerdict) {
+  const pre = preSnapshot ? preSnapshot.outputs : null;
+  const rows = VARIANCE_ROWS.map(([key, label, unit]) => {
+    const forecast = pre ? pre[key] : null;
+    const actual = actualOutputs ? actualOutputs[key] : null;
+    let deltaAbs = null, deltaPct = null;
+    if (forecast != null && actual != null) {
+      deltaAbs = actual - forecast;
+      deltaPct = forecast !== 0 ? (deltaAbs / Math.abs(forecast)) * 100 : null;
+    }
+    return { key, label, unit, forecast, actual, deltaAbs, deltaPct };
+  });
+  rows.push({
+    key: 'verdict', label: 'Verdict', unit: 'text',
+    forecast: preSnapshot && preSnapshot.verdict ? preSnapshot.verdict.label : null,
+    actual: actualVerdict ? actualVerdict.label : null,
+    deltaAbs: null, deltaPct: null,
+  });
+  return rows;
+}
