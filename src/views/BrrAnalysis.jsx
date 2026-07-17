@@ -279,6 +279,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
   const [auditPage, setAuditPage] = useState(1);
   const [compDraft, setCompDraft] = useState(null);
   const [editingCompId, setEditingCompId] = useState(null);
+  const [rentFetchLoading, setRentFetchLoading] = useState(false);
   const [sensPresetKey, setSensPresetKey] = useState(SENSITIVITY_PRESETS[0].key);
   const [sensCustomRow, setSensCustomRow] = useState('hammer');
   const [sensCustomCol, setSensCustomCol] = useState('ratePct');
@@ -487,6 +488,45 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
     const nextRent = { ...brr.defaults.rent, conservative: rec.conservative, expected: rec.expected, optimistic: rec.optimistic };
     const nextBrr = stamp({ ...brr, defaults: { ...brr.defaults, rent: nextRent } }, { scenarioId: null, field: 'defaults.rent', prev: brr.defaults.rent, next: nextRent, reason: null });
     updateFieldInView('brr', nextBrr);
+  };
+
+  const fetchRentEstimate = async () => {
+    if (rentFetchLoading) return;
+    setRentFetchLoading(true);
+    try {
+      const token = localStorage.getItem('crm_session');
+      const res = await fetch('/api/ai/rental-estimate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({
+          postcode: property.postcode, address: property.address,
+          propertyType: property.propertyType, bedrooms: subject.beds,
+        }),
+      });
+      const data = await res.json();
+      if (!data.success) { window.alert(data.message || 'Rental estimate failed.'); return; }
+      if (!data.comps || data.comps.length === 0) { window.alert('No rental evidence found for this area — add comparables manually.'); return; }
+      const now = nowIso();
+      const seeded = data.comps.map((c, i) => ({
+        ...BLANK_COMP,
+        address: c.address || '',
+        monthlyRent: pf(c.monthlyRent),
+        beds: c.beds ?? null,
+        propertyType: c.propertyType || '',
+        evidenceType: 'asking',
+        source: c.source || 'Web search',
+        evidenceUrl: c.url || null,
+        included: true,
+        id: `rc_${Date.now()}_${i}_${Math.random().toString(16).slice(2)}`,
+        createdAt: now,
+        addedBy: 'web',
+      }));
+      recomputeAndCommit([...rentalComps, ...seeded], { scenarioId: null, field: 'rentalComps', prev: null, next: `+${seeded.length} web comp${seeded.length === 1 ? '' : 's'}`, reason: null });
+    } catch {
+      window.alert('Rental estimate failed — network error.');
+    } finally {
+      setRentFetchLoading(false);
+    }
   };
 
   const includedComps = rentalComps.filter(c => c.included !== false);
@@ -1050,7 +1090,10 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
         )}
 
         {!compDraft ? (
-          <button onClick={() => { setEditingCompId(null); setCompDraft({ ...BLANK_COMP }); }} style={{ fontSize: '11px', fontWeight: '600', color: COLORS.accent, background: 'transparent', border: `1px solid ${COLORS.accent}`, borderRadius: '6px', padding: '6px 10px', minHeight: '32px', cursor: 'pointer', marginBottom: '10px' }}>+ Add comparable</button>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '10px' }}>
+            <button onClick={() => { setEditingCompId(null); setCompDraft({ ...BLANK_COMP }); }} style={{ fontSize: '11px', fontWeight: '600', color: COLORS.accent, background: 'transparent', border: `1px solid ${COLORS.accent}`, borderRadius: '6px', padding: '6px 10px', minHeight: '32px', cursor: 'pointer' }}>+ Add comparable</button>
+            <button onClick={fetchRentEstimate} disabled={rentFetchLoading} title="Ground rent evidence in a live web search (Tavily) — asking rents only, never invented" style={{ fontSize: '11px', fontWeight: '600', color: COLORS.text, background: 'transparent', border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '6px 10px', minHeight: '32px', cursor: rentFetchLoading ? 'wait' : 'pointer' }}>{rentFetchLoading ? '⏳ Searching…' : '🌐 Fetch rent estimate (web)'}</button>
+          </div>
         ) : (
           <div style={{ border: `1px solid ${COLORS.accent}`, borderRadius: '8px', padding: '10px 12px', marginBottom: '12px', background: '#0b1120' }}>
             <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '8px' }}>
@@ -1142,7 +1185,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
                 <div key={c.id} style={{ border: `0.5px solid ${COLORS.border}`, borderRadius: '8px', padding: '10px', opacity: c.included === false ? 0.5 : 1 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '6px' }}>
                     <div>
-                      <div style={{ fontSize: '13px', fontWeight: '600', color: COLORS.text }}>{c.address}</div>
+                      <div style={{ fontSize: '13px', fontWeight: '600', color: COLORS.text }}>{c.address}{c.addedBy === 'web' && <span title={c.evidenceUrl || c.source} style={{ marginLeft: '6px', fontSize: '9px', padding: '1px 5px', borderRadius: '8px', background: '#1e3a8a', color: '#93c5fd' }}>web · asking</span>}</div>
                       <div style={{ fontSize: '11px', color: COLORS.textFaint }}>{c.postcode} · {EVIDENCE_TYPE_OPTIONS.find(([k]) => k === c.evidenceType)?.[1] || c.evidenceType}</div>
                     </div>
                     <div style={{ fontSize: '14px', fontWeight: '700', color: COLORS.text }}>{fmtGbp(pf(c.monthlyRent) + pf(c.adjustment))}</div>
@@ -1183,6 +1226,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
                     <tr key={c.id} style={{ opacity: c.included === false ? 0.5 : 1 }}>
                       <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, color: COLORS.text }}>
                         {c.address}
+                        {c.addedBy === 'web' && <span title={c.evidenceUrl || c.source} style={{ marginLeft: '6px', fontSize: '9px', padding: '1px 5px', borderRadius: '8px', background: '#1e3a8a', color: '#93c5fd' }}>web · asking</span>}
                         {isDup && <span style={{ marginLeft: '6px', fontSize: '9px', padding: '1px 5px', borderRadius: '8px', background: '#2e1065', color: '#c4b5fd' }}>possible duplicate</span>}
                       </td>
                       <td style={{ padding: '6px 8px', borderBottom: `0.5px solid ${COLORS.border}`, color: COLORS.textMuted, whiteSpace: 'nowrap' }}>{EVIDENCE_TYPE_OPTIONS.find(([k]) => k === c.evidenceType)?.[1] || c.evidenceType}</td>

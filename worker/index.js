@@ -5298,6 +5298,70 @@ async function handleApiRoutes(request, env, url, ctx) {
     }
 
     // --------------------------------------------------------
+    // AI — BRR rental estimate (live web search, grounds seed comps)
+    // --------------------------------------------------------
+    if (url.pathname === '/api/ai/rental-estimate' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      if (!anyAiProviderConfigured(env)) {
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
+      }
+      const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
+      if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
+
+      const { postcode, address, propertyType, bedrooms } = await request.json();
+      if (!postcode && !address) return corsResponse({ success: false, message: 'Missing postcode/address' }, 400);
+
+      const bedsPhrase = bedrooms ? `${bedrooms} bed ` : '';
+      const typePhrase = propertyType ? `${propertyType} ` : '';
+      const searchQuery = `${bedsPhrase}${typePhrase}houses flats to rent near ${postcode || address}`;
+      const searchResults = await webSearch(searchQuery, env, 6);
+
+      const clip = (obj) => JSON.stringify(obj ?? null).slice(0, 4000);
+      const context = [
+        `Subject property: ${address || ''}${postcode ? ` (${postcode})` : ''}${propertyType ? `, ${propertyType}` : ''}${bedrooms ? `, ${bedrooms} bed` : ''}`,
+        searchResults.length
+          ? `Live web search results for local rental market:\n${searchResults.map((r, i) => `${i + 1}. ${r.title} — ${r.snippet} (${r.url})`).join('\n')}`
+          : 'No live web search results were available — return an empty comps array rather than guessing.',
+      ].join('\n\n');
+
+      const schema = {
+        type: 'object',
+        additionalProperties: false,
+        required: ['comps'],
+        properties: {
+          comps: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                address: { type: 'string' }, monthlyRent: { type: 'number' },
+                beds: { type: ['number', 'null'] }, propertyType: { type: ['string', 'null'] },
+                evidenceType: { type: 'string', enum: ['asking'] },
+                source: { type: 'string' }, url: { type: ['string', 'null'] },
+              },
+            },
+            description: 'Asking-rent comparables grounded only in the provided search results — never invented. Empty if search results gave nothing usable.',
+          },
+        },
+      };
+
+      try {
+        const { result } = await generateInsight({
+          system: 'You are a UK lettings market analyst. Ground every comparable in the search results provided — never invent addresses or rents. If search results are thin or absent, return an empty comps array rather than guessing. ' + AUCTION_ANALYST_FRAMING,
+          prompt: `Find comparable rental listings for this subject property.\n\n${context}`,
+          schema,
+          requiredFields: ['comps'],
+          env,
+        });
+        return corsResponse({ success: true, comps: result.comps || [] });
+      } catch (err) {
+        console.error('AI rental estimate failed:', err);
+        return corsResponse({ success: false, message: 'Could not complete rental estimate' }, 502);
+      }
+    }
+
+    // --------------------------------------------------------
     // AI — auction triage insight (on-demand, per lot)
     // --------------------------------------------------------
     if (url.pathname === '/api/ai/triage-insight' && request.method === 'POST') {
