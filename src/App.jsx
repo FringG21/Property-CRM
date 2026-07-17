@@ -7038,7 +7038,8 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                 const allVisibleIds = visibleLots.map(l => l.id);
                 const allSelected = allVisibleIds.length > 0 && allVisibleIds.every(id => auctionSelectedLotIds.has(id));
                 const colHeaders = ['Lot', 'Address', 'Type', 'Beds', 'Guide', 'Days', 'Action'];
-                const pipelineByLotId = new Map(properties.filter(p => p.sourceLotId).map(p => [p.sourceLotId, { stage: normaliseStatus(p.status), id: p.id }]));
+                const pipelineByLotId = {};
+                properties.forEach(p => { if (p.sourceLotId) pipelineByLotId[p.sourceLotId] = { stage: normaliseStatus(p.status), id: p.id }; });
 
                 // Deterministic "worth a look" priority score — heuristic, not a valuation.
                 const median = (arr) => {
@@ -7358,7 +7359,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         {!auctionTabLoading && sortedVisibleLots.map(({ lot, score, reasons }) => {
                           const isSelected = auctionSelectedLotIds.has(lot.id);
                           const days = daysUntil(lot.auctionDate);
-                          const inPipeline = pipelineByLotId.get(lot.id) || null;
+                          const inPipeline = pipelineByLotId[lot.id] || null;
                           const isInactive = lot.status === 'rejected' || lot.isWithdrawn || (isPast(lot.auctionDate) && !inPipeline);
                           const rowBg = isSelected ? '#f0f9ff' : inPipeline ? '#f5f3ff' : lot.isNew && lot.status === 'unreviewed' ? '#fffbeb' : lot.status === 'shortlisted' ? '#f0fdf4' : lot.guidePriceChanged ? '#fff7f0' : '#ffffff';
                           return (
