@@ -732,6 +732,11 @@ export default function App({ user = {}, onLogout }) {
   const [auctionSelectedLotIds, setAuctionSelectedLotIds] = useState(new Set());
   const [auctionTabLoading, setAuctionTabLoading] = useState(false);
   const [triageArchiveOpen, setTriageArchiveOpen] = useState(false);
+  const [collapsedHouses, setCollapsedHouses] = useState(() => {
+    try { return new Set(JSON.parse(localStorage.getItem('triage_collapsed_houses') || '[]')); }
+    catch { return new Set(); }
+  });
+  const [collapsedHousesInit, setCollapsedHousesInit] = useState(false);
 
   // ==========================================
   // 5. SURVEYOR INTELLIGENCE STATE
@@ -2921,6 +2926,29 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
   useEffect(() => {
     if (activeTab === 'scraper' || activeTab === 'auctionintel') loadAuctionData();
   }, [activeTab]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // One-time default: auto-collapse triage house groups whose dates are all past/actioned,
+  // but only when the user has no saved collapse preference yet.
+  useEffect(() => {
+    if (collapsedHousesInit) return;
+    if (auctionDates.length === 0) return;
+    if (localStorage.getItem('triage_collapsed_houses') == null) {
+      const today = new Date(); today.setHours(0, 0, 0, 0);
+      const byHouse = {};
+      auctionDates.forEach(d => { (byHouse[d.houseId] = byHouse[d.houseId] || []).push(d); });
+      const autoCollapsed = new Set();
+      Object.entries(byHouse).forEach(([houseId, dates]) => {
+        const allPastOrDone = dates.every(d => {
+          const isPastDate = d.auctionDate && new Date(d.auctionDate + 'T00:00:00') < today;
+          const isDone = d.totalLots > 0 && d.reviewedCount >= d.totalLots;
+          return isPastDate || isDone;
+        });
+        if (allPastOrDone) autoCollapsed.add(houseId);
+      });
+      setCollapsedHouses(autoCollapsed);
+    }
+    setCollapsedHousesInit(true);
+  }, [auctionDates, collapsedHousesInit]);
 
   // Snapshot this month's average margin so the dashboard can show a month-over-month trend
   useEffect(() => {
@@ -6986,6 +7014,14 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                   return Math.round((new Date(dateStr + 'T00:00:00') - today) / 86400000);
                 };
                 const isPast = (dateStr) => { const d = daysUntil(dateStr); return d != null && d < 0; };
+                const toggleHouseCollapse = (houseId) => {
+                  setCollapsedHouses(prev => {
+                    const next = new Set(prev);
+                    next.has(houseId) ? next.delete(houseId) : next.add(houseId);
+                    localStorage.setItem('triage_collapsed_houses', JSON.stringify([...next]));
+                    return next;
+                  });
+                };
                 const LOT_STATUS_COLORS = { unreviewed: '#e2e8f0', shortlisted: '#dcfce7', watching: '#fef9c3', rejected: '#fee2e2', deal_analysis: '#ede9fe', promoted: '#ede9fe', bid_candidate: '#dbeafe', withdrawn: '#f1f5f9', sold_prior: '#fef2f2' };
                 const LOT_STATUS_TEXT_COLORS = { unreviewed: '#64748b', shortlisted: '#166534', watching: '#854d0e', rejected: '#991b1b', deal_analysis: '#6d28d9', promoted: '#6d28d9', bid_candidate: '#1e40af', withdrawn: '#64748b', sold_prior: '#64748b' };
                 const LOT_STATUS_LABELS = { unreviewed: 'Unreviewed', shortlisted: 'Shortlisted', watching: 'Watching', rejected: 'Rejected', deal_analysis: 'In analysis', promoted: 'Promoted ✓', bid_candidate: 'Bid candidate', withdrawn: 'Withdrawn', sold_prior: 'Sold prior' };
@@ -7021,10 +7057,15 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                           {!auctionTabLoading && HOUSES.map(house => {
                             const dates = datesForHouse(house.id).filter(d => !isPast(d.auctionDate));
                             if (dates.length === 0) return null;
+                            const houseLotCount = dates.reduce((s, d) => s + (d.totalLots || 0), 0);
+                            const isHouseCollapsed = collapsedHouses.has(house.id);
                             return (
                               <div key={house.id}>
-                                <div style={{ padding: '8px 12px 3px', fontSize: '10px', fontWeight: '500', color: '#475569', textTransform: 'uppercase', letterSpacing: '.07em', borderTop: '1px solid #1e293b', marginTop: '4px' }}>{house.shortName}</div>
-                                {dates.map(date => {
+                                <div onClick={() => toggleHouseCollapse(house.id)} style={{ padding: '8px 12px 3px', fontSize: '10px', fontWeight: '500', color: '#475569', textTransform: 'uppercase', letterSpacing: '.07em', borderTop: '1px solid #1e293b', marginTop: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                  <span>{isHouseCollapsed ? '▸' : '▾'} {house.shortName}</span>
+                                  <span style={{ fontSize: '10px', padding: '1px 5px', background: '#1e293b', color: '#475569', borderRadius: '4px', fontWeight: '500', textTransform: 'none', letterSpacing: 'normal' }}>{houseLotCount}</span>
+                                </div>
+                                {!isHouseCollapsed && dates.map(date => {
                                   const isActive = date.id === auctionSelectedDateId;
                                   const pct = date.totalLots ? Math.round((date.reviewedCount / date.totalLots) * 100) : 0;
                                   const isDone = date.totalLots > 0 && pct === 100;
