@@ -4148,11 +4148,24 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     const reportComps = an.compsList || [];
                     const reportCount = an.comps || 0;
                     const otherComps = (currentViewProperty.comparables || []).filter(c => !c.fromIntelligence);
-                    const rawTotal = reportComps.length + lrItems.length + otherComps.length;
+                    const webComps = an.dealAnalysisComparables || [];
+                    const rawTotal = reportComps.length + lrItems.length + otherComps.length + webComps.length;
                     const EPC_COL = { A:'#00a550',B:'#50b848',C:'#b3ce3e',D:'#fff200',E:'#f8b832',F:'#f07f30',G:'#ed1c24' };
                     const tag = (label, kind) => {
-                      const c = kind === 'report' ? { bg:'#ede9fe', fg:'#5b21b6' } : kind === 'manual' ? { bg:'#f1f5f9', fg:'#475569' } : kind === 'rm' ? { bg:'#ccfbf1', fg:'#0f766e' } : { bg:'#dbeafe', fg:'#1e40af' };
+                      const c = kind === 'report' ? { bg:'#ede9fe', fg:'#5b21b6' } : kind === 'manual' ? { bg:'#f1f5f9', fg:'#475569' } : kind === 'rm' ? { bg:'#ccfbf1', fg:'#0f766e' } : kind === 'web' ? { bg:'#fef9c3', fg:'#854d0e' } : { bg:'#dbeafe', fg:'#1e40af' };
                       return <span key={label} style={{ fontSize:'10px', padding:'1px 6px', borderRadius:'8px', background:c.bg, color:c.fg, whiteSpace:'nowrap' }}>{label}</span>;
+                    };
+                    // Tavily comps carry a free-text price ("£250,000" / "£450k") — parse to a number
+                    // so they sort/merge alongside the numeric LR/report/manual prices.
+                    const parseWebPrice = (s) => {
+                      if (typeof s === 'number') return s;
+                      const m = String(s || '').replace(/,/g, '').match(/[\d.]+/);
+                      if (!m) return null;
+                      let n = parseFloat(m[0]);
+                      if (!n) return null;
+                      if (/k\b/i.test(s)) n *= 1000;
+                      else if (/m\b/i.test(s) && !/\bkm\b/i.test(s)) n *= 1000000;
+                      return n;
                     };
                     const metaLine = (parts) => parts.filter(Boolean).length > 0 && (
                       <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginTop: '2px', flexWrap: 'wrap', color: '#94a3b8', fontSize: '10px' }}>{parts.filter(Boolean).map((p, j) => <span key={j}>{p}</span>)}</div>
@@ -4201,6 +4214,9 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         enriched: c.enriched, fieldSources: c.fieldSources,
                       });
                     });
+                    webComps.forEach(c => upsert(c.address, 'Web', 'web', {
+                      address: c.address, price: parseWebPrice(c.price), date: c.date || '',
+                    }));
                     const fmtCompDate = (d) => {
                       if (!d) return '—';
                       const dt = new Date(d);
@@ -4238,7 +4254,14 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         )}
                         {rows.length === 0 ? (
                           <div style={{ textAlign: 'center', padding: '30px', border: '1px dashed #e2e8f0', borderRadius: '10px', color: '#94a3b8', fontSize: '12px' }}>
-                            No comparables yet — run intelligence to fetch Land Registry sales for {propPostcode || 'this postcode'}.
+                            <div>No comparables yet — run intelligence to fetch Land Registry sales for {propPostcode || 'this postcode'}.</div>
+                            <button
+                              onClick={() => runDealAnalysis(currentViewProperty)}
+                              disabled={aiAnalysisLoadingId === currentViewProperty.id}
+                              style={{ marginTop: '10px', padding: '6px 14px', borderRadius: '6px', border: '1px solid #bfdbfe', background: '#eff6ff', color: '#1d4ed8', fontSize: '11px', fontWeight: '600', cursor: aiAnalysisLoadingId === currentViewProperty.id ? 'wait' : 'pointer', fontFamily: 'inherit' }}
+                            >
+                              {aiAnalysisLoadingId === currentViewProperty.id ? 'Searching…' : '🌐 Run market comparison (live web search)'}
+                            </button>
                           </div>
                         ) : (
                           <div style={{ border: '0.5px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden', background: '#fff' }}>
@@ -4277,7 +4300,10 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                       r.notes || null,
                                     ])}
                                   </div>
-                                  <div style={{ display: 'flex', gap: '4px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: '120px' }}>{r.tags.map(t => tag(t.label, t.kind))}</div>
+                                  <div style={{ display: 'flex', gap: '4px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: '120px' }}>
+                                    {r.tags.length > 1 && <span title={`Confirmed by ${r.tags.length} sources: ${r.tags.map(t => t.label).join(', ')}`} style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '8px', background: '#dcfce7', color: '#166534', whiteSpace: 'nowrap' }}>✓ {r.tags.length} sources</span>}
+                                    {r.tags.map(t => tag(t.label, t.kind))}
+                                  </div>
                                   <div style={{ color: '#64748b', whiteSpace: 'nowrap' }}>{fmtCompDate(r.date)}</div>
                                   <div style={{ textAlign: 'right', color: '#0f172a', fontWeight: '600' }}>{r.price ? `£${Number(r.price).toLocaleString()}` : '—'}</div>
                                 </div>
