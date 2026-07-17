@@ -730,6 +730,7 @@ export default function App({ user = {}, onLogout }) {
   const [auctionSelectedDateId, setAuctionSelectedDateId] = useState(null);
   const [auctionLotFilter, setAuctionLotFilter] = useState({ status: 'all', type: 'all', search: '', house: 'all', date: 'all', newOnly: false });
   const [triageVisitBaseline] = useState(() => localStorage.getItem('triage_last_visit'));
+  const [auctionLotSort, setAuctionLotSort] = useState('default');
   const [auctionSelectedLotIds, setAuctionSelectedLotIds] = useState(new Set());
   const [auctionTabLoading, setAuctionTabLoading] = useState(false);
   const [triageArchiveOpen, setTriageArchiveOpen] = useState(false);
@@ -7039,6 +7040,62 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                 const colHeaders = ['Lot', 'Address', 'Type', 'Beds', 'Guide', 'Days', 'Action'];
                 const pipelineByLotId = new Map(properties.filter(p => p.sourceLotId).map(p => [p.sourceLotId, { stage: normaliseStatus(p.status), id: p.id }]));
 
+                // Deterministic "worth a look" priority score — heuristic, not a valuation.
+                const median = (arr) => {
+                  if (!arr.length) return null;
+                  const s = [...arr].sort((a, b) => a - b);
+                  const mid = Math.floor(s.length / 2);
+                  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+                };
+                const allGuideMedian = median(auctionLots.filter(l => l.guidePrice > 0).map(l => l.guidePrice));
+                const cohortGuides = {};
+                auctionLots.forEach(l => {
+                  if (!(l.guidePrice > 0)) return;
+                  const key = `${l.propertyType || 'Unknown'}|${l.bedrooms || 0}`;
+                  (cohortGuides[key] = cohortGuides[key] || []).push(l.guidePrice);
+                });
+                const cohortMedianFor = (lot) => {
+                  const key = `${lot.propertyType || 'Unknown'}|${lot.bedrooms || 0}`;
+                  const bucket = cohortGuides[key] || [];
+                  return bucket.length >= 3 ? median(bucket) : allGuideMedian;
+                };
+                const scoreLot = (lot) => {
+                  let score = 50;
+                  const reasons = [];
+                  const cohortMedian = cohortMedianFor(lot);
+                  if (lot.guidePrice > 0 && cohortMedian > 0) {
+                    const r = lot.guidePrice / cohortMedian;
+                    if (r <= 0.7) { score += 25; reasons.push('guide well below similar lots'); }
+                    else if (r <= 0.9) { score += 12; reasons.push('guide below similar lots'); }
+                    else if (r >= 1.15) { score -= 12; reasons.push('guide above similar lots'); }
+                  }
+                  if (lot.bedrooms > 0) { score += 5; reasons.push('bedrooms known'); }
+                  if (lot.propertyType && lot.propertyType !== 'Unknown') { score += 5; reasons.push('property type known'); }
+                  const d = daysUntil(lot.auctionDate);
+                  if (d != null) {
+                    if (d >= 7 && d <= 35) { score += 8; reasons.push('time to analyse'); }
+                    if (d < 0) { score -= 40; reasons.push('auction passed'); }
+                    if (d < 3) { score -= 8; reasons.push('little time left'); }
+                  }
+                  if (lot.aiFlag === 'strong_interest') { score += 15; reasons.push('AI: strong interest'); }
+                  else if (lot.aiFlag === 'worth_reviewing') { score += 5; reasons.push('AI: worth reviewing'); }
+                  else if (lot.aiFlag === 'low_priority') { score -= 10; reasons.push('AI: low priority'); }
+                  else if (lot.aiFlag === 'insufficient_data') { score -= 5; reasons.push('AI: insufficient data'); }
+                  score = Math.max(0, Math.min(100, Math.round(score)));
+                  return { score, reasons };
+                };
+                const scoredVisibleLots = visibleLots.map(l => ({ lot: l, ...scoreLot(l) }));
+                const sortedVisibleLots = auctionLotSort === 'score' ? [...scoredVisibleLots].sort((a, b) => b.score - a.score)
+                  : auctionLotSort === 'days' ? [...scoredVisibleLots].sort((a, b) => {
+                    const da = daysUntil(a.lot.auctionDate), db = daysUntil(b.lot.auctionDate);
+                    if (da == null && db == null) return 0;
+                    if (da == null) return 1;
+                    if (db == null) return -1;
+                    return da - db;
+                  })
+                  : auctionLotSort === 'guide' ? [...scoredVisibleLots].sort((a, b) => (a.lot.guidePrice || Infinity) - (b.lot.guidePrice || Infinity))
+                  : scoredVisibleLots;
+
                 return (
                   <div style={{ display: 'flex', height: isMobile ? 'auto' : 'calc(100vh - 140px)', borderRadius: '12px', overflow: 'hidden', border: '0.5px solid #e2e8f0' }}>
 
@@ -7217,6 +7274,12 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                           </select>
                           <input value={auctionLotFilter.search} onChange={e => setAuctionLotFilter(f => ({ ...f, search: e.target.value }))} placeholder="Search address…" style={{ padding: '4px 9px', border: '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', width: isMobile ? '100%' : '150px' }} />
                           <button onClick={() => setAuctionLotFilter(f => ({ ...f, newOnly: !f.newOnly }))} title="Show only lots added since your last visit" style={{ padding: '4px 9px', border: auctionLotFilter.newOnly ? '0.5px solid #f59e0b' : '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', background: auctionLotFilter.newOnly ? '#fffbeb' : '#fff', color: auctionLotFilter.newOnly ? '#92400e' : '#475569', cursor: 'pointer', fontWeight: auctionLotFilter.newOnly ? '500' : '400' }}>✨ New only ({newSinceVisitCount})</button>
+                          <select value={auctionLotSort} onChange={e => setAuctionLotSort(e.target.value)} title="Sort lots — the score is a heuristic prioritiser, not a valuation" style={{ padding: '4px 7px', border: '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', background: '#fff', color: '#475569' }}>
+                            <option value="default">Sort: default</option>
+                            <option value="score">Sort: score ↓</option>
+                            <option value="days">Sort: days ↑</option>
+                            <option value="guide">Sort: guide ↑</option>
+                          </select>
                           {isMobile && (
                             <>
                               <input value={auctionScanSettings.keywords} onChange={e => setAuctionScanSettings(s => ({ ...s, keywords: e.target.value }))} placeholder="Region keywords" style={{ padding: '10px', border: '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '14px', width: '100%', boxSizing: 'border-box' }} />
@@ -7292,7 +7355,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                             <div style={{ fontSize: '11px', marginTop: '4px' }}>{manualSelected ? 'Add a lead above to start watching it' : allLotsSelected ? 'Press Scan lots to search every auction house' : auctionSelectedDateId ? 'Scan or manually add lots to get started' : 'Pick a date in the left panel to see lots'}</div>
                           </div>
                         )}
-                        {!auctionTabLoading && visibleLots.map(lot => {
+                        {!auctionTabLoading && sortedVisibleLots.map(({ lot, score, reasons }) => {
                           const isSelected = auctionSelectedLotIds.has(lot.id);
                           const days = daysUntil(lot.auctionDate);
                           const inPipeline = pipelineByLotId.get(lot.id) || null;
@@ -7309,6 +7372,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                 <div style={{ minWidth: 0 }}>
                                   <div style={{ fontSize: '12px', fontWeight: '500', color: isInactive ? '#94a3b8' : '#0f172a', textDecoration: isInactive ? 'line-through' : 'none', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                     {lot.lotUrl ? <a href={lot.lotUrl} target="_blank" rel="noreferrer" title="Open listing on the auction site" style={{ color: isInactive ? '#94a3b8' : '#0369a1', textDecoration: 'underline', textDecorationColor: '#7dd3fc', textUnderlineOffset: '2px' }}>{lot.address} ↗</a> : lot.address}
+                                    <span title={`Worth-a-look score (heuristic, not a valuation) · ${reasons.join(' · ') || 'no strong signals'}`} style={{ fontSize: '10px', padding: '1px 4px', background: score >= 70 ? '#dcfce7' : score >= 40 ? '#fef3c7' : '#f1f5f9', color: score >= 70 ? '#166534' : score >= 40 ? '#92400e' : '#64748b', borderRadius: '4px', fontWeight: '500', marginLeft: '4px', cursor: 'help' }}>{score}</span>
                                     {inPipeline && <span title="Already promoted to the pipeline" style={{ fontSize: '10px', padding: '1px 4px', background: '#ede9fe', color: '#6d28d9', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>In pipeline · {inPipeline.stage}</span>}
                                     {lot.isNew && lot.status === 'unreviewed' && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#fef3c7', color: '#92400e', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>New</span>}
                                     {lot.guidePriceChanged && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#fee2e2', color: '#991b1b', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>Price</span>}
