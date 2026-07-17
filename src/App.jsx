@@ -6993,6 +6993,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                 const allVisibleIds = visibleLots.map(l => l.id);
                 const allSelected = allVisibleIds.length > 0 && allVisibleIds.every(id => auctionSelectedLotIds.has(id));
                 const colHeaders = ['Lot', 'Address', 'Type', 'Beds', 'Guide', 'Days', 'Action'];
+                const pipelineByLotId = new Map(properties.filter(p => p.sourceLotId).map(p => [p.sourceLotId, { stage: normaliseStatus(p.status), id: p.id }]));
 
                 return (
                   <div style={{ display: 'flex', height: isMobile ? 'auto' : 'calc(100vh - 140px)', borderRadius: '12px', overflow: 'hidden', border: '0.5px solid #e2e8f0' }}>
@@ -7222,9 +7223,10 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                           const isSelected = auctionSelectedLotIds.has(lot.id);
                           const days = daysUntil(lot.auctionDate);
                           const isInactive = lot.status === 'rejected' || lot.isWithdrawn;
-                          const rowBg = isSelected ? '#f0f9ff' : lot.isNew && lot.status === 'unreviewed' ? '#fffbeb' : lot.status === 'shortlisted' ? '#f0fdf4' : lot.guidePriceChanged ? '#fff7f0' : '#ffffff';
+                          const inPipeline = pipelineByLotId.get(lot.id) || null;
+                          const rowBg = isSelected ? '#f0f9ff' : inPipeline ? '#f5f3ff' : lot.isNew && lot.status === 'unreviewed' ? '#fffbeb' : lot.status === 'shortlisted' ? '#f0fdf4' : lot.guidePriceChanged ? '#fff7f0' : '#ffffff';
                           return (
-                            <div key={lot.id} style={{ display: 'grid', gridTemplateColumns: '18px 46px 1fr 84px 34px 78px 50px 108px', padding: '8px 14px', borderBottom: '0.5px solid #f1f5f9', background: rowBg, alignItems: 'center', opacity: isInactive ? 0.5 : 1, minWidth: '560px' }}>
+                            <div key={lot.id} style={{ display: 'grid', gridTemplateColumns: '18px 46px 1fr 84px 34px 78px 50px 108px', padding: '8px 14px', borderBottom: '0.5px solid #f1f5f9', background: rowBg, alignItems: 'center', opacity: isInactive ? 0.5 : (inPipeline ? 0.75 : 1), minWidth: '560px' }}>
                               <input type="checkbox" checked={isSelected} onChange={() => setAuctionSelectedLotIds(prev => { const n = new Set(prev); n.has(lot.id) ? n.delete(lot.id) : n.add(lot.id); return n; })} style={{ width: '13px', height: '13px' }} />
                               <div style={{ fontSize: '11px', fontWeight: '500', color: '#475569' }}>{lot.lotNumber || '—'}</div>
                               <div style={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -7234,6 +7236,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                 <div style={{ minWidth: 0 }}>
                                   <div style={{ fontSize: '12px', fontWeight: '500', color: isInactive ? '#94a3b8' : '#0f172a', textDecoration: isInactive ? 'line-through' : 'none', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                     {lot.lotUrl ? <a href={lot.lotUrl} target="_blank" rel="noreferrer" title="Open listing on the auction site" style={{ color: isInactive ? '#94a3b8' : '#0369a1', textDecoration: 'underline', textDecorationColor: '#7dd3fc', textUnderlineOffset: '2px' }}>{lot.address} ↗</a> : lot.address}
+                                    {inPipeline && <span title="Already promoted to the pipeline" style={{ fontSize: '10px', padding: '1px 4px', background: '#ede9fe', color: '#6d28d9', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>In pipeline · {inPipeline.stage}</span>}
                                     {lot.isNew && lot.status === 'unreviewed' && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#fef3c7', color: '#92400e', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>New</span>}
                                     {lot.guidePriceChanged && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#fee2e2', color: '#991b1b', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>Price</span>}
                                     {lot.isWithdrawn && <span style={{ fontSize: '10px', padding: '1px 4px', background: '#f1f5f9', color: '#64748b', borderRadius: '4px', fontWeight: '500', marginLeft: '4px' }}>Withdrawn</span>}
