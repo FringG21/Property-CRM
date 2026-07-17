@@ -728,7 +728,8 @@ export default function App({ user = {}, onLogout }) {
   const [auctionDates, setAuctionDates] = useState([]);
   const [auctionLots, setAuctionLots] = useState([]);
   const [auctionSelectedDateId, setAuctionSelectedDateId] = useState(null);
-  const [auctionLotFilter, setAuctionLotFilter] = useState({ status: 'all', type: 'all', search: '', house: 'all', date: 'all' });
+  const [auctionLotFilter, setAuctionLotFilter] = useState({ status: 'all', type: 'all', search: '', house: 'all', date: 'all', newOnly: false });
+  const [triageVisitBaseline] = useState(() => localStorage.getItem('triage_last_visit'));
   const [auctionSelectedLotIds, setAuctionSelectedLotIds] = useState(new Set());
   const [auctionTabLoading, setAuctionTabLoading] = useState(false);
   const [triageArchiveOpen, setTriageArchiveOpen] = useState(false);
@@ -2924,7 +2925,10 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
   }, [pipelineSort, pipelineTypeFilter, pipelineStageFilter, pipelineDateFrom, pipelineDateTo]);
 
   useEffect(() => {
-    if (activeTab === 'scraper' || activeTab === 'auctionintel') loadAuctionData();
+    if (activeTab === 'scraper' || activeTab === 'auctionintel') {
+      loadAuctionData();
+      localStorage.setItem('triage_last_visit', new Date().toISOString());
+    }
   }, [activeTab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // One-time default: auto-collapse triage house groups whose dates are all past/actioned,
@@ -6998,8 +7002,10 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                   if (auctionLotFilter.status !== 'all' && l.status !== auctionLotFilter.status) return false;
                   if (!matchesTypeFilter(l.propertyType)) return false;
                   if (auctionLotFilter.search && !l.address?.toLowerCase().includes(auctionLotFilter.search.toLowerCase())) return false;
+                  if (auctionLotFilter.newOnly && !(l.isNew || (l.firstSeenAt && triageVisitBaseline && l.firstSeenAt > triageVisitBaseline))) return false;
                   return true;
                 });
+                const newSinceVisitCount = auctionLots.filter(l => l.isNew || (l.firstSeenAt && triageVisitBaseline && l.firstSeenAt > triageVisitBaseline)).length;
                 const lotHouseOptions = [...new Set(auctionLots.map(l => l.houseName || 'Manual'))].sort();
                 const lotDateOptions = [...new Set(auctionLots.map(l => l.auctionDate).filter(Boolean))].sort();
                 const lotsHaveTbcDates = auctionLots.some(l => !l.auctionDate);
@@ -7210,6 +7216,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                             <option value="Flat">Flat / Apartment</option>
                           </select>
                           <input value={auctionLotFilter.search} onChange={e => setAuctionLotFilter(f => ({ ...f, search: e.target.value }))} placeholder="Search address…" style={{ padding: '4px 9px', border: '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', width: isMobile ? '100%' : '150px' }} />
+                          <button onClick={() => setAuctionLotFilter(f => ({ ...f, newOnly: !f.newOnly }))} title="Show only lots added since your last visit" style={{ padding: '4px 9px', border: auctionLotFilter.newOnly ? '0.5px solid #f59e0b' : '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', background: auctionLotFilter.newOnly ? '#fffbeb' : '#fff', color: auctionLotFilter.newOnly ? '#92400e' : '#475569', cursor: 'pointer', fontWeight: auctionLotFilter.newOnly ? '500' : '400' }}>✨ New only ({newSinceVisitCount})</button>
                           {isMobile && (
                             <>
                               <input value={auctionScanSettings.keywords} onChange={e => setAuctionScanSettings(s => ({ ...s, keywords: e.target.value }))} placeholder="Region keywords" style={{ padding: '10px', border: '0.5px solid #e2e8f0', borderRadius: '6px', fontSize: '14px', width: '100%', boxSizing: 'border-box' }} />
