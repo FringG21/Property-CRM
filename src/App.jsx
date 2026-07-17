@@ -731,6 +731,7 @@ export default function App({ user = {}, onLogout }) {
   const [auctionLotFilter, setAuctionLotFilter] = useState({ status: 'all', type: 'all', search: '', house: 'all', date: 'all' });
   const [auctionSelectedLotIds, setAuctionSelectedLotIds] = useState(new Set());
   const [auctionTabLoading, setAuctionTabLoading] = useState(false);
+  const [triageArchiveOpen, setTriageArchiveOpen] = useState(false);
 
   // ==========================================
   // 5. SURVEYOR INTELLIGENCE STATE
@@ -6984,6 +6985,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                   const today = new Date(); today.setHours(0, 0, 0, 0);
                   return Math.round((new Date(dateStr + 'T00:00:00') - today) / 86400000);
                 };
+                const isPast = (dateStr) => { const d = daysUntil(dateStr); return d != null && d < 0; };
                 const LOT_STATUS_COLORS = { unreviewed: '#e2e8f0', shortlisted: '#dcfce7', watching: '#fef9c3', rejected: '#fee2e2', deal_analysis: '#ede9fe', promoted: '#ede9fe', bid_candidate: '#dbeafe', withdrawn: '#f1f5f9', sold_prior: '#fef2f2' };
                 const LOT_STATUS_TEXT_COLORS = { unreviewed: '#64748b', shortlisted: '#166534', watching: '#854d0e', rejected: '#991b1b', deal_analysis: '#6d28d9', promoted: '#6d28d9', bid_candidate: '#1e40af', withdrawn: '#64748b', sold_prior: '#64748b' };
                 const LOT_STATUS_LABELS = { unreviewed: 'Unreviewed', shortlisted: 'Shortlisted', watching: 'Watching', rejected: 'Rejected', deal_analysis: 'In analysis', promoted: 'Promoted ✓', bid_candidate: 'Bid candidate', withdrawn: 'Withdrawn', sold_prior: 'Sold prior' };
@@ -7017,7 +7019,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                             </div>
                           )}
                           {!auctionTabLoading && HOUSES.map(house => {
-                            const dates = datesForHouse(house.id);
+                            const dates = datesForHouse(house.id).filter(d => !isPast(d.auctionDate));
                             if (dates.length === 0) return null;
                             return (
                               <div key={house.id}>
@@ -7051,6 +7053,29 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                               </div>
                             );
                           })}
+                          {!auctionTabLoading && (() => {
+                            const pastDates = HOUSES.flatMap(house => datesForHouse(house.id).filter(d => isPast(d.auctionDate)).map(d => ({ ...d, houseShortName: house.shortName })));
+                            if (pastDates.length === 0) return null;
+                            return (
+                              <div>
+                                <div onClick={() => setTriageArchiveOpen(o => !o)} style={{ padding: '8px 12px 3px', fontSize: '10px', fontWeight: '500', color: '#475569', textTransform: 'uppercase', letterSpacing: '.07em', borderTop: '1px solid #1e293b', marginTop: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                                  <span>{triageArchiveOpen ? '▾' : '▸'} Past / Archive</span>
+                                  <span style={{ fontSize: '10px', padding: '1px 5px', background: '#1e293b', color: '#475569', borderRadius: '4px', fontWeight: '500' }}>{pastDates.length}</span>
+                                </div>
+                                {triageArchiveOpen && pastDates.map(date => {
+                                  const isActive = date.id === auctionSelectedDateId;
+                                  return (
+                                    <div key={date.id} onClick={() => { setAuctionSelectedDateId(date.id); setAuctionLotFilter(f => ({ ...f, house: 'all', date: 'all' })); }} style={{ padding: '7px 12px', background: isActive ? '#1e293b' : 'transparent', borderLeft: `3px solid ${isActive ? '#059669' : 'transparent'}`, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'space-between', opacity: 0.6 }}>
+                                      <div>
+                                        <div style={{ fontSize: '12px', fontWeight: '500', color: isActive ? '#f1f5f9' : '#94a3b8' }}>{date.auctionDate ? new Date(date.auctionDate + 'T00:00:00').toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : 'Date TBC'}</div>
+                                        <div style={{ fontSize: '10px', color: '#475569', marginTop: '1px' }}>{date.houseShortName}{date.totalLots > 0 ? ` · ${date.totalLots} lots · ${date.reviewedCount} done` : ''}</div>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })()}
                           {/* Manual leads / watchlist — same triage queue, manual origin */}
                           {!auctionTabLoading && (
                             <div>
@@ -7168,7 +7193,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                             <div style={{ fontSize: '13px', fontWeight: '500', color: '#0f172a' }}>{selectedDate.houseName} — {selectedDate.auctionDate ? new Date(selectedDate.auctionDate + 'T00:00:00').toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : 'Date TBC'}</div>
                             <div style={{ fontSize: '10px', color: '#64748b', marginTop: '2px' }}>
                               {selectedDate.totalLots} lots · {selectedDate.reviewedCount} reviewed · {selectedDate.shortlistedCount} shortlisted
-                              {(() => { const d = daysUntil(selectedDate.auctionDate); return d != null ? <span> · <strong style={{ color: d <= 7 ? '#dc2626' : '#475569' }}>{d} days away</strong></span> : null; })()}
+                              {(() => { const d = daysUntil(selectedDate.auctionDate); if (d == null) return null; return d < 0 ? <span> · <strong style={{ color: '#94a3b8' }}>Auction passed</strong></span> : <span> · <strong style={{ color: d <= 7 ? '#dc2626' : '#475569' }}>{d} days away</strong></span>; })()}
                             </div>
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -7222,8 +7247,8 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         {!auctionTabLoading && visibleLots.map(lot => {
                           const isSelected = auctionSelectedLotIds.has(lot.id);
                           const days = daysUntil(lot.auctionDate);
-                          const isInactive = lot.status === 'rejected' || lot.isWithdrawn;
                           const inPipeline = pipelineByLotId.get(lot.id) || null;
+                          const isInactive = lot.status === 'rejected' || lot.isWithdrawn || (isPast(lot.auctionDate) && !inPipeline);
                           const rowBg = isSelected ? '#f0f9ff' : inPipeline ? '#f5f3ff' : lot.isNew && lot.status === 'unreviewed' ? '#fffbeb' : lot.status === 'shortlisted' ? '#f0fdf4' : lot.guidePriceChanged ? '#fff7f0' : '#ffffff';
                           return (
                             <div key={lot.id} style={{ display: 'grid', gridTemplateColumns: '18px 46px 1fr 84px 34px 78px 50px 108px', padding: '8px 14px', borderBottom: '0.5px solid #f1f5f9', background: rowBg, alignItems: 'center', opacity: isInactive ? 0.5 : (inPipeline ? 0.75 : 1), minWidth: '560px' }}>
@@ -7256,7 +7281,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                               <div style={{ fontSize: '11px', color: '#475569', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{lot.propertyType || '—'}</div>
                               <div style={{ fontSize: '12px', color: '#475569', textAlign: 'center' }}>{lot.bedrooms || '—'}</div>
                               <div style={{ fontSize: '12px', fontWeight: '500', color: lot.guidePriceChanged ? '#059669' : '#0f172a', textAlign: 'right' }}>{lot.guidePrice ? `£${Number(lot.guidePrice).toLocaleString()}` : '—'}</div>
-                              <div style={{ fontSize: '11px', color: days != null && days <= 7 ? '#dc2626' : '#64748b', textAlign: 'center', fontWeight: days != null && days <= 7 ? '500' : '400' }}>{days != null ? days : '—'}</div>
+                              <div style={{ fontSize: '11px', color: days != null && days < 0 ? '#94a3b8' : days != null && days <= 7 ? '#dc2626' : '#64748b', textAlign: 'center', fontWeight: days != null && days <= 7 && days >= 0 ? '500' : '400' }}>{days != null ? (days < 0 ? 'Past' : days) : '—'}</div>
                               <div style={{ display: 'flex', gap: '3px', justifyContent: 'center' }}>
                                 {(lot.status === 'unreviewed' || lot.status === 'viewed') && (
                                   <>
