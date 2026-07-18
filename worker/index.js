@@ -5496,6 +5496,71 @@ async function handleApiRoutes(request, env, url, ctx) {
     }
 
     // --------------------------------------------------------
+    // AI — notes digest (summarise a note thread + propose action items)
+    // --------------------------------------------------------
+    if (url.pathname === '/api/ai/notes-digest' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      if (!anyAiProviderConfigured(env)) {
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
+      }
+      const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
+      if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
+
+      const { entityType, entityName, notes } = await request.json();
+      if (!Array.isArray(notes) || notes.length === 0) return corsResponse({ success: false, message: 'No notes to summarise' }, 400);
+
+      // Most-recent first, bounded to ~6000 chars of note text.
+      const sorted = [...notes].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+      const lines = [];
+      let used = 0;
+      for (const n of sorted) {
+        const line = `[${n.date || '?'}] ${n.author || '?'}${n.type ? ` · ${n.type}` : ''}: ${n.text || ''}`;
+        if (used + line.length > 6000) break;
+        lines.push(line);
+        used += line.length + 1;
+      }
+      const context = `${entityType || 'Record'}: ${entityName || 'unknown'}\n\nNotes (most recent first):\n${lines.join('\n')}`;
+
+      const schema = {
+        type: 'object',
+        additionalProperties: false,
+        required: ['summary', 'actionItems'],
+        properties: {
+          summary: { type: 'string', description: '2-4 sentence plain-English summary of where this thread stands — decisions, open questions, current status.' },
+          actionItems: {
+            type: 'array',
+            description: 'Concrete next actions implied by the notes. Empty if the notes imply no outstanding action. Do not invent actions not grounded in the notes.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['title', 'priority'],
+              properties: {
+                title: { type: 'string', description: 'Short imperative task title, e.g. "Chase solicitor for covenant indemnity".' },
+                priority: { type: 'string', enum: ['High', 'Medium', 'Low'] },
+                dueHint: { type: 'string', description: 'Optional plain-English timing hint, e.g. "before auction", "this week". Empty if none.' },
+              },
+            },
+          },
+        },
+      };
+
+      try {
+        const { result: digest, provider } = await generateInsight({
+          system: 'You are an assistant for a UK property auction investment team. Summarise a thread of notes attached to one record (a property, company or contact) and propose the concrete next actions the team should take. Ground every action strictly in the notes — do not invent tasks. Keep titles short and imperative.',
+          prompt: `Summarise these notes and propose next actions.\n\n${context}`,
+          schema,
+          requiredFields: ['summary', 'actionItems'],
+          env,
+        });
+        return corsResponse({ success: true, digest, provider, generatedAt: new Date().toISOString() });
+      } catch (err) {
+        console.error('AI notes digest failed:', err);
+        return corsResponse({ success: false, message: 'Could not summarise notes' }, 502);
+      }
+    }
+
+    // --------------------------------------------------------
     // ALERTS — persisted team-wide alert feed
     // --------------------------------------------------------
 

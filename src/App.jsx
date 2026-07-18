@@ -2281,6 +2281,107 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
     }
   };
 
+  // ── AI notes digest — summarise a note thread + propose action items → tasks ──
+  const [notesDigestLoadingId, setNotesDigestLoadingId] = useState(null);
+  const [digestTasksAdded, setDigestTasksAdded] = useState({});
+  const runNotesDigest = async (entityType, entity, notes) => {
+    if (!entity || notesDigestLoadingId) return;
+    if (!Array.isArray(notes) || notes.length === 0) { alert('No notes to summarise yet.'); return; }
+    setNotesDigestLoadingId(entity.id);
+    try {
+      const token = localStorage.getItem('crm_session');
+      const entityName = entity.dealName || entity.name || entity.address || 'record';
+      const res = await fetch('/api/ai/notes-digest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ entityType, entityName, notes: notes.map(n => ({ date: n.date, author: n.author, type: n.type, text: n.text })) }),
+      });
+      const data = await res.json();
+      if (!data.success) { alert(data.message || 'Notes summary failed.'); return; }
+      const d = data.digest;
+      if (!d || !d.summary) { console.error('AI notes digest: unexpected response shape', data); alert('Notes summary returned nothing — please try again.'); return; }
+      const digest = { summary: d.summary, actionItems: d.actionItems || [], provider: data.provider, generatedAt: data.generatedAt };
+      if (entityType === 'Property') {
+        const updated = { ...entity, notesDigest: digest };
+        setProperties(prev => prev.map(p => p.id === entity.id ? updated : p));
+        if (currentViewProperty?.id === entity.id) setCurrentViewProperty(updated);
+      } else if (entityType === 'Company') {
+        const updated = { ...entity, notesDigest: digest };
+        setCompanies(prev => prev.map(c => c.id === entity.id ? updated : c));
+        if (currentViewCompany?.id === entity.id) setCurrentViewCompany(updated);
+      } else if (entityType === 'Contact') {
+        const updated = { ...entity, notesDigest: digest };
+        setContacts(prev => prev.map(c => c.id === entity.id ? updated : c));
+        if (currentViewContact?.id === entity.id) setCurrentViewContact(updated);
+      }
+    } catch (err) {
+      console.error('AI notes digest failed:', err);
+      alert('Notes summary failed — please try again.');
+    } finally {
+      setNotesDigestLoadingId(null);
+    }
+  };
+  // Turn one proposed action item into a real task, linked to its record — reuses
+  // the same task shape as runStageAutomation so it appears in the Tasks tab/drawer.
+  const addTaskFromActionItem = (item, entityType, entity, key) => {
+    const todayStr = new Date().toISOString().split('T')[0];
+    const due = new Date();
+    due.setDate(due.getDate() + 7);
+    const linkedName = entity.dealName || entity.name || entity.address?.split(',')[0] || '';
+    const newTask = {
+      id: Date.now() + Math.random(), title: item.title,
+      dueDate: due.toISOString().split('T')[0], priority: item.priority || 'Medium',
+      status: 'not_started', linkedType: entityType, linkedId: entity.id, linkedName,
+      notes: item.dueHint ? `Timing: ${item.dueHint}` : '', assignee: user.name || 'Ashley',
+      createdDate: todayStr, createdBy: 'AI', waitingOn: '', subtasks: [], comments: [], reminders: [],
+      activityLog: [{ id: Date.now() + Math.random(), type: 'created', detail: 'Created from AI notes summary', user: user.name || 'You', at: new Date().toISOString() }],
+    };
+    setTasks(prev => [...prev, newTask]);
+    setDigestTasksAdded(prev => ({ ...prev, [key]: true }));
+  };
+  // Shared AI notes-digest card — used on the property / company / contact note panels.
+  const renderNotesDigestCard = (entityType, entity, notes) => {
+    if (!entity) return null;
+    const digest = entity.notesDigest;
+    const busy = notesDigestLoadingId === entity.id;
+    const hasNotes = Array.isArray(notes) && notes.length > 0;
+    const at = digest?.generatedAt ? new Date(digest.generatedAt).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+    return (
+      <div style={{ border: '1px solid #e9d5ff', borderRadius: '10px', background: '#faf5ff', padding: '12px 14px', marginBottom: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap', marginBottom: digest ? '10px' : 0 }}>
+          <div style={{ fontSize: '11px', fontWeight: '600', color: '#7C3AED', display: 'flex', alignItems: 'center', gap: '6px' }}>🧠 Notes summary</div>
+          <button onClick={() => runNotesDigest(entityType, entity, notes)} disabled={busy || !hasNotes} style={{ padding: '5px 12px', fontSize: '11px', borderRadius: '6px', border: 'none', background: (busy || !hasNotes) ? '#f1f5f9' : '#7C3AED', color: (busy || !hasNotes) ? '#94a3b8' : '#fff', cursor: (busy || !hasNotes) ? 'default' : 'pointer', fontFamily: 'inherit', fontWeight: '600' }}>
+            {busy ? '⏳ Summarising…' : digest ? 'Re-summarise' : '🧠 Summarise & suggest tasks'}
+          </button>
+        </div>
+        {!digest ? (
+          <div style={{ fontSize: '11px', color: '#94a3b8' }}>{hasNotes ? 'Summarise this thread and pull out next actions you can add as tasks.' : 'Add a note first, then summarise the thread into tasks.'}</div>
+        ) : (
+          <div>
+            <div style={{ fontSize: '12px', color: '#334155', lineHeight: '1.6', marginBottom: digest.actionItems?.length ? '10px' : 0 }}>{digest.summary}</div>
+            {digest.actionItems?.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                {digest.actionItems.map((it, i) => {
+                  const key = `${entity.id}:${i}`;
+                  const added = digestTasksAdded[key];
+                  const prioC = it.priority === 'High' ? '#dc2626' : it.priority === 'Low' ? '#64748b' : '#d97706';
+                  return (
+                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: '6px', padding: '6px 9px' }}>
+                      <span style={{ fontSize: '9px', fontWeight: '700', textTransform: 'uppercase', color: prioC, flexShrink: 0 }}>{it.priority || 'Medium'}</span>
+                      <span style={{ flex: 1, color: '#334155' }}>{it.title}{it.dueHint ? <span style={{ color: '#94a3b8' }}> · {it.dueHint}</span> : null}</span>
+                      <button onClick={() => !added && addTaskFromActionItem(it, entityType, entity, key)} disabled={added} style={{ flexShrink: 0, fontSize: '10px', fontWeight: '600', padding: '4px 9px', borderRadius: '5px', border: 'none', background: added ? '#dcfce7' : '#7C3AED', color: added ? '#166534' : '#fff', cursor: added ? 'default' : 'pointer', fontFamily: 'inherit' }}>{added ? '✓ Added' : '＋ Add task'}</button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            <div style={{ fontSize: '9px', color: '#94a3b8', marginTop: '10px' }}>{AI_PROVIDER_LABELS[digest.provider] || digest.provider || 'AI'} · {at}</div>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   // ── AI deal analysis — live market comparison via web search ──
   const [aiAnalysisLoadingId, setAiAnalysisLoadingId] = useState(null);
   const runDealAnalysis = async (prop) => {
@@ -5548,6 +5649,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         <span>Notes</span>
                         <span style={{ fontSize: '10px', color: '#94a3b8', fontWeight: '400', textTransform: 'none', letterSpacing: 0 }}>{currentViewProperty.notesList?.length || 0} notes</span>
                       </div>
+                      {renderNotesDigestCard('Property', currentViewProperty, currentViewProperty.notesList || [])}
                       <form onSubmit={handleAddPropertyNote} style={{ border: '0.5px solid #e2e8f0', borderRadius: '9px', overflow: 'hidden', marginBottom: '10px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '7px', padding: '8px 12px', borderBottom: '0.5px solid #f1f5f9', background: '#f8fafc', flexWrap: 'wrap' }}>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -8497,6 +8599,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                           <button type="submit" style={{ padding: '6px 16px', backgroundColor: '#0f172a', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: '600', cursor: 'pointer', marginLeft: 'auto' }}>Log</button>
                                         </div>
                                       </form>
+                                      {renderNotesDigestCard('Company', co, companyNotes)}
                                       <div style={{ display: 'flex', gap: '5px', marginBottom: '12px', flexWrap: 'wrap' }}>
                                         {['All', ...new Set(companyNotes.map(n => n.type))].map(t => (
                                           <button key={t} onClick={() => setCompanyActivityFilter(t)} style={{ padding: '3px 10px', borderRadius: '20px', border: '1px solid ' + (companyActivityFilter === t ? '#059669' : '#e2e8f0'), backgroundColor: companyActivityFilter === t ? '#f0fdf4' : '#fff', color: companyActivityFilter === t ? '#059669' : '#64748b', fontSize: '11px', cursor: 'pointer' }}>{t}</button>
@@ -9093,6 +9196,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                         <button type="submit" style={{ padding: '6px 16px', backgroundColor: '#0f172a', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '11px', fontWeight: '600', cursor: 'pointer', marginLeft: 'auto' }}>Log</button>
                                       </div>
                                     </form>
+                                    {renderNotesDigestCard('Contact', con, contactNotes)}
                                     <div style={{ display: 'flex', gap: '5px', marginBottom: '12px', flexWrap: 'wrap' }}>
                                       {['All', ...new Set(contactNotes.map(n => n.type))].map(t => (
                                         <button key={t} onClick={() => setContactActivityFilter(t)} style={{ padding: '3px 10px', borderRadius: '20px', border: '1px solid ' + (contactActivityFilter === t ? '#059669' : '#e2e8f0'), backgroundColor: contactActivityFilter === t ? '#f0fdf4' : '#fff', color: contactActivityFilter === t ? '#059669' : '#64748b', fontSize: '11px', cursor: 'pointer' }}>{t}</button>
