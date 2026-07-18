@@ -9,7 +9,7 @@ import {
   ChevronUp, ChevronLeft, ChevronRight, Undo2, Bookmark, User, Gavel, Settings, Users, Link2, Plus, Trash2,
   Briefcase, Contact, Search, Globe, Mail, Phone, ClipboardList, TrendingUp, LogOut, Filter, Map, BarChart2, Pencil,
   Bell, Download, MessageSquare, ListChecks, Activity, AlertTriangle, MoreHorizontal, Layers, RefreshCw,
-  Bold, Italic, Underline, List, ListOrdered
+  Bold, Italic, Underline, List, ListOrdered, Sparkles
 } from 'lucide-react';
 import MarketIntel from './views/MarketIntel.jsx';
 import BrrAnalysis from './views/BrrAnalysis.jsx';
@@ -590,6 +590,8 @@ export default function App({ user = {}, onLogout }) {
     } catch {}
   };
   const [currentViewProperty, setCurrentViewProperty] = useState(null);
+  const [reportJob, setReportJob] = useState(null); // latest report-generation job for the open property
+  const [reportJobBusy, setReportJobBusy] = useState(false); // Generate/Retry request in flight
   const [pipelineView, setPipelineView] = useState('kanban');
   const [propSidebarOpen, setPropSidebarOpen] = useState(false);
   const [companyDetailTab, setCompanyDetailTab] = useState('overview');
@@ -1786,6 +1788,109 @@ export default function App({ user = {}, onLogout }) {
       alert('Could not re-parse — the file may have been uploaded in a previous session and is no longer retrievable from storage. Re-upload the HTML report.');
     }
   };
+
+  // Fetch the latest report-generation job for a property. Returns the job
+  // (or null if none), or undefined on a network error so callers can leave
+  // the existing badge state untouched rather than blanking it.
+  const fetchReportJobStatus = async (propertyId) => {
+    try {
+      const token = localStorage.getItem('crm_session');
+      const res = await fetch(`/api/reports/jobs/status?propertyId=${encodeURIComponent(propertyId)}`, { headers: { 'Authorization': `Bearer ${token}` } });
+      const data = await res.json();
+      if (data.success) return data.job; // job may be null
+    } catch {}
+    return undefined;
+  };
+
+  const handleGenerateReport = async () => {
+    if (!currentViewProperty || reportJobBusy) return;
+    setReportJobBusy(true);
+    try {
+      const token = localStorage.getItem('crm_session');
+      const res = await fetch('/api/reports/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ propertyId: currentViewProperty.id }),
+      });
+      const data = await res.json();
+      if (!data.success) { alert(data.message || 'Could not queue the report.'); return; }
+      // Seed the badge immediately; the poll effect takes over from here.
+      setReportJob({ id: data.jobId, status: 'pending', createdAt: new Date().toISOString() });
+    } catch {
+      alert('Could not queue the report — please check your connection and try again.');
+    } finally {
+      setReportJobBusy(false);
+    }
+  };
+
+  // User-visible parse of a freshly generated report: pulls the stored HTML,
+  // runs the EXISTING parser, and slots it into the mainReport slot via the
+  // same applyReportToProperty flow an upload uses — so analytics only ever
+  // change when the user clicks this.
+  const handleParseGeneratedReport = async () => {
+    if (!currentViewProperty || !reportJob?.resultDocKey) return;
+    const key = reportJob.resultDocKey;
+    const name = key.split('/').pop() || 'AI report.html';
+    const fileRecord = { name, type: 'html', key };
+    try {
+      const token = localStorage.getItem('crm_session');
+      const res = await fetch(`/api/documents/${key}`, { headers: { 'Authorization': `Bearer ${token}` } });
+      if (!res.ok) throw new Error('fetch failed');
+      const text = await res.text();
+      const analytics = parseReportAnalytics(text);
+      if (!analytics) {
+        const attached = withActivity({ ...currentViewProperty, files: { ...currentViewProperty.files, mainReport: fileRecord } }, 'document', `AI report attached: ${name}`);
+        setCurrentViewProperty(attached);
+        const updatedProperties = properties.map(p => p.id === currentViewProperty.id ? attached : p);
+        setProperties(updatedProperties);
+        setSaveStatus('saving');
+        fetch('/api/crm-data', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks }) })
+          .then(() => { setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); }).catch(() => setSaveStatus('idle'));
+        alert(`Report attached as the assessment report, but the parser found no analytics in it. Open it with View from the vault to check its format.`);
+        return;
+      }
+      const updatedProp = applyReportToProperty(currentViewProperty, analytics, fileRecord, 'mainReport');
+      setCurrentViewProperty(updatedProp);
+      const updatedProperties = properties.map(p => p.id === currentViewProperty.id ? updatedProp : p);
+      setProperties(updatedProperties);
+      setSaveStatus('saving');
+      fetch('/api/crm-data', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` }, body: JSON.stringify({ properties: updatedProperties, companies, contacts, surveyors, watchlist, scrapedAuctions, globalNotes, tasks }) })
+        .then(() => { setSaveStatus('saved'); setTimeout(() => setSaveStatus('idle'), 2000); }).catch(() => setSaveStatus('idle'));
+      const got = [];
+      if (analytics.reportSummary) got.push('report summary');
+      if (analytics.redFlags?.length) got.push(`${analytics.redFlags.length} red flags`);
+      if (analytics.gdvConservative || analytics.gdvBase || analytics.gdvOptimistic) got.push('GDV scenarios');
+      if (analytics.maxBid) got.push('max bid');
+      if (analytics.netProfit) got.push('net profit');
+      alert(`Parsed the generated report "${name}".\n\nFound: ${got.join(', ') || 'basic figures only'}.`);
+    } catch {
+      alert('Could not parse the generated report — open it with View from the vault, or use Re-parse after the document list refreshes.');
+    }
+  };
+
+  // Load the property's latest job status whenever the canvas opens or the
+  // viewed property changes.
+  useEffect(() => {
+    if (!currentViewProperty?.id) { setReportJob(null); return; }
+    let cancelled = false;
+    fetchReportJobStatus(currentViewProperty.id).then(job => { if (!cancelled && job !== undefined) setReportJob(job); });
+    return () => { cancelled = true; };
+  }, [currentViewProperty?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Poll every 15s ONLY while a job is in flight and the canvas is open.
+  // Re-runs (and re-arms the interval) on each status transition; when the
+  // status leaves the in-flight set, cleanup clears the interval and no new
+  // one is created.
+  useEffect(() => {
+    const inFlight = reportJob && ['pending', 'claimed', 'generating'].includes(reportJob.status);
+    if (!currentViewProperty?.id || !inFlight) return;
+    const pid = currentViewProperty.id;
+    const iv = setInterval(async () => {
+      const job = await fetchReportJobStatus(pid);
+      if (job !== undefined) setReportJob(job);
+    }, 15000);
+    return () => clearInterval(iv);
+  }, [currentViewProperty?.id, reportJob?.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleViewDocument = async (record) => {
     if (!record) return;
@@ -5733,6 +5838,48 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                           </div>
                         )}
                       </div>
+                      {/* AI deal report — generate via the analyser queue */}
+                      {(() => {
+                        const rj = reportJob;
+                        const inFlight = rj && ['pending', 'claimed', 'generating'].includes(rj.status);
+                        const ageMin = rj?.createdAt ? (Date.now() - new Date(rj.createdAt).getTime()) / 60000 : 0;
+                        const staleHint = rj?.status === 'pending' && ageMin > 10;
+                        const badge = (() => {
+                          if (!rj) return null;
+                          if (rj.status === 'pending') return { text: staleHint ? 'Queued · analyser offline?' : 'Queued', bg: '#f1f5f9', fg: '#475569', title: staleHint ? 'Analyser offline? The job will run next time it is up.' : 'Waiting for the analyser to pick this up.' };
+                          if (rj.status === 'claimed') return { text: 'Starting…', bg: '#eff6ff', fg: '#1d4ed8', title: 'The analyser has claimed this job.' };
+                          if (rj.status === 'generating') return { text: rj.message || 'Generating…', bg: '#eff6ff', fg: '#1d4ed8', title: 'The analyser is running the report pipeline.' };
+                          if (rj.status === 'done') return { text: 'Done', bg: '#dcfce7', fg: '#166534', title: rj.completedAt ? `Completed ${new Date(rj.completedAt).toLocaleString('en-GB')}` : 'Report ready.' };
+                          if (rj.status === 'failed') return { text: 'Failed', bg: '#fee2e2', fg: '#b91c1c', title: rj.error || 'The report generation failed.' };
+                          return null;
+                        })();
+                        const btnBase = { padding: '8px 14px', fontSize: isMobile ? '13px' : '12px', fontWeight: '600', borderRadius: '8px', cursor: 'pointer', fontFamily: 'inherit', minHeight: isMobile ? '44px' : 'auto' };
+                        return (
+                          <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', justifyContent: 'space-between', alignItems: isMobile ? 'stretch' : 'center', gap: '10px', padding: '12px 14px', border: '1px solid #ede9fe', borderRadius: '10px', background: '#faf5ff', marginBottom: '16px' }}>
+                            <div style={{ minWidth: 0 }}>
+                              <div style={{ fontSize: '12px', fontWeight: '700', color: '#0f172a', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                                <Sparkles size={15} color="#7C3AED" /> AI deal report
+                                {badge && <span title={badge.title} style={{ fontSize: '11px', fontWeight: '600', padding: '2px 8px', borderRadius: '999px', background: badge.bg, color: badge.fg }}>{badge.text}</span>}
+                              </div>
+                              <div style={{ fontSize: '11px', color: '#64748b', marginTop: '3px' }}>Runs the full 3-stage pipeline on your PC and saves the report here. Queues if the analyser is offline.</div>
+                            </div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+                              {rj?.status === 'done' && (
+                                <button onClick={handleParseGeneratedReport} title="Pull the AI summary, red flags, GDV scenarios and figures from the generated report into this property" style={{ ...btnBase, border: '1px solid #bbf7d0', background: '#f0fdf4', color: '#166534' }}>Parse now</button>
+                              )}
+                              {rj?.status === 'failed' && (
+                                <button onClick={handleGenerateReport} disabled={reportJobBusy} style={{ ...btnBase, border: '1px solid #fecaca', background: '#fff5f5', color: '#dc2626', opacity: reportJobBusy ? 0.6 : 1 }}>Retry</button>
+                              )}
+                              {!inFlight && rj?.status !== 'failed' && (
+                                <button onClick={handleGenerateReport} disabled={reportJobBusy} style={{ ...btnBase, border: '1px solid #7C3AED', background: '#7C3AED', color: '#fff', opacity: reportJobBusy ? 0.6 : 1 }}>{rj?.status === 'done' ? 'Regenerate' : (reportJobBusy ? 'Queuing…' : 'Generate report')}</button>
+                              )}
+                              {inFlight && (
+                                <button disabled style={{ ...btnBase, border: '1px solid #c4b5fd', background: '#ede9fe', color: '#6d28d9', cursor: 'default' }}>Working…</button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })()}
                       <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8', marginBottom: '12px' }}>Document vault</div>
                       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '8px', marginBottom: '16px' }}>
                         {FILE_KEYS.filter(f => f.key !== 'legalPack').map(({ key, label, accept }) => {
