@@ -3448,6 +3448,66 @@ export default {
   },
 };
 
+// Infer a stored document's "kind" from its fileKey + filename so the analyser
+// can route it into the right extraction file-role array. Deterministic, no LLM.
+// The property's own generated report docs are excluded by the caller — a report
+// must never re-ingest itself.
+function inferDocKind(fileKey, filename) {
+  const fk = (fileKey || '').toLowerCase();
+  const fn = (filename || '').toLowerCase();
+  if (fk.startsWith('legal') || fn.includes('legal pack') || fn.includes('legalpack')) return 'legalpack';
+  if (fk === 'rightmoveplus' || fn.includes('rightmove')) return 'rmplus';
+  if (fn.includes('sprift')) return 'sprift';
+  if (fk.includes('survey') || fn.includes('survey')) return 'survey';
+  return 'other';
+}
+
+// Build the report-job payload snapshot from a CRM property record. Carries
+// everything the analyser's form would want plus the property's stored document
+// references (§1 amendment). Empty fields are omitted — the analyser pipeline
+// tolerates partial form data. Floor area is passed under a neutral key because
+// the CRM stores it in ambiguous units (sqm from EPC, sometimes sqft from a
+// report); the analyser resolves units authoritatively via its own EPC fetch.
+function buildReportJobPayload(property) {
+  const an = property.analytics || {};
+  const put = (obj, key, val) => {
+    if (val !== undefined && val !== null && val !== '' && !(typeof val === 'number' && Number.isNaN(val))) obj[key] = val;
+  };
+  const payload = {};
+  put(payload, 'dealName', property.dealName || property.address);
+  put(payload, 'address', property.address);
+  put(payload, 'postcode', property.postcode);
+  put(payload, 'guidePrice', property.guidePrice);
+  put(payload, 'bedrooms', property.bedrooms);
+  put(payload, 'propertyType', property.propertyType);
+  put(payload, 'epcCurrent', property.epcRating ?? an.epcRating);
+  put(payload, 'floorArea', property.floorArea ?? an.floorArea);
+  put(payload, 'auctionCloses', property.auctionDate ? `${property.auctionDate}${property.auctionTime ? ' ' + property.auctionTime : ''}` : undefined);
+  put(payload, 'auctionHouse', property.auctionHouse || property.sourcePlatform);
+  put(payload, 'auctionUrl', property.listingUrl || property.lotResultUrl);
+  put(payload, 'tenure', property.tenure);
+  put(payload, 'lightRefurb', an.refurbLight);
+  put(payload, 'mediumRefurb', an.refurbMedium);
+  put(payload, 'heavyRefurb', an.refurbHeavy);
+  put(payload, 'holdingMonths', property.holdingMonths);
+  put(payload, 'adminFee', property.adminFee);
+  put(payload, 'exitStrategy', property.exitStrategy);
+
+  // §1 amendment — stored document references (R2 key + filename + inferred
+  // kind). Skip the property's own generated report docs so a report never
+  // re-ingests itself. The analyser downloads the bytes itself (§3).
+  const documents = [];
+  const files = property.files || {};
+  for (const [fileKey, rec] of Object.entries(files)) {
+    if (!rec || !rec.key) continue;
+    const fk = fileKey.toLowerCase();
+    if (fk === 'mainreport' || fk === 'report' || fk === 'legalpack-report') continue;
+    documents.push({ key: rec.key, filename: rec.name || '', kind: inferDocKind(fileKey, rec.name) });
+  }
+  if (documents.length) payload.documents = documents;
+  return payload;
+}
+
 async function handleApiRoutes(request, env, url, ctx) {
     // --------------------------------------------------------
     // MARKET INTELLIGENCE — all /api/market/* routes live in
@@ -4783,6 +4843,203 @@ async function handleApiRoutes(request, env, url, ctx) {
       headers.set('Cache-Control', 'private, max-age=3600');
       headers.set('Content-Disposition', 'inline');
       return new Response(object.body, { headers });
+    }
+
+    // --------------------------------------------------------
+    // REPORT GENERATION QUEUE
+    // The analyser app (running on the user's PC under pm2) polls these routes,
+    // runs its 3-stage pipeline locally, and pushes the finished HTML back into
+    // R2. It authenticates with an extension token — a normal session — so every
+    // route is session-checked exactly like the rest of the API. Route bodies are
+    // wrapped in try/catch with meaningful errors because the top-level fetch
+    // wrapper otherwise masks any throw as a generic 400.
+    // --------------------------------------------------------
+
+    // POST /api/reports/jobs — queue a report for a property (from the CRM UI).
+    if (url.pathname === '/api/reports/jobs' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const allowed = await checkRateLimit(env, `reportjob:${session.userId}`, 20);
+      if (!allowed) return corsResponse({ success: false, message: 'Too many requests — please slow down' }, 429);
+      try {
+        const { propertyId } = await request.json();
+        if (propertyId == null) return corsResponse({ success: false, message: 'propertyId is required' }, 400);
+
+        // Load the property the same way GET /api/crm-data / duplicate-check do:
+        // D1 primary, KV merge fallback. Properties are shared across users here.
+        let properties;
+        try {
+          await ensureCrmMigratedToD1(env);
+          properties = (await readCrmFromD1(env)).properties || [];
+        } catch {
+          const userIds = (await env.SCRAPER_KV.get('crm:user-ids', 'json')) || [];
+          const datasets = await Promise.all(userIds.map(id => env.SCRAPER_KV.get(`crm:user:${id}`, 'json')));
+          properties = mergeUserData(datasets.filter(Boolean)).properties || [];
+        }
+        const property = properties.find(p => String(p.id) === String(propertyId) && !p.deleted);
+        if (!property) return corsResponse({ success: false, message: 'Property not found' }, 404);
+
+        // One in-flight job per property.
+        const existing = await env.CRM_DB.prepare(
+          `SELECT id FROM report_jobs WHERE property_id = ? AND status IN ('pending','claimed','generating') LIMIT 1`
+        ).bind(String(propertyId)).first();
+        if (existing) return corsResponse({ success: false, message: 'A report is already being generated for this property' }, 409);
+
+        const payload = buildReportJobPayload(property);
+        const jobId = crypto.randomUUID();
+        const now = new Date().toISOString();
+        await env.CRM_DB.prepare(
+          `INSERT INTO report_jobs (id, user_id, property_id, status, payload, created_at) VALUES (?, ?, ?, 'pending', ?, ?)`
+        ).bind(jobId, String(session.userId), String(propertyId), JSON.stringify(payload), now).run();
+        return corsResponse({ success: true, jobId });
+      } catch (err) {
+        console.error('POST /api/reports/jobs error:', err);
+        return corsResponse({ success: false, message: `Failed to queue report: ${err.message}` }, 500);
+      }
+    }
+
+    // GET /api/reports/jobs/next — the analyser's poll. Atomically claims the
+    // oldest pending job, after first resetting any job stuck > 30 min (crash
+    // recovery). Returns { job } or { job: null }.
+    if (url.pathname === '/api/reports/jobs/next' && request.method === 'GET') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const allowed = await checkRateLimit(env, `reportpoll:${session.userId}`, 120);
+      if (!allowed) return corsResponse({ success: false, message: 'Too many requests' }, 429);
+      try {
+        const staleCutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+        await env.CRM_DB.prepare(
+          `UPDATE report_jobs SET status='pending', claimed_at=NULL WHERE status IN ('claimed','generating') AND (claimed_at IS NULL OR claimed_at < ?)`
+        ).bind(staleCutoff).run();
+
+        // D1 supports RETURNING; the subquery picks the oldest pending job.
+        const claimed = await env.CRM_DB.prepare(
+          `UPDATE report_jobs SET status='claimed', claimed_at=? WHERE id = (SELECT id FROM report_jobs WHERE status='pending' ORDER BY created_at LIMIT 1) RETURNING *`
+        ).bind(new Date().toISOString()).first();
+        if (!claimed) return corsResponse({ success: true, job: null });
+        let payload = {};
+        try { payload = JSON.parse(claimed.payload); } catch {}
+        return corsResponse({ success: true, job: {
+          id: claimed.id, propertyId: claimed.property_id, userId: claimed.user_id,
+          status: claimed.status, payload, createdAt: claimed.created_at,
+        } });
+      } catch (err) {
+        console.error('GET /api/reports/jobs/next error:', err);
+        return corsResponse({ success: false, message: `Failed to claim job: ${err.message}` }, 500);
+      }
+    }
+
+    // POST /api/reports/jobs/:id/progress — analyser reports it's generating.
+    if (/^\/api\/reports\/jobs\/[^/]+\/progress$/.test(url.pathname) && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      try {
+        const id = url.pathname.split('/')[4];
+        const body = await request.json().catch(() => ({}));
+        await env.CRM_DB.prepare(
+          `UPDATE report_jobs SET status='generating', message=? WHERE id = ? AND status IN ('claimed','generating')`
+        ).bind(body.message ? String(body.message).slice(0, 500) : null, id).run();
+        return corsResponse({ success: true });
+      } catch (err) {
+        console.error('POST /api/reports/jobs/:id/progress error:', err);
+        return corsResponse({ success: false, message: err.message }, 500);
+      }
+    }
+
+    // POST /api/reports/jobs/:id/complete — analyser pushes the finished HTML.
+    // Accepts multipart/form-data (file) OR JSON { html } (<=5MB). Stores through
+    // the same R2 path as /api/documents/upload so View / inline open / re-parse /
+    // indexing all work unchanged. A secondary doc (fileKey != 'report', e.g. the
+    // legal-pack stage-2 report) is stored but does NOT complete the job.
+    if (/^\/api\/reports\/jobs\/[^/]+\/complete$/.test(url.pathname) && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      try {
+        const id = url.pathname.split('/')[4];
+        const job = await env.CRM_DB.prepare(`SELECT * FROM report_jobs WHERE id = ?`).bind(id).first();
+        if (!job) return corsResponse({ success: false, message: 'Job not found' }, 404);
+
+        const contentType = request.headers.get('Content-Type') || '';
+        let html, providedName, fileKey = 'report';
+        if (contentType.includes('multipart/form-data')) {
+          const fd = await request.formData();
+          const file = fd.get('file');
+          if (file && typeof file !== 'string') { html = await file.text(); providedName = file.name; }
+          if (fd.get('fileKey')) fileKey = String(fd.get('fileKey'));
+          if (fd.get('filename')) providedName = String(fd.get('filename'));
+        } else {
+          const body = await request.json();
+          html = body.html;
+          if (body.fileKey) fileKey = String(body.fileKey);
+          if (body.filename) providedName = String(body.filename);
+        }
+        if (!html || typeof html !== 'string') return corsResponse({ success: false, message: 'No report HTML provided' }, 400);
+        if (html.length > 5 * 1024 * 1024) return corsResponse({ success: false, message: 'Report HTML exceeds 5MB' }, 413);
+
+        let addressPart = '';
+        try { addressPart = (JSON.parse(job.payload).address || '').replace(/[\\/:*?"<>|]/g, '').trim().slice(0, 60); } catch {}
+        const dateStr = new Date().toISOString().slice(0, 10);
+        const label = fileKey === 'report' ? 'AI Report' : 'AI Legal Pack Report';
+        const filename = providedName || `${label} - ${addressPart || job.property_id} - ${dateStr}.html`;
+        const keyToken = bytesToHex(crypto.getRandomValues(new Uint8Array(8)));
+        const key = `${job.user_id}/${job.property_id}/${fileKey}/${keyToken}/${filename}`;
+
+        await env.CRM_DOCS.put(key, html, { httpMetadata: { contentType: 'text/html' } });
+        if (env.AI && env.VECTORIZE && SEARCHABLE_DOC.test(filename)) {
+          const blob = new Blob([html], { type: 'text/html' });
+          ctx.waitUntil(indexDocumentForSearch(env, { key, name: filename, propertyId: job.property_id, userId: job.user_id, blob }));
+        }
+
+        if (fileKey === 'report') {
+          await env.CRM_DB.prepare(
+            `UPDATE report_jobs SET status='done', result_doc_key=?, completed_at=?, message=NULL WHERE id = ?`
+          ).bind(key, new Date().toISOString(), id).run();
+        }
+        return corsResponse({ success: true, key, name: filename });
+      } catch (err) {
+        console.error('POST /api/reports/jobs/:id/complete error:', err);
+        return corsResponse({ success: false, message: err.message }, 500);
+      }
+    }
+
+    // POST /api/reports/jobs/:id/fail — analyser reports a pipeline failure.
+    if (/^\/api\/reports\/jobs\/[^/]+\/fail$/.test(url.pathname) && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      try {
+        const id = url.pathname.split('/')[4];
+        const body = await request.json().catch(() => ({}));
+        await env.CRM_DB.prepare(
+          `UPDATE report_jobs SET status='failed', error=?, completed_at=? WHERE id = ?`
+        ).bind(String(body.error || 'Unknown error').slice(0, 2000), new Date().toISOString(), id).run();
+        return corsResponse({ success: true });
+      } catch (err) {
+        console.error('POST /api/reports/jobs/:id/fail error:', err);
+        return corsResponse({ success: false, message: err.message }, 500);
+      }
+    }
+
+    // GET /api/reports/jobs/status?propertyId= — latest job for a property (UI badge polls this).
+    if (url.pathname === '/api/reports/jobs/status' && request.method === 'GET') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const allowed = await checkRateLimit(env, `reportstatus:${session.userId}`, 120);
+      if (!allowed) return corsResponse({ success: false, message: 'Too many requests' }, 429);
+      try {
+        const propertyId = url.searchParams.get('propertyId');
+        if (!propertyId) return corsResponse({ success: false, message: 'propertyId is required' }, 400);
+        const row = await env.CRM_DB.prepare(
+          `SELECT id, status, error, message, created_at, completed_at, result_doc_key FROM report_jobs WHERE property_id = ? ORDER BY created_at DESC LIMIT 1`
+        ).bind(String(propertyId)).first();
+        if (!row) return corsResponse({ success: true, job: null });
+        return corsResponse({ success: true, job: {
+          id: row.id, status: row.status, error: row.error, message: row.message,
+          createdAt: row.created_at, completedAt: row.completed_at, resultDocKey: row.result_doc_key,
+        } });
+      } catch (err) {
+        console.error('GET /api/reports/jobs/status error:', err);
+        return corsResponse({ success: false, message: err.message }, 500);
+      }
     }
 
     // --------------------------------------------------------
