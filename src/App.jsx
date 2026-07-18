@@ -857,6 +857,12 @@ export default function App({ user = {}, onLogout }) {
     return m ? m[0] : '';
   };
 
+  // Extract just the outcode (postcode district) from an address string
+  const extractOutcode = (str) => {
+    const pc = extractPostcode(str);
+    return pc ? pc.split(' ')[0] : '';
+  };
+
   // Run all public API connectors for a property and merge results
   const runDocSearch = async (prop, { global = false } = {}) => {
     const q = docSearchQuery.trim();
@@ -2914,6 +2920,25 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
     }).catch(() => setMiSignals({ overview: null, topAreas: [] }));
   }, [activeTab]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Cross-link: outcode → Market Intel area row, fetched once on first visit to Triage or Market Intel
+  const [miByOutcode, setMiByOutcode] = useState(null);
+  const [marketIntelTarget, setMarketIntelTarget] = useState(null);
+  useEffect(() => {
+    if ((activeTab !== 'scraper' && activeTab !== 'marketintel') || miByOutcode !== null) return;
+    const token = localStorage.getItem('crm_session');
+    fetch('/api/market/areas?type=outcode&limit=500', { headers: { 'Authorization': `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : null).catch(() => null)
+      .then(d => {
+        const byOutcode = {};
+        (d?.areas || []).forEach((a, i) => { byOutcode[a.area_id] = { ...a, rank: i + 1 }; });
+        setMiByOutcode(byOutcode);
+      });
+  }, [activeTab]); // eslint-disable-line react-hooks/exhaustive-deps
+  const onNavigateToTriageOutcode = (outcode) => {
+    setAuctionLotFilter(f => ({ ...f, search: outcode }));
+    setActiveTab('scraper');
+  };
+
   // KV persistence — declared here so all state vars above are in scope
   const [saveStatus, setSaveStatus] = useState('idle');
   const [dataLoaded, setDataLoaded] = useState(false);
@@ -3362,6 +3387,14 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
       if (filterRecommendation === 'neutral' && p.isStrongBid) return false;
     }
     return true;
+  });
+
+  // Cross-link: count of live (not rejected/withdrawn/promoted) triage lots per outcode
+  const liveLotsByOutcode = {};
+  auctionLots.forEach(l => {
+    if (l.status === 'rejected' || l.status === 'promoted' || l.isWithdrawn) return;
+    const oc = extractOutcode(l.address);
+    if (oc) liveLotsByOutcode[oc] = (liveLotsByOutcode[oc] || 0) + 1;
   });
 
   // Pipeline-specific filtered + sorted properties
@@ -6836,7 +6869,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         )}
                       </div>
                       <div style={panel}>
-                        <div style={panelHead}><span>📡 Market Intelligence Signals</span><span onClick={() => setActiveTab('marketintel')} style={dashLink}>View Market Intel →</span></div>
+                        <div style={panelHead}><span>📡 Market Intelligence Signals</span><span onClick={() => { setMarketIntelTarget({ sub: 'ranking' }); setActiveTab('marketintel'); }} style={dashLink}>View Market Intel →</span></div>
                         {!miSignals || (!miSignals.overview && miSignals.topAreas.length === 0) ? (
                           <div style={dashEmpty}>{miSignals ? 'No market intelligence data yet — run a national scan from Market Intel.' : 'Loading…'}</div>
                         ) : (
@@ -6847,7 +6880,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                             ) : (
                               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                                 {miSignals.topAreas.map((a, i) => (
-                                  <div key={a.area_id} onClick={() => setActiveTab('marketintel')} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', fontSize: '12px', color: '#334155' }}>
+                                  <div key={a.area_id} onClick={() => { setMarketIntelTarget({ sub: 'detail', outcode: a.area_id }); setActiveTab('marketintel'); }} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', fontSize: '12px', color: '#334155' }}>
                                     <span><b style={{ fontWeight: '600', color: '#0f172a' }}>#{i + 1}</b> {a.area_id}</span>
                                     <span style={{ fontSize: '11px', fontWeight: '600', color: '#7C3AED', background: '#faf5ff', borderRadius: '6px', padding: '2px 8px' }}>{a.score != null ? Math.round(a.score) : '—'}</span>
                                   </div>
@@ -7833,6 +7866,14 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                     {lot.aiFlag
                                       ? <span title={lot.aiNote ? `${lot.aiNote}${lot.aiGuideAssessment ? ` (guide: ${lot.aiGuideAssessment.replace('_', ' ')})` : ''}` : ''} style={{ fontSize: '10px', padding: '1px 4px', background: TRIAGE_FLAG_BG[lot.aiFlag], color: TRIAGE_FLAG_COLOR[lot.aiFlag], borderRadius: '4px', fontWeight: '500', marginLeft: '4px', cursor: 'help' }}>🤖 {TRIAGE_FLAG_LABELS[lot.aiFlag]}</span>
                                       : <button onClick={(e) => { e.stopPropagation(); runTriageInsight(lot); }} disabled={aiTriageLoadingId === lot.id} title="AI triage insight" style={{ fontSize: '10px', padding: '1px 4px', marginLeft: '4px', background: 'transparent', border: '0.5px solid #e2e8f0', borderRadius: '4px', cursor: aiTriageLoadingId === lot.id ? 'wait' : 'pointer', color: '#64748b' }}>{aiTriageLoadingId === lot.id ? '…' : '🤖'}</button>}
+                                    {(() => {
+                                      const oc = extractOutcode(lot.address);
+                                      const mi = oc && miByOutcode ? miByOutcode[oc] : null;
+                                      if (!mi) return null;
+                                      return (
+                                        <span onClick={e => { e.stopPropagation(); setMarketIntelTarget({ sub: 'detail', outcode: oc }); setActiveTab('marketintel'); }} title={`Market Intel: ${oc} scores ${Math.round(mi.score)}${mi.rank ? ` (rank #${mi.rank} nationally)` : ''} · click to open Area Detail`} style={{ fontSize: '10px', padding: '1px 4px', background: '#ede9fe', color: '#6d28d9', borderRadius: '4px', fontWeight: '500', marginLeft: '4px', cursor: 'pointer' }}>📡 {oc} · {Math.round(mi.score)}</span>
+                                      );
+                                    })()}
                                   </div>
                                   <div style={{ fontSize: '10px', color: '#94a3b8', marginTop: '1px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                     {lot.houseName || 'Manual'}
@@ -8111,7 +8152,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
               )}
 
               {/* ==================== TAB: MARKET INTEL ==================== */}
-              {activeTab === 'marketintel' && <MarketIntel isMobile={isMobile} isTablet={isTablet} />}
+              {activeTab === 'marketintel' && <MarketIntel isMobile={isMobile} isTablet={isTablet} liveLotsByOutcode={liveLotsByOutcode} onNavigateToTriageOutcode={onNavigateToTriageOutcode} target={marketIntelTarget} onTargetConsumed={() => setMarketIntelTarget(null)} />}
 
               {/* ==================== TAB: AUCTION INTEL (Option A) ==================== */}
               {activeTab === 'auctionintel' && (() => {

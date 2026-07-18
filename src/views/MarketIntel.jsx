@@ -138,7 +138,7 @@ function buildGrowthSpark(growth, hpi) {
   return pts.length >= 2 ? pts : null;
 }
 
-export default function MarketIntel({ isMobile, isTablet }) {
+export default function MarketIntel({ isMobile, isTablet, liveLotsByOutcode, onNavigateToTriageOutcode, target, onTargetConsumed }) {
   const [view, setView] = useState('overview');
   const [error, setError] = useState(null);
 
@@ -194,6 +194,15 @@ export default function MarketIntel({ isMobile, isTablet }) {
   const [dataMsg, setDataMsg] = useState(null);
 
   const openAreaDetail = id => { setView('detail'); setDetailInput(id); };
+
+  // External navigation request from App.jsx (e.g. from the Dashboard or a Triage lot's MI badge)
+  useEffect(() => {
+    if (!target) return;
+    if (target.sub === 'detail' && target.outcode) openAreaDetail(target.outcode);
+    else if (target.sub) setView(target.sub);
+    if (onTargetConsumed) onTargetConsumed();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [target]);
 
   const loadDataHealth = () => {
     api('/api/market/jobs').then(d => setJobs(d.jobs || [])).catch(e => setError(String(e)));
@@ -487,7 +496,12 @@ export default function MarketIntel({ isMobile, isTablet }) {
                     return (
                       <tr key={a.area_id} onClick={clickable ? () => openAreaDetail(a.area_id) : undefined} style={clickable ? { cursor: 'pointer' } : undefined} title={clickable ? `Open ${a.area_id} in Area Detail` : undefined}>
                         <td style={td}>{i + 1}</td>
-                        <td style={{ ...td, fontWeight: 600, color: clickable ? '#2563eb' : undefined }}>{a.area_id}</td>
+                        <td style={{ ...td, fontWeight: 600, color: clickable ? '#2563eb' : undefined }}>
+                          {a.area_id}
+                          {liveLotsByOutcode?.[a.area_id] > 0 && (
+                            <span onClick={e => { e.stopPropagation(); onNavigateToTriageOutcode && onNavigateToTriageOutcode(a.area_id); }} title={`${liveLotsByOutcode[a.area_id]} live Auction Triage lot(s) in ${a.area_id} — click to open Triage`} style={{ fontSize: '10px', padding: '1px 5px', background: '#ede9fe', color: '#6d28d9', borderRadius: '4px', fontWeight: '500', marginLeft: '6px', cursor: 'pointer' }}>🔨 {liveLotsByOutcode[a.area_id]} live</span>
+                          )}
+                        </td>
                         <td style={td}><ScoreChip score={a.score} /></td>
                         <td style={td}>{a.confidence != null ? Math.round(a.confidence * 100) + '%' : '—'}</td>
                         <td style={{ ...td, fontWeight: 700, color: '#059669' }}>{a.sub100k_confirmed}</td>
@@ -613,7 +627,12 @@ export default function MarketIntel({ isMobile, isTablet }) {
                   <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
                     <Globe size={16} style={{ color: '#64748b', flexShrink: 0 }} />
                     <div>
-                      <div style={{ fontSize: isMobile ? '18px' : '22px', fontWeight: 800, color: '#0f172a' }}>{detailAreaId}</div>
+                      <div style={{ fontSize: isMobile ? '18px' : '22px', fontWeight: 800, color: '#0f172a', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        {detailAreaId}
+                        {liveLotsByOutcode?.[detailAreaId] > 0 && (
+                          <span onClick={() => onNavigateToTriageOutcode && onNavigateToTriageOutcode(detailAreaId)} title={`${liveLotsByOutcode[detailAreaId]} live Auction Triage lot(s) in ${detailAreaId} — click to open Triage`} style={{ fontSize: '11px', padding: '2px 7px', background: '#ede9fe', color: '#6d28d9', borderRadius: '5px', fontWeight: '600', cursor: 'pointer' }}>🔨 {liveLotsByOutcode[detailAreaId]} live</span>
+                        )}
+                      </div>
                       <div style={{ fontSize: '12px', color: '#64748b' }}>{detailContext.geo?.localAuthority || 'Local authority — unknown'}{detailContext.geo?.region ? ` · ${detailContext.geo.region}` : ''}</div>
                     </div>
                   </div>
