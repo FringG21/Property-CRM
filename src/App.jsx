@@ -4770,146 +4770,153 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     );
                   })()}
 
-                  {/* Deal narrative — Report summary / AI review / Market comparison
-                      consolidated into one tabbed card. Presentation only: the three
-                      sources keep their disjoint storage (reportSummary vs ai* vs
-                      dealAnalysis*) per the ownership contract in CLAUDE.md.
+                  {/* Deal verdict — single compiled card combining Report summary / AI review /
+                      Market comparison. Presentation only: the three sources keep their
+                      disjoint storage (reportSummary vs ai* vs dealAnalysis*) per the
+                      ownership contract in CLAUDE.md.
                       Legacy fallback: older properties stored the report summary in
                       aiSummary before an AI review had ever run (aiDealScore still null). */}
                   {propCanvasTab === 'overview' && (() => {
-                    const hasReport = !!(an.reportSummary || (an.aiSummary && an.aiDealScore == null));
+                    const isLegacyReportInAiSummary = !an.reportSummary && !!an.aiSummary && an.aiDealScore == null;
+                    const hasReport = !!(an.reportSummary || isLegacyReportInAiSummary);
                     const hasAi = !!an.aiSummary;
                     const hasMarket = !!an.dealAnalysisSummary;
                     if (!hasReport && !hasAi && !hasMarket) return null;
-                    const tabs = [
-                      hasReport && { k: 'report', l: '📄 Report' },
-                      hasAi && { k: 'ai', l: '🤖 AI review' },
-                      hasMarket && { k: 'market', l: '🌐 Market' },
-                    ].filter(Boolean);
-                    const defaultTab = an.aiDealScore != null ? 'ai' : hasReport ? 'report' : hasAi ? 'ai' : 'market';
-                    const active = tabs.some(t => t.k === narrativeTab) ? narrativeTab : defaultTab;
-                    const agr = an.aiReportCrossCheck ? (an.aiReportAgreement || 'agree') : null;
-                    const agrC = agr === 'agree' ? '#059669' : agr === 'partial' ? '#d97706' : '#dc2626';
-                    const agrLbl = { agree: 'AI agrees with report', partial: 'AI partly agrees', disagree: 'AI disagrees with report' }[agr];
-                    return (
-                      <div style={{ margin: '14px 20px 0' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px', flexWrap: 'wrap' }}>
-                          <span style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.06em', color: '#64748b' }}>Deal narrative</span>
-                          {tabs.map(t => (
-                            <button key={t.k} onClick={() => setNarrativeTab(t.k)} style={{ padding: isMobile ? '8px 12px' : '3px 10px', borderRadius: '12px', border: '1px solid', borderColor: active === t.k ? '#c4b5fd' : '#e2e8f0', background: active === t.k ? '#ede9fe' : '#fff', color: active === t.k ? '#5b21b6' : '#64748b', fontSize: '11px', fontWeight: active === t.k ? '600' : '400', cursor: 'pointer', fontFamily: 'inherit' }}>{t.l}</button>
-                          ))}
-                          {agr && <span title={an.aiReportCrossCheck} style={{ marginLeft: 'auto', fontSize: '10px', fontWeight: '600', padding: '2px 8px', borderRadius: '10px', background: '#fff', border: `1px solid ${agrC}`, color: agrC, cursor: 'help' }}>{agrLbl}</span>}
-                        </div>
-
-                        {/* Report pane — the report's own written summary */}
-                        {active === 'report' && (
-                    <div style={{ borderRadius: '8px', border: '1px solid #fde68a', background: '#fffbeb', padding: '10px 12px', display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
-                      <span style={{ fontSize: '14px', flexShrink: 0 }}>📄</span>
-                      <div>
-                        <div style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.07em', color: '#92400e', marginBottom: '3px' }}>Report summary</div>
-                        <div style={{ fontSize: '11px', color: '#451a03', lineHeight: '1.5' }}>{an.reportSummary || an.aiSummary}</div>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* AI review pane (same card as the Deal Analysis tab) */}
-                  {active === 'ai' && hasAi && (() => {
                     const hasScore = an.aiDealScore != null;
                     const score = an.aiDealScore ?? 0;
                     const scoreCol = score >= 70 ? '#059669' : score >= 45 ? '#d97706' : '#dc2626';
                     const verdictLabel = { strong_buy: 'Strong buy', buy: 'Buy', conditional: 'Conditional', avoid: 'Avoid' }[an.aiVerdict] || an.aiVerdict;
+                    const agr = an.aiReportCrossCheck ? (an.aiReportAgreement || 'agree') : null;
+                    const agrC = agr === 'agree' ? '#059669' : agr === 'partial' ? '#d97706' : '#dc2626';
+                    const agrLbl = { agree: 'AI agrees with report', partial: 'AI partly agrees', disagree: 'AI disagrees with report' }[agr];
+                    const posCol = { underpriced: '#059669', fair: '#2563eb', overpriced: '#dc2626', insufficient_data: '#64748b' }[an.dealAnalysisPositioning] || '#64748b';
+                    const posLabel = { underpriced: 'Underpriced', fair: 'Fair value', overpriced: 'Overpriced', insufficient_data: 'Insufficient data' }[an.dealAnalysisPositioning] || an.dealAnalysisPositioning;
+                    const marketComps = an.dealAnalysisComparables || [];
+                    const mergedRisks = [
+                      ...(an.redFlags || []).map(text => ({ text, tag: 'Report', tagBg: '#ede9fe', tagColor: '#5b21b6' })),
+                      ...(an.aiRiskFlags || []).map(text => ({ text, tag: 'AI', tagBg: '#fef9c3', tagColor: '#854d0e' })),
+                    ];
                     return (
-                      <div style={{ backgroundColor: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: '10px', padding: '14px 16px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '10px', flexWrap: 'wrap' }}>
-                          <div style={{ fontSize: '12px', fontWeight: '700', color: '#6d28d9' }}>🤖 AI deal review</div>
-                          {(hasScore || verdictLabel) && (
-                            <span style={{ fontSize: '11px', padding: '2px 10px', borderRadius: '12px', background: '#fff', border: `1px solid ${scoreCol}`, color: scoreCol, fontWeight: '700' }}>{hasScore ? `${score}/100` : ''}{hasScore && verdictLabel ? ' · ' : ''}{verdictLabel || ''}</span>
+                      <div style={{ margin: '14px 20px 0', backgroundColor: '#fff', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '14px 16px' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px', flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: '11px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.06em', color: '#0f172a' }}>⚡ Deal verdict</span>
+                          {hasAi && !isLegacyReportInAiSummary ? (
+                            (hasScore || verdictLabel) && (
+                              <span style={{ fontSize: '11px', padding: '2px 10px', borderRadius: '12px', background: '#fff', border: `1px solid ${scoreCol}`, color: scoreCol, fontWeight: '700' }}>{hasScore ? `${score}/100` : ''}{hasScore && verdictLabel ? ' · ' : ''}{verdictLabel || ''}</span>
+                            )
+                          ) : hasReport ? (
+                            <span style={{ fontSize: '11px', color: '#92400e', background: '#fffbeb', border: '1px solid #fde68a', padding: '2px 10px', borderRadius: '12px' }}>📄 Report only — run the AI review for a scored verdict</span>
+                          ) : hasMarket && (
+                            <span style={{ fontSize: '11px', color: '#1d4ed8', background: '#eff6ff', border: '1px solid #bfdbfe', padding: '2px 10px', borderRadius: '12px' }}>🌐 Market comparison only — run the AI review for a scored verdict</span>
                           )}
-                          {(an.aiReviewedAt || an.aiProvider) && (
-                            <span style={{ fontSize: '10px', color: '#a78bfa', marginLeft: 'auto' }}>
-                              {an.aiProvider ? `via ${AI_PROVIDER_LABELS[an.aiProvider] || an.aiProvider} · ` : ''}
-                              {an.aiReviewedAt && new Date(an.aiReviewedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
-                            </span>
-                          )}
+                          {agr && <span title={an.aiReportCrossCheck} style={{ fontSize: '10px', fontWeight: '600', padding: '2px 8px', borderRadius: '10px', background: '#fff', border: `1px solid ${agrC}`, color: agrC, cursor: 'help' }}>{agrLbl}</span>}
                         </div>
                         {hasScore && (
-                          <div style={{ height: '6px', background: '#ede9fe', borderRadius: '3px', overflow: 'hidden', marginBottom: '10px' }}>
+                          <div style={{ height: '6px', background: '#ede9fe', borderRadius: '3px', overflow: 'hidden', marginBottom: '12px' }}>
                             <div style={{ width: `${score}%`, height: '100%', background: scoreCol }}></div>
                           </div>
                         )}
-                        <div style={{ fontSize: '12px', color: '#3b0764', lineHeight: 1.6, marginBottom: (an.aiBidGuidance || an.aiReportCrossCheck || an.aiRiskFlags?.length || an.aiStrengths?.length || an.aiBlindSpots?.length) ? '10px' : 0 }}>{an.aiSummary}</div>
+
+                        {/* AI summary */}
+                        {hasAi && !isLegacyReportInAiSummary && (
+                          <div style={{ marginBottom: '10px', padding: '10px 12px', background: '#faf5ff', border: '1px solid #e9d5ff', borderRadius: '8px' }}>
+                            <div style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.05em', color: '#6d28d9', marginBottom: '3px' }}>🤖 AI summary</div>
+                            <div style={{ fontSize: '12px', color: '#3b0764', lineHeight: 1.6 }}>{an.aiSummary}</div>
+                          </div>
+                        )}
+
+                        {/* Market position */}
+                        {hasMarket ? (
+                          <div style={{ marginBottom: '10px', padding: '10px 12px', background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '3px', flexWrap: 'wrap' }}>
+                              <span style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.05em', color: '#1d4ed8' }}>🌐 Market position</span>
+                              <span style={{ fontSize: '10px', padding: '1px 8px', borderRadius: '10px', background: '#fff', border: `1px solid ${posCol}`, color: posCol, fontWeight: '700' }}>{posLabel} · {an.dealAnalysisConfidence} confidence</span>
+                            </div>
+                            <div style={{ fontSize: '12px', color: '#1e3a8a', lineHeight: 1.6 }}>{an.dealAnalysisSummary}</div>
+                          </div>
+                        ) : hasAi && !isLegacyReportInAiSummary && (
+                          <div style={{ marginBottom: '10px', fontSize: '11px', color: '#64748b' }}>🌐 No live market comparison yet</div>
+                        )}
+
+                        {/* Bid guidance */}
                         {an.aiBidGuidance && (
-                          <div style={{ marginBottom: (an.aiReportCrossCheck || an.aiRiskFlags?.length || an.aiStrengths?.length || an.aiBlindSpots?.length) ? '10px' : 0, padding: '8px 10px', background: '#fff', border: '1px solid #ddd6fe', borderLeft: '3px solid #7c3aed', borderRadius: '6px' }}>
+                          <div style={{ marginBottom: '10px', padding: '8px 10px', background: '#fff', border: '1px solid #ddd6fe', borderLeft: '3px solid #7c3aed', borderRadius: '6px' }}>
                             <span style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.05em', color: '#6d28d9' }}>Bid guidance</span>
                             <div style={{ fontSize: '11px', color: '#3b0764', lineHeight: 1.5, marginTop: '2px' }}>{an.aiBidGuidance}</div>
                           </div>
                         )}
+
+                        {/* vs report cross-check */}
                         {an.aiReportCrossCheck && (() => {
-                          const agr = an.aiReportAgreement || 'agree';
-                          const c = agr === 'agree' ? '#059669' : agr === 'partial' ? '#d97706' : '#dc2626';
+                          const c = agrC;
                           const lbl = { agree: 'Agrees with report', partial: 'Partly agrees', disagree: 'Disagrees with report' }[agr] || agr;
                           return (
-                            <div style={{ marginBottom: (an.aiRiskFlags?.length || an.aiStrengths?.length) ? '10px' : 0, padding: '8px 10px', background: '#fff', border: `1px solid ${c}44`, borderLeft: `3px solid ${c}`, borderRadius: '6px' }}>
+                            <div style={{ marginBottom: '10px', padding: '8px 10px', background: '#fff', border: `1px solid ${c}44`, borderLeft: `3px solid ${c}`, borderRadius: '6px' }}>
                               <span style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.05em', color: c }}>vs report · {lbl}</span>
                               <div style={{ fontSize: '11px', color: '#3b0764', lineHeight: 1.5, marginTop: '2px' }}>{an.aiReportCrossCheck}</div>
                             </div>
                           );
                         })()}
-                        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '10px' }}>
-                          {(an.aiRiskFlags || []).length > 0 && (
-                            <div>
-                              <div style={{ fontSize: '10px', fontWeight: '700', color: '#991b1b', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' }}>Risk flags</div>
-                              {an.aiRiskFlags.map((r, i) => <div key={i} style={{ fontSize: '11px', color: '#7f1d1d', padding: '3px 0', display: 'flex', gap: '6px' }}><span>⚠</span><span>{r}</span></div>)}
-                            </div>
-                          )}
-                          {(an.aiStrengths || []).length > 0 && (
-                            <div>
-                              <div style={{ fontSize: '10px', fontWeight: '700', color: '#166534', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' }}>Strengths</div>
-                              {an.aiStrengths.map((s, i) => <div key={i} style={{ fontSize: '11px', color: '#14532d', padding: '3px 0', display: 'flex', gap: '6px' }}><span>✓</span><span>{s}</span></div>)}
-                            </div>
-                          )}
-                        </div>
-                        {(an.aiBlindSpots || []).length > 0 && (
-                          <div style={{ marginTop: '10px' }}>
-                            <div style={{ fontSize: '10px', fontWeight: '700', color: '#92400e', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' }}>Blind spots — verify before bidding</div>
-                            {an.aiBlindSpots.map((b, i) => <div key={i} style={{ fontSize: '11px', color: '#78350f', padding: '3px 0', display: 'flex', gap: '6px' }}><span>🔎</span><span>{b}</span></div>)}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()}
 
-                  {/* Market comparison pane (same card as the Deal Analysis tab) */}
-                  {active === 'market' && hasMarket && (() => {
-                    const posCol = { underpriced: '#059669', fair: '#2563eb', overpriced: '#dc2626', insufficient_data: '#64748b' }[an.dealAnalysisPositioning] || '#64748b';
-                    const posLabel = { underpriced: 'Underpriced', fair: 'Fair value', overpriced: 'Overpriced', insufficient_data: 'Insufficient data' }[an.dealAnalysisPositioning] || an.dealAnalysisPositioning;
-                    const comps = an.dealAnalysisComparables || [];
-                    return (
-                      <div style={{ backgroundColor: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '14px 16px' }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '10px', flexWrap: 'wrap' }}>
-                          <div style={{ fontSize: '12px', fontWeight: '700', color: '#1d4ed8' }}>🌐 Market comparison</div>
-                          <span style={{ fontSize: '11px', padding: '2px 10px', borderRadius: '12px', background: '#fff', border: `1px solid ${posCol}`, color: posCol, fontWeight: '700' }}>{posLabel} · {an.dealAnalysisConfidence} confidence</span>
-                          {(an.dealAnalysisGeneratedAt || an.dealAnalysisProvider) && (
-                            <span style={{ fontSize: '10px', color: '#60a5fa', marginLeft: 'auto' }}>
-                              {an.dealAnalysisProvider ? `via ${AI_PROVIDER_LABELS[an.dealAnalysisProvider] || an.dealAnalysisProvider} · ` : ''}
-                              {an.dealAnalysisGeneratedAt && new Date(an.dealAnalysisGeneratedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}
-                            </span>
-                          )}
-                        </div>
-                        <div style={{ fontSize: '12px', color: '#1e3a8a', lineHeight: 1.6, marginBottom: comps.length ? '10px' : 0 }}>{an.dealAnalysisSummary}</div>
-                        {comps.length > 0 && (
-                          <div>
-                            <div style={{ fontSize: '10px', fontWeight: '700', color: '#1d4ed8', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' }}>Comparables found</div>
-                            {comps.map((c, i) => (
-                              <div key={i} style={{ fontSize: '11px', color: '#1e3a8a', padding: '3px 0', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-                                <span>📍</span><span>{c.address || '—'}{c.price ? ` — ${c.price}` : ''}{c.date ? ` (${c.date})` : ''}{c.source ? ` · ${c.source}` : ''}</span>
+                        {/* Merged risks */}
+                        {mergedRisks.length > 0 && (
+                          <div style={{ marginBottom: '10px' }}>
+                            <div style={{ fontSize: '10px', fontWeight: '700', color: '#991b1b', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' }}>Risk flags</div>
+                            {mergedRisks.map((r, i) => (
+                              <div key={i} style={{ fontSize: '11px', color: '#7f1d1d', padding: '3px 0', display: 'flex', gap: '6px', alignItems: 'flex-start' }}>
+                                <span>⚠</span>
+                                <span style={{ fontSize: '9px', fontWeight: '700', padding: '1px 6px', borderRadius: '8px', background: r.tagBg, color: r.tagColor, flexShrink: 0, marginTop: '1px' }}>{r.tag}</span>
+                                <span>{r.text}</span>
                               </div>
                             ))}
                           </div>
                         )}
-                      </div>
-                    );
-                  })()}
+
+                        {/* Strengths + blind spots */}
+                        {((an.aiStrengths || []).length > 0 || (an.aiBlindSpots || []).length > 0) && (
+                          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
+                            {(an.aiStrengths || []).length > 0 && (
+                              <div>
+                                <div style={{ fontSize: '10px', fontWeight: '700', color: '#166534', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' }}>Strengths</div>
+                                {an.aiStrengths.map((s, i) => <div key={i} style={{ fontSize: '11px', color: '#14532d', padding: '3px 0', display: 'flex', gap: '6px' }}><span>✓</span><span>{s}</span></div>)}
+                              </div>
+                            )}
+                            {(an.aiBlindSpots || []).length > 0 && (
+                              <div>
+                                <div style={{ fontSize: '10px', fontWeight: '700', color: '#92400e', textTransform: 'uppercase', letterSpacing: '.05em', marginBottom: '4px' }}>Blind spots — verify before bidding</div>
+                                {an.aiBlindSpots.map((b, i) => <div key={i} style={{ fontSize: '11px', color: '#78350f', padding: '3px 0', display: 'flex', gap: '6px' }}><span>🔎</span><span>{b}</span></div>)}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {/* Web comps line */}
+                        {marketComps.length > 0 && (
+                          <div style={{ fontSize: '11px', color: '#1d4ed8', marginBottom: '10px' }}>🌐 {marketComps.length} web comps found — see Comparables tab</div>
+                        )}
+
+                        {/* Report summary */}
+                        {(an.reportSummary || isLegacyReportInAiSummary) && (
+                          <div style={{ borderRadius: '8px', border: '1px solid #fde68a', background: '#fffbeb', padding: '10px 12px', display: 'flex', gap: '8px', alignItems: 'flex-start', marginBottom: (an.aiReviewedAt || an.aiProvider || an.dealAnalysisGeneratedAt || an.dealAnalysisProvider) ? '10px' : 0 }}>
+                            <span style={{ fontSize: '14px', flexShrink: 0 }}>📄</span>
+                            <div>
+                              <div style={{ fontSize: '10px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.07em', color: '#92400e', marginBottom: '3px' }}>Report summary</div>
+                              <div style={{ fontSize: '11px', color: '#451a03', lineHeight: '1.5' }}>{an.reportSummary || an.aiSummary}</div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Provenance footer */}
+                        {(an.aiReviewedAt || an.aiProvider || an.dealAnalysisGeneratedAt || an.dealAnalysisProvider) && (
+                          <div style={{ fontSize: '10px', color: '#94a3b8', display: 'flex', gap: '14px', flexWrap: 'wrap' }}>
+                            {(an.aiReviewedAt || an.aiProvider) && (
+                              <span>AI review: {an.aiProvider ? `via ${AI_PROVIDER_LABELS[an.aiProvider] || an.aiProvider}` : ''}{an.aiProvider && an.aiReviewedAt ? ' · ' : ''}{an.aiReviewedAt && new Date(an.aiReviewedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
+                            )}
+                            {(an.dealAnalysisGeneratedAt || an.dealAnalysisProvider) && (
+                              <span>Market: {an.dealAnalysisProvider ? `via ${AI_PROVIDER_LABELS[an.dealAnalysisProvider] || an.dealAnalysisProvider}` : ''}{an.dealAnalysisProvider && an.dealAnalysisGeneratedAt ? ' · ' : ''}{an.dealAnalysisGeneratedAt && new Date(an.dealAnalysisGeneratedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}</span>
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })()}
