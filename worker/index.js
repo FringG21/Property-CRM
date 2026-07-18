@@ -5193,6 +5193,7 @@ async function handleApiRoutes(request, env, url, ctx) {
         `Area intelligence highlights: ${clip(property.intelligenceSummary)}`,
         `Refurb position: ${clip(property.refurbSummary)}`,
         `Comparables: ${clip(property.comparables)}`,
+        property.marketComparison ? `Live market comparison (web-search grounded, run ${property.marketComparison.generatedAt || 'recently'}): ${clip(property.marketComparison)}` : 'Live market comparison: not run',
       ].join('\n');
 
       const schema = {
@@ -5222,7 +5223,7 @@ async function handleApiRoutes(request, env, url, ctx) {
 
       try {
         const { result: review, provider } = await generateInsight({
-          system: 'You are a UK property investment analyst reviewing auction flip deals for a small investment partnership in South Yorkshire. Be direct and specific: ground every claim in the numbers provided, flag what is missing, and never invent figures. Margins under 15% are tight for a flip; under 5% are usually not worth the risk. A prior assessment report may already have scored this deal — its verdict, maxBid, netProfit, margin and GDV are in the report analytics. Act as an independent second opinion: validate those figures against the comparables and area intelligence, and in reportComparison state clearly whether you agree, partly agree, or disagree with the report and why. Do not simply restate the report. ' + AUCTION_ANALYST_FRAMING,
+          system: 'You are a UK property investment analyst reviewing auction flip deals for a small investment partnership in South Yorkshire. Be direct and specific: ground every claim in the numbers provided, flag what is missing, and never invent figures. Margins under 15% are tight for a flip; under 5% are usually not worth the risk. A prior assessment report may already have scored this deal — its verdict, maxBid, netProfit, margin and GDV are in the report analytics. Act as an independent second opinion: validate those figures against the comparables and area intelligence, and in reportComparison state clearly whether you agree, partly agree, or disagree with the report and why. Do not simply restate the report. When a live market comparison is supplied, treat it as fresh third-party evidence: weigh its positioning, confidence and web comparables against the report GDV and your own view, and call out any conflict between them explicitly. ' + AUCTION_ANALYST_FRAMING,
           prompt: `Review this auction deal and score it. If report analytics are present, cross-check your conclusion against them.\n\n${context}`,
           schema,
           requiredFields: ['summary', 'riskFlags', 'strengths', 'dealScore', 'verdict'],
