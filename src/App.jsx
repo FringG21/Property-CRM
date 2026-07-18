@@ -22,7 +22,9 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
 });
 
-const AI_PROVIDER_LABELS = { anthropic: 'Claude', groq: 'Groq', gemini: 'Gemini', openrouter: 'OpenRouter', 'workers-ai': 'Workers AI' };
+const AI_PROVIDER_LABELS = { anthropic: 'Claude', groq: 'Groq', gemini: 'Gemini', mistral: 'Mistral', qwen: 'Qwen', openrouter: 'OpenRouter', huggingface: 'Hugging Face', routeway: 'Routeway', 'workers-ai': 'Workers AI' };
+const AI_PROVIDER_ICONS = { anthropic: '🧠', groq: '⚡', gemini: '💎', mistral: '🌬️', qwen: '🐉', openrouter: '🔀', huggingface: '🤗', routeway: '🛣️', 'workers-ai': '☁️' };
+const AI_PROVIDER_ORDER = ['anthropic', 'groq', 'gemini', 'mistral', 'qwen', 'openrouter', 'huggingface', 'routeway', 'workers-ai'];
 const NOTE_TYPE_COLORS = { Review: '#7f77dd', 'Survey update': '#1d9e75', Legal: '#ba7517', Finance: '#378add', Task: '#8b5cf6', Flag: '#e24b4a', Call: '#0ea5e9', Meeting: '#7c3aed', Email: '#d97706' };
 const NOTE_TYPE_BG     = { Review: '#eeedfe', 'Survey update': '#e1f5ee', Legal: '#faeeda', Finance: '#e6f1fb', Task: '#ede9fe', Flag: '#fcebeb', Call: '#e0f2fe', Meeting: '#ede9fe', Email: '#fefce8' };
 const NOTE_TYPE_TEXT   = { Review: '#3c3489', 'Survey update': '#085041', Legal: '#633806', Finance: '#0c447c', Task: '#5b21b6', Flag: '#791f1f', Call: '#0c4a6e', Meeting: '#4c1d95', Email: '#713f12' };
@@ -2799,6 +2801,19 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
     } catch { /* ignore */ }
   };
   useEffect(() => { if (settingsSection === 'integrations') loadTelegramStatus(); }, [settingsSection]);
+  const [aiUsageData, setAiUsageData] = useState(null);
+  const [aiUsageLoading, setAiUsageLoading] = useState(false);
+  const loadAiUsage = async () => {
+    setAiUsageLoading(true);
+    try {
+      const token = localStorage.getItem('crm_session');
+      const res = await fetch('/api/ai/usage', { headers: { 'Authorization': `Bearer ${token}` } });
+      const data = await res.json();
+      if (data.success) setAiUsageData(data);
+    } catch { /* ignore */ }
+    setAiUsageLoading(false);
+  };
+  useEffect(() => { if (settingsSection === 'aiUsage') loadAiUsage(); }, [settingsSection]);
   const [chQuery, setChQuery] = useState('');
   const [chResults, setChResults] = useState(null);
   const [chLoading, setChLoading] = useState(false);
@@ -12110,7 +12125,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                 <div style={{ display: 'flex', gap: '0', flexDirection: isMobile ? 'column' : 'row', minHeight: 0, flex: '1 1 0', overflow: isMobile ? 'auto' : 'hidden', backgroundColor: '#ffffff', borderRadius: isMobile ? '8px' : '12px', border: '1px solid #e2e8f0' }}>
                   {/* Left nav */}
                   <div style={{ width: isMobile ? '100%' : '200px', borderRight: isMobile ? 'none' : '1px solid #e2e8f0', borderBottom: isMobile ? '1px solid #e2e8f0' : 'none', padding: '12px', display: 'flex', flexDirection: isMobile ? 'row' : 'column', flexWrap: isMobile ? 'wrap' : 'nowrap', gap: '4px', flexShrink: 0 }}>
-                    {[['profile', 'Profile'], ['appearance', 'Appearance'], ['notifications', 'Notifications'], ['users', 'Users & Permissions'], ['api', 'API Keys'], ['integrations', 'Integrations'], ['cards', 'Custom Cards'], ['data', 'Data Management']].map(([key, label]) => (
+                    {[['profile', 'Profile'], ['appearance', 'Appearance'], ['notifications', 'Notifications'], ['users', 'Users & Permissions'], ['api', 'API Keys'], ['integrations', 'Integrations'], ['aiUsage', 'AI Usage'], ['cards', 'Custom Cards'], ['data', 'Data Management']].map(([key, label]) => (
                       <button key={key} onClick={() => setSettingsSection(key)} style={{ padding: '9px 12px', textAlign: 'left', borderRadius: '6px', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: '500', backgroundColor: settingsSection === key ? '#f0fdf4' : 'transparent', color: settingsSection === key ? '#059669' : '#64748b', borderLeft: settingsSection === key ? '2px solid #059669' : '2px solid transparent' }}>{label}</button>
                     ))}
                   </div>
@@ -12635,6 +12650,54 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         </div>
                       </div>
                     )}
+
+                    {/* AI USAGE */}
+                    {settingsSection === 'aiUsage' && (() => {
+                      const usage = aiUsageData?.usage || {};
+                      const configured = aiUsageData?.configured || {};
+                      const maxToday = Math.max(1, ...Object.values(usage).map(u => u.today || 0));
+                      return (
+                        <div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                            <div style={{ fontSize: '15px', fontWeight: '600', color: '#0f172a' }}>AI Usage</div>
+                            <button onClick={loadAiUsage} disabled={aiUsageLoading} style={{ padding: '6px 12px', backgroundColor: '#fff', color: '#475569', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', fontWeight: '600', cursor: aiUsageLoading ? 'default' : 'pointer' }}>{aiUsageLoading ? '…' : 'Refresh'}</button>
+                          </div>
+                          <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '20px' }}>How many times each AI provider has actually served an insight request. Claude is tried first when configured, then the free providers in order, with Cloudflare Workers AI as a guaranteed fallback. Free-tier caps vary by provider and plan — check each provider's own dashboard for your exact quota.</div>
+                          {!aiUsageData && aiUsageLoading && <div style={{ fontSize: '12px', color: '#94a3b8' }}>Loading…</div>}
+                          {aiUsageData && (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                              {AI_PROVIDER_ORDER.map(key => {
+                                const u = usage[key] || { today: 0, total: 0 };
+                                const isConfigured = !!configured[key];
+                                const barPct = Math.round((u.today / maxToday) * 100);
+                                return (
+                                  <div key={key} style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '14px 18px', opacity: isConfigured ? 1 : 0.55 }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        <span style={{ fontSize: '15px' }}>{AI_PROVIDER_ICONS[key]}</span>
+                                        <span style={{ fontSize: '13px', fontWeight: '700', color: '#0f172a' }}>{AI_PROVIDER_LABELS[key]}</span>
+                                        {isConfigured ? (
+                                          <span style={{ fontSize: '10px', padding: '2px 8px', borderRadius: '10px', backgroundColor: '#dcfce7', color: '#166534', fontWeight: '700' }}>Configured</span>
+                                        ) : (
+                                          <span style={{ fontSize: '10px', padding: '2px 8px', borderRadius: '10px', backgroundColor: '#f1f5f9', color: '#94a3b8', fontWeight: '600' }}>No key set</span>
+                                        )}
+                                      </div>
+                                      <div style={{ display: 'flex', gap: '18px', fontSize: '11px', color: '#64748b' }}>
+                                        <span><strong style={{ color: '#0f172a', fontSize: '13px' }}>{u.today}</strong> today</span>
+                                        <span><strong style={{ color: '#0f172a', fontSize: '13px' }}>{u.total}</strong> all-time</span>
+                                      </div>
+                                    </div>
+                                    <div style={{ marginTop: '10px', height: '6px', borderRadius: '3px', backgroundColor: '#e2e8f0', overflow: 'hidden' }}>
+                                      <div style={{ width: `${barPct}%`, height: '100%', backgroundColor: isConfigured ? '#059669' : '#cbd5e1', borderRadius: '3px' }} />
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {/* DATA MANAGEMENT */}
                     {settingsSection === 'data' && (

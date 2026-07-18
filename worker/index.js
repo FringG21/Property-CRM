@@ -3305,6 +3305,26 @@ function areaMarketStatsLine(stats) {
 }
 
 const AI_PROVIDER_CHAIN = [callAnthropic, callGroq, callGemini, callMistral, callQwen, callOpenRouter, callHuggingFace, callRouteway, callWorkersAI];
+const AI_PROVIDER_NAMES = ['anthropic', 'groq', 'gemini', 'mistral', 'qwen', 'openrouter', 'huggingface', 'routeway', 'workers-ai'];
+
+// Lifetime + per-day (UTC) call counters per provider, keyed in the same KV
+// used for rate limiting. Best-effort: never let a KV hiccup fail the AI
+// request that triggered it.
+async function incrementAiUsage(env, provider) {
+  if (!env.SCRAPER_KV || !provider) return;
+  try {
+    const day = new Date().toISOString().slice(0, 10);
+    const dayKey = `ai-usage:day:${day}:${provider}`;
+    const totalKey = `ai-usage:total:${provider}`;
+    const [dayCount, totalCount] = await Promise.all([env.SCRAPER_KV.get(dayKey), env.SCRAPER_KV.get(totalKey)]);
+    await Promise.all([
+      env.SCRAPER_KV.put(dayKey, String((parseInt(dayCount) || 0) + 1), { expirationTtl: 172800 }),
+      env.SCRAPER_KV.put(totalKey, String((parseInt(totalCount) || 0) + 1)),
+    ]);
+  } catch (err) {
+    console.error('incrementAiUsage failed:', err.message);
+  }
+}
 
 // Tries each configured provider in priority order; validates the parsed JSON
 // has every field in requiredFields before accepting it, so a provider that
@@ -3326,6 +3346,7 @@ async function generateInsight({ system, prompt, schema, requiredFields = [], en
     if (!parsed || typeof parsed !== 'object') { lastError = new Error(`${outcome.provider} returned unparseable JSON`); continue; }
     const missing = requiredFields.filter(f => !(f in parsed));
     if (missing.length) { lastError = new Error(`${outcome.provider} response missing fields: ${missing.join(', ')}`); continue; }
+    await incrementAiUsage(env, outcome.provider);
     return { result: parsed, provider: outcome.provider };
   }
   throw lastError || new Error('No AI provider is configured — set at least one of ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, QWEN_API_KEY, HUGGINGFACE_API_KEY, ROUTEWAY_API_KEY, or bind Workers AI');
@@ -5170,6 +5191,34 @@ async function handleApiRoutes(request, env, url, ctx) {
       }
       matches.sort((a,b) => b.confidence - a.confidence);
       return corsResponse({ success: true, matches: matches.slice(0, 3) });
+    }
+
+    // --------------------------------------------------------
+    // AI — per-provider usage counters (Settings > AI Usage)
+    // --------------------------------------------------------
+    if (url.pathname === '/api/ai/usage' && request.method === 'GET') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const day = new Date().toISOString().slice(0, 10);
+      const entries = await Promise.all(AI_PROVIDER_NAMES.map(async (p) => {
+        const [todayCount, totalCount] = await Promise.all([
+          env.SCRAPER_KV.get(`ai-usage:day:${day}:${p}`),
+          env.SCRAPER_KV.get(`ai-usage:total:${p}`),
+        ]);
+        return [p, { today: parseInt(todayCount) || 0, total: parseInt(totalCount) || 0 }];
+      }));
+      const configured = {
+        anthropic: !!env.ANTHROPIC_API_KEY,
+        groq: !!env.GROQ_API_KEY,
+        gemini: !!env.GOOGLE_AI_API_KEY,
+        mistral: !!env.MISTRAL_API_KEY,
+        qwen: !!env.QWEN_API_KEY,
+        openrouter: !!env.OPENROUTER_API_KEY,
+        huggingface: !!env.HUGGINGFACE_API_KEY,
+        routeway: !!env.ROUTEWAY_API_KEY,
+        'workers-ai': !!env.AI,
+      };
+      return corsResponse({ success: true, day, usage: Object.fromEntries(entries), configured });
     }
 
     // --------------------------------------------------------
