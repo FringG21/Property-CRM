@@ -5561,6 +5561,69 @@ async function handleApiRoutes(request, env, url, ctx) {
     }
 
     // --------------------------------------------------------
+    // AI — daily briefing (what needs attention across the portfolio)
+    // --------------------------------------------------------
+    if (url.pathname === '/api/ai/daily-briefing' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      if (!anyAiProviderConfigured(env)) {
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
+      }
+      const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
+      if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
+
+      const { snapshot } = await request.json();
+      if (!snapshot || typeof snapshot !== 'object') return corsResponse({ success: false, message: 'Missing snapshot' }, 400);
+
+      const clip = (obj) => JSON.stringify(obj ?? null).slice(0, 6000);
+      const context = [
+        `Today: ${new Date().toISOString().slice(0, 10)}`,
+        `Pipeline counts: ${clip(snapshot.pipelineCounts)}`,
+        `Overdue tasks: ${clip(snapshot.overdueTasks)}`,
+        `Upcoming auctions (next 14 days): ${clip(snapshot.upcomingAuctions)}`,
+        `Strong bids in play: ${clip(snapshot.strongBids)}`,
+        `Properties with stale intelligence: ${clip(snapshot.staleIntel)}`,
+        `Watchlist alerts: ${clip(snapshot.watchlistAlerts)}`,
+      ].join('\n');
+
+      const schema = {
+        type: 'object',
+        additionalProperties: false,
+        required: ['briefing', 'priorities'],
+        properties: {
+          briefing: { type: 'string', description: '3-5 sentence morning briefing for the investor — what the day/week looks like and what matters most. Plain, direct, no filler.' },
+          priorities: {
+            type: 'array',
+            description: 'The concrete things to act on, most urgent first. Empty only if genuinely nothing needs attention.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['text', 'urgency'],
+              properties: {
+                text: { type: 'string', description: 'One specific action, referencing the property/task by name where possible.' },
+                urgency: { type: 'string', enum: ['today', 'this_week', 'watch'] },
+              },
+            },
+          },
+        },
+      };
+
+      try {
+        const { result: briefing, provider } = await generateInsight({
+          system: 'You are the operations assistant for a UK property auction investment partnership in South Yorkshire. Given a snapshot of the pipeline, tasks, upcoming auctions and alerts, write a concise morning briefing and a prioritised action list. Be specific and reference records by name. Focus on what needs action today or this week; do not pad. ' + AUCTION_ANALYST_FRAMING,
+          prompt: `Write today's briefing from this snapshot.\n\n${context}`,
+          schema,
+          requiredFields: ['briefing', 'priorities'],
+          env,
+        });
+        return corsResponse({ success: true, briefing, provider, generatedAt: new Date().toISOString() });
+      } catch (err) {
+        console.error('AI daily briefing failed:', err);
+        return corsResponse({ success: false, message: 'Could not generate briefing' }, 502);
+      }
+    }
+
+    // --------------------------------------------------------
     // ALERTS — persisted team-wide alert feed
     // --------------------------------------------------------
 

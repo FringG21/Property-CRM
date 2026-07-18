@@ -2382,6 +2382,34 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
     );
   };
 
+  // ── AI daily briefing — "what needs attention" across the portfolio (cached per day) ──
+  const [dailyBriefing, setDailyBriefing] = useState(() => { try { return JSON.parse(localStorage.getItem('crm_briefing_' + new Date().toISOString().slice(0, 10)) || 'null'); } catch { return null; } });
+  const [briefingLoading, setBriefingLoading] = useState(false);
+  const runDailyBriefing = async (snapshot) => {
+    if (briefingLoading) return;
+    setBriefingLoading(true);
+    try {
+      const token = localStorage.getItem('crm_session');
+      const res = await fetch('/api/ai/daily-briefing', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ snapshot }),
+      });
+      const data = await res.json();
+      if (!data.success) { alert(data.message || 'Briefing failed.'); return; }
+      if (!data.briefing || !data.briefing.briefing) { console.error('AI daily briefing: unexpected response shape', data); alert('Briefing returned nothing — please try again.'); return; }
+      const today = new Date().toISOString().slice(0, 10);
+      const rec = { briefing: data.briefing.briefing, priorities: data.briefing.priorities || [], provider: data.provider, generatedAt: data.generatedAt, forDate: today };
+      setDailyBriefing(rec);
+      try { localStorage.setItem('crm_briefing_' + today, JSON.stringify(rec)); } catch { /* ignore */ }
+    } catch (err) {
+      console.error('AI daily briefing failed:', err);
+      alert('Briefing failed — please try again.');
+    } finally {
+      setBriefingLoading(false);
+    }
+  };
+
   // ── AI deal analysis — live market comparison via web search ──
   const [aiAnalysisLoadingId, setAiAnalysisLoadingId] = useState(null);
   const runDealAnalysis = async (prop) => {
@@ -6655,6 +6683,47 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         </div>
                       </div>
                     </div>
+
+                    {/* AI daily briefing */}
+                    {(() => {
+                      const briefingSnapshot = {
+                        pipelineCounts: { active: totalDeals, strongBids: strongBidCount, overdue: overdueTasks.length, dueToday: todayTasks.length },
+                        overdueTasks: overdueTasks.slice(0, 10).map(t => ({ title: t.title, due: t.dueDate, linkedName: t.linkedName || propName(t.linkedId) })),
+                        upcomingAuctions: auctionsThisWeek.slice(0, 10).map(p => ({ name: p.dealName || p.address?.split(',')[0], date: p.auctionDate, guide: p.guidePrice })),
+                        strongBids: strongBids.slice(0, 10).map(p => ({ name: p.dealName || p.address?.split(',')[0], auctionDate: p.auctionDate, maxBid: p.maxBid })),
+                        staleIntel: properties.filter(p => p.intelligence?.lastRun && (Date.now() - new Date(p.intelligence.lastRun)) > 30 * 86400000).slice(0, 10).map(p => ({ name: p.dealName || p.address?.split(',')[0], lastRun: p.intelligence.lastRun })),
+                        watchlistAlerts: wlAlerts.map(w => ({ address: w.address, kind: w._kind, guide: w.guidePrice })),
+                      };
+                      return (
+                        <div style={{ ...panel, border: '1px solid #e9d5ff', background: '#faf5ff' }}>
+                          <div style={panelHead}>
+                            <span>🧠 Daily briefing</span>
+                            <button onClick={() => runDailyBriefing(briefingSnapshot)} disabled={briefingLoading} style={{ fontSize: '11px', fontWeight: '600', color: briefingLoading ? '#94a3b8' : '#fff', background: briefingLoading ? '#f1f5f9' : '#7C3AED', border: 'none', borderRadius: '6px', padding: '5px 12px', cursor: briefingLoading ? 'wait' : 'pointer', fontFamily: 'inherit' }}>{briefingLoading ? '⏳ Thinking…' : dailyBriefing ? 'Refresh' : 'Generate'}</button>
+                          </div>
+                          {!dailyBriefing ? (
+                            <div style={dashEmpty}>Generate an AI briefing of what needs attention today.</div>
+                          ) : (
+                            <div>
+                              <div style={{ fontSize: '12px', color: '#334155', lineHeight: '1.6', marginBottom: dailyBriefing.priorities?.length ? '10px' : 0 }}>{dailyBriefing.briefing}</div>
+                              {dailyBriefing.priorities?.length > 0 && (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                                  {dailyBriefing.priorities.map((pr, i) => {
+                                    const u = pr.urgency === 'today' ? { bg: '#fef2f2', fg: '#b91c1c', l: 'Today' } : pr.urgency === 'this_week' ? { bg: '#fffbeb', fg: '#92400e', l: 'This week' } : { bg: '#f1f5f9', fg: '#64748b', l: 'Watch' };
+                                    return (
+                                      <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '7px', fontSize: '11px', color: '#334155' }}>
+                                        <span style={{ fontSize: '9px', fontWeight: '700', textTransform: 'uppercase', color: u.fg, background: u.bg, borderRadius: '4px', padding: '1px 5px', flexShrink: 0, marginTop: '1px' }}>{u.l}</span>
+                                        <span>{pr.text}</span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                              <div style={{ fontSize: '9px', color: '#94a3b8', marginTop: '10px' }}>{AI_PROVIDER_LABELS[dailyBriefing.provider] || dailyBriefing.provider || 'AI'} · {dailyBriefing.generatedAt ? new Date(dailyBriefing.generatedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : ''}{dailyBriefing.forDate && dailyBriefing.forDate !== todayStr ? ' · from an earlier day — refresh' : ''}</div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {/* 3-column grid */}
                     <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: '16px', alignItems: 'flex-start' }}>
