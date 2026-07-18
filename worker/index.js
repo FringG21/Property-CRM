@@ -5432,6 +5432,70 @@ async function handleApiRoutes(request, env, url, ctx) {
     }
 
     // --------------------------------------------------------
+    // AI — intelligence risk narrative (synthesise the connectors)
+    // --------------------------------------------------------
+    if (url.pathname === '/api/ai/intel-narrative' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      if (!anyAiProviderConfigured(env)) {
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
+      }
+      const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
+      if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
+
+      const { property } = await request.json();
+      if (!property || !property.address) return corsResponse({ success: false, message: 'Missing property' }, 400);
+
+      const areaStats = await getAreaMarketStats(env, property.postcode || property.address);
+      const clip = (obj) => JSON.stringify(obj ?? null).slice(0, 6000);
+      const context = [
+        `Address: ${property.address}${property.dealName ? ` (${property.dealName})` : ''}`,
+        `Postcode: ${property.postcode || 'unknown'} · Type: ${property.propertyType || 'unknown'} · Beds: ${property.bedrooms || 'unknown'}`,
+        areaMarketStatsLine(areaStats),
+        property.scores ? `Composite scores (0-100, higher = better): ${clip(property.scores)}` : '',
+        `Due-diligence intelligence: ${clip(property.intelligenceSummary)}`,
+      ].filter(Boolean).join('\n');
+
+      const schema = {
+        type: 'object',
+        additionalProperties: false,
+        required: ['headline', 'summary', 'riskFlags', 'opportunities'],
+        properties: {
+          headline: { type: 'string', description: 'One short line (max ~12 words) capturing the overall due-diligence picture for this property.' },
+          summary: { type: 'string', description: '3-5 sentence plain-English brief synthesising the area & property intelligence for a UK auction flip investor — what the data collectively means.' },
+          riskFlags: {
+            type: 'array',
+            description: 'Specific risks evident in the intelligence (flood, crime, deprivation, mining/radon/landfill, planning constraints, weak price growth, poor EPC). Empty if genuinely none.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              required: ['severity', 'text'],
+              properties: {
+                severity: { type: 'string', enum: ['high', 'medium', 'low'] },
+                text: { type: 'string' },
+              },
+            },
+          },
+          opportunities: { type: 'array', items: { type: 'string' }, description: 'Specific positives or upside signals grounded in the data (strong price growth, low crime, EPC improvement headroom, good schools/transport). Empty if none.' },
+        },
+      };
+
+      try {
+        const { result: narrative, provider } = await generateInsight({
+          system: 'You are a UK property due-diligence analyst for a South Yorkshire auction flip partnership. You are given the results of around 25 public-data checks (crime, flood, EPC, deprivation, planning, mining/radon/landfill, price growth, schools, transport, etc.) for one property. Synthesise them into a concise plain-English risk & opportunity brief. Ground every point in the data provided; do not assert facts that are not present, and do not invent figures. Rate each risk high/medium/low by its likely impact on a flip. ' + AUCTION_ANALYST_FRAMING,
+          prompt: `Summarise the due-diligence picture for this property.\n\n${context}`,
+          schema,
+          requiredFields: ['summary', 'riskFlags'],
+          env,
+        });
+        return corsResponse({ success: true, narrative, provider, generatedAt: new Date().toISOString() });
+      } catch (err) {
+        console.error('AI intel narrative failed:', err);
+        return corsResponse({ success: false, message: 'Could not complete intelligence summary' }, 502);
+      }
+    }
+
+    // --------------------------------------------------------
     // ALERTS — persisted team-wide alert feed
     // --------------------------------------------------------
 

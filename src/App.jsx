@@ -2224,6 +2224,63 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
     }
   };
 
+  // ── AI intelligence narrative — synthesise the ~25 connectors into a plain-English brief ──
+  const [intelNarrativeLoadingId, setIntelNarrativeLoadingId] = useState(null);
+  const runIntelNarrative = async (prop) => {
+    if (!prop || intelNarrativeLoadingId) return;
+    const intel = prop.intelligence || {};
+    const c = intel.connectors || {};
+    if (!intel.lastRun) { alert('Run Intelligence first — there is no data to summarise yet.'); return; }
+    setIntelNarrativeLoadingId(prop.id);
+    try {
+      const token = localStorage.getItem('crm_session');
+      const payload = {
+        property: {
+          address: prop.address, dealName: prop.dealName,
+          postcode: prop.postcode, propertyType: prop.propertyType, bedrooms: prop.bedrooms,
+          scores: intel.scores || null,
+          intelligenceSummary: {
+            crime: c.police?.data ? { risk: c.police.data.riskLabel, monthly: c.police.data.monthlyAverage } : null,
+            flood: c.flood?.data?.riskNote || null,
+            planning: c.planning?.data?.planningNote || null,
+            deprivation: c.imd?.data ? `${c.imd.data.label} (decile ${c.imd.data.decile})` : null,
+            areaPrices: c.hpi?.data ? { avg: c.hpi.data.avgPrice, growth1yr: c.hpi.data.growth1yr } : null,
+            epc: c.epc?.data ? { rating: c.epc.data.epcRating, flags: c.epc.data.energyFlags } : null,
+            coalMining: c.coal?.data?.note || null,
+            radon: c.radon?.data?.note || null,
+            landfill: c.landfill?.data?.note || null,
+            noise: c.noise?.data?.note || null,
+            nearbyPlanningApps: c.planApps?.data?.note || null,
+            broadband: c.broadband?.data?.note || null,
+            schools: (c.schools?.data?.schools || []).slice(0, 4).map(s => `${s.name} (${s.phase})`),
+            epcImprovements: (c.epc?.data?.recommendations || []).slice(0, 5).map(r => `${r.text}${r.indicativeCost ? ` (${r.indicativeCost})` : ''}`),
+            localNews: (c.news?.data?.items || []).slice(0, 4).map(n => n.title),
+          },
+        },
+      };
+      const res = await fetch('/api/ai/intel-narrative', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!data.success) { alert(data.message || 'AI summary failed.'); return; }
+      const n = data.narrative;
+      if (!n || !n.summary) { console.error('AI intel narrative: unexpected response shape', data); alert('AI summary returned nothing — please try again.'); return; }
+      const updated = withActivity({
+        ...prop,
+        intelligence: { ...intel, aiNarrative: { headline: n.headline || '', summary: n.summary, riskFlags: n.riskFlags || [], opportunities: n.opportunities || [], provider: data.provider, generatedAt: data.generatedAt, forRun: intel.lastRun } },
+      }, 'intelligence', 'AI intelligence summary generated');
+      setProperties(prev => prev.map(p => p.id === prop.id ? updated : p));
+      if (currentViewProperty?.id === prop.id) setCurrentViewProperty(updated);
+    } catch (err) {
+      console.error('AI intel narrative failed:', err);
+      alert('AI summary failed — please try again.');
+    } finally {
+      setIntelNarrativeLoadingId(null);
+    }
+  };
+
   // ── AI deal analysis — live market comparison via web search ──
   const [aiAnalysisLoadingId, setAiAnalysisLoadingId] = useState(null);
   const runDealAnalysis = async (prop) => {
@@ -5680,6 +5737,59 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         {intelligenceRunning ? '⏳ Running…' : intel.lastRun ? 'Refresh' : 'Run Intelligence'}
                       </button>
                     </div>
+
+                    {intel.lastRun && !intelligenceRunning && (() => {
+                      const nar = intel.aiNarrative;
+                      const busy = intelNarrativeLoadingId === currentViewProperty.id;
+                      const stale = nar && nar.forRun && nar.forRun !== intel.lastRun;
+                      const sevMeta = { high: { bg: '#fef2f2', border: '#fecaca', fg: '#b91c1c' }, medium: { bg: '#fffbeb', border: '#fde68a', fg: '#92400e' }, low: { bg: '#f8fafc', border: '#e2e8f0', fg: '#64748b' } };
+                      return (
+                        <div style={{ border: '1px solid #e9d5ff', borderRadius: '10px', background: '#faf5ff', padding: '12px 14px', marginBottom: '14px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', flexWrap: 'wrap', marginBottom: nar ? '10px' : 0 }}>
+                            <div style={{ fontSize: '11px', fontWeight: '600', color: '#7C3AED', display: 'flex', alignItems: 'center', gap: '6px' }}>🧠 AI risk summary</div>
+                            <button
+                              onClick={() => runIntelNarrative(currentViewProperty)}
+                              disabled={busy}
+                              style={{ padding: '5px 12px', fontSize: '11px', borderRadius: '6px', border: 'none', background: busy ? '#f1f5f9' : '#7C3AED', color: busy ? '#64748b' : '#fff', cursor: busy ? 'wait' : 'pointer', fontFamily: 'inherit', fontWeight: '600' }}
+                            >
+                              {busy ? '⏳ Summarising…' : nar ? 'Re-summarise' : '🧠 Summarise risks (AI)'}
+                            </button>
+                          </div>
+                          {stale && (
+                            <div style={{ fontSize: '10px', color: '#b45309', marginBottom: '8px' }}>⚠ Intelligence has been refreshed since this summary — re-summarise for the latest.</div>
+                          )}
+                          {!nar ? (
+                            <div style={{ fontSize: '11px', color: '#94a3b8' }}>Turn the intelligence checks below into a plain-English risk &amp; opportunity brief.</div>
+                          ) : (
+                            <div>
+                              {nar.headline && <div style={{ fontSize: '13px', fontWeight: '600', color: '#0f172a', marginBottom: '6px' }}>{nar.headline}</div>}
+                              <div style={{ fontSize: '12px', color: '#334155', lineHeight: '1.6', marginBottom: (nar.riskFlags?.length || nar.opportunities?.length) ? '10px' : 0 }}>{nar.summary}</div>
+                              {nar.riskFlags?.length > 0 && (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '5px', marginBottom: nar.opportunities?.length ? '10px' : 0 }}>
+                                  {nar.riskFlags.map((f, i) => {
+                                    const m = sevMeta[f.severity] || sevMeta.low;
+                                    return (
+                                      <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '7px', fontSize: '11px', color: '#334155', background: m.bg, border: `1px solid ${m.border}`, borderRadius: '6px', padding: '6px 9px' }}>
+                                        <span style={{ fontSize: '9px', fontWeight: '700', textTransform: 'uppercase', letterSpacing: '.04em', color: m.fg, flexShrink: 0, marginTop: '1px' }}>{f.severity || 'low'}</span>
+                                        <span>{f.text}</span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                              {nar.opportunities?.length > 0 && (
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                                  {nar.opportunities.map((o, i) => (
+                                    <div key={i} style={{ fontSize: '11px', color: '#166534', display: 'flex', gap: '6px' }}><span>✓</span><span>{o}</span></div>
+                                  ))}
+                                </div>
+                              )}
+                              <div style={{ fontSize: '9px', color: '#94a3b8', marginTop: '10px' }}>{AI_PROVIDER_LABELS[nar.provider] || nar.provider || 'AI'} · {fmtAt(nar.generatedAt)}</div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {!intel.lastRun && !intelligenceRunning && (
                       <div style={{ border: '1px dashed #e2e8f0', borderRadius: '8px', padding: '20px', textAlign: 'center', color: '#94a3b8' }}>
