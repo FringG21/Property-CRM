@@ -4575,6 +4575,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                       address: [item.address, item.town].filter(Boolean).join(', '), price: item.price,
                       date: item.date || '', propertyType: item.propertyType, newBuild: item.newBuild,
                       epcRating: item.epcRating, floorArea: item.floorArea, habitableRooms: item.habitableRooms,
+                      epcPotential: item.epcPotential, heatingType: item.heatingType,
                     }));
                     otherComps.forEach(c => {
                       const isReport = /report/i.test(c.source || ''); const isLr = /land\s*reg/i.test(c.source || ''); const isRm = /rightmove/i.test(c.source || '');
@@ -4604,6 +4605,17 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap', gap: '8px' }}>
                           <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8' }}>Comparable sales</div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                            {lrItems.length > 0 && (() => {
+                              const matched = lrItems.filter(it => it.epcRating || it.floorArea || it.habitableRooms).length;
+                              if (lrData.compsEnriched) {
+                                return <span style={{ fontSize: '10px', padding: '2px 8px', borderRadius: '10px', background: '#dcfce7', color: '#166534', whiteSpace: 'nowrap' }}>EPC-enriched ✓ ({matched} of {lrItems.length} matched)</span>;
+                              }
+                              const epcConn = intel.connectors?.epc;
+                              if (epcConn?.status !== 'success' || !epcConn?.data?.allItems?.length) {
+                                return <span style={{ fontSize: '10px', padding: '2px 8px', borderRadius: '10px', background: '#f1f5f9', color: '#64748b', whiteSpace: 'nowrap' }}>EPC data unavailable</span>;
+                              }
+                              return <span style={{ fontSize: '10px', padding: '2px 8px', borderRadius: '10px', background: '#fef3c7', color: '#92400e', whiteSpace: 'nowrap' }}>Re-run intelligence to enrich with EPC</span>;
+                            })()}
                             {rows.length > 1 && <div style={{ display: 'flex', gap: '4px' }}>{sortBtn('Price ↑', 'asc')}{sortBtn('Price ↓', 'desc')}</div>}
                             {rows.length > 0 && (() => {
                               const hasBeds = r => { const b = compOverrides[r._key]?.bedrooms ?? r.bedrooms; return b != null && b !== ''; };
@@ -4661,7 +4673,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                     {metaLine([
                                       r.propertyType && <span style={{ color: '#64748b' }}>{abbrType(r.propertyType)}{r.newBuild ? ' · New build' : ''}</span>,
                                       bedsCtl,
-                                      r.epcRating ? <span style={{ padding: '0 4px', borderRadius: '3px', background: epcBg, color: epcTxt, fontWeight: '700', lineHeight: '14px' }}>EPC {r.epcRating}</span> : null,
+                                      r.epcRating ? <span title={r.heatingType ? `Potential ${r.epcPotential || '—'} · ${r.heatingType}` : undefined} style={{ padding: '0 4px', borderRadius: '3px', background: epcBg, color: epcTxt, fontWeight: '700', lineHeight: '14px', cursor: r.heatingType ? 'help' : 'default' }}>EPC {r.epcRating}{r.epcPotential && r.epcPotential !== r.epcRating ? ` → ${r.epcPotential}` : ''}</span> : null,
                                       r.habitableRooms ? `${r.habitableRooms} rooms` : null,
                                       compFa > 0 ? `${compFa}m²` : null,
                                       ppsm,
