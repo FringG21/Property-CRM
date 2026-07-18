@@ -1933,6 +1933,7 @@ export default function App({ user = {}, onLogout }) {
   const sendLotToPipeline = (lot) => {
     setProperties(prev => [...prev, {
       id: Date.now(), address: lot.address, guidePrice: lot.guidePrice || 0, auctionDate: lot.auctionDate, auctionTime: '12:00', maxBid: 0, refurb: 0, bedrooms: lot.bedrooms || 0, propertyType: lot.propertyType || 'Unknown', sourcePlatform: lot.houseName || 'Auction', listingUrl: lot.lotUrl || reconstructLotUrl({ sourceLotId: lot.id, sourceOrigin: lot.origin }), isConsideration: false, isStrongBid: false, planningToBid: true, surveyorStatus: 'called', surveyorDate: '', checklist: { legalReviewed: false, financeApproved: false, costsPriced: false }, notesList: [], files: { mainReport: null, spriftReport: null, surveyFile: null, legalPack: null }, status: 'Sourced', hammerPrice: null, outcome: '',
+      postcode: lot.postcode || extractPostcode(lot.address || ''),
       // provenance back to the triage lead this property came from
       sourceLotId: lot.id, sourceOrigin: lot.origin || 'scraped', dataSource: 'auction_triage',
       activityLog: [{ id: Date.now() + Math.random(), type: 'created', detail: `Promoted from auction triage (${lot.origin === 'manual' ? 'manual lead' : lot.houseName || 'scraped lot'})`, user: user.name || 'You', at: new Date().toISOString() }],
@@ -1972,11 +1973,12 @@ export default function App({ user = {}, onLogout }) {
           checklist: { legalReviewed: false, financeApproved: false, costsPriced: false },
           activityLog: [{ id: Date.now() + 1, type: 'created', detail: `Property added from auction link (${p.platform || 'URL Import'})`, user: user.name || 'You', at: new Date().toISOString() }],
           dataSource: 'auction_link',
+          postcode: p.postcode || extractPostcode(p.address || ''),
         };
         setProperties(prev => [...prev, newPropFromUrl]);
         setPipelineUrl('');
         // Auto-run intelligence in the background if the scraped address has a postcode
-        const autoPc = extractPostcode(newPropFromUrl.address || '');
+        const autoPc = newPropFromUrl.postcode || extractPostcode(newPropFromUrl.address || '');
         if (autoPc) runPropertyIntelligence(newPropFromUrl, { silent: true });
       } else {
         alert(data.message || 'Could not extract property details — please fill in manually.');
@@ -2064,7 +2066,7 @@ export default function App({ user = {}, onLogout }) {
   };
 
   const handlePromoteWatchlistItem = (item) => {
-    setProperties([...properties, { id: Date.now(), address: item.address, guidePrice: item.guidePrice || 0, auctionDate: item.auctionDate, auctionTime: '12:00', maxBid: 0, refurb: 0, bedrooms: 0, propertyType: 'Unknown', sourcePlatform: item.platform || item.auctionHouse || 'Unknown', listingUrl: '', isConsideration: false, isStrongBid: false, planningToBid: false, surveyorStatus: 'called', surveyorDate: '', checklist: { legalReviewed: false, financeApproved: false, costsPriced: false }, notesList: [], files: { mainReport: null, spriftReport: null, surveyFile: null, legalPack: null }, status: 'Sourced', hammerPrice: null, outcome: '' }]);
+    setProperties([...properties, { id: Date.now(), address: item.address, guidePrice: item.guidePrice || 0, auctionDate: item.auctionDate, auctionTime: '12:00', maxBid: 0, refurb: 0, bedrooms: 0, propertyType: 'Unknown', sourcePlatform: item.platform || item.auctionHouse || 'Unknown', listingUrl: '', isConsideration: false, isStrongBid: false, planningToBid: false, surveyorStatus: 'called', surveyorDate: '', checklist: { legalReviewed: false, financeApproved: false, costsPriced: false }, notesList: [], files: { mainReport: null, spriftReport: null, surveyFile: null, legalPack: null }, status: 'Sourced', hammerPrice: null, outcome: '', postcode: item.postcode || extractPostcode(item.address || '') }]);
     setWatchlist(watchlist.filter(w => w.id !== item.id));
   };
 
@@ -12453,7 +12455,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
             <form onSubmit={e => {
               e.preventDefault();
               if (!newPropAddress.trim()) return;
-              const newProp = { id: Date.now(), address: newPropAddress.trim(), guidePrice: parseFloat(newPropGuide) || 0, auctionDate: newPropDate, status: 'Sourced', sourcePlatform: newPropPlatform || 'Manual', propertyType: newPropType, bedrooms: 0, maxBid: 0, auctionTime: '', isStrongBid: false, isConsideration: false, planningToBid: false, notesList: [], files: {}, surveyJobs: [], checklist: { legalReviewed: false, financeApproved: false, costsPriced: false }, activityLog: [{ id: Date.now() + Math.random(), type: 'created', detail: 'Property created', user: user.name || 'You', at: new Date().toISOString() }] };
+              const newProp = { id: Date.now(), address: newPropAddress.trim(), guidePrice: parseFloat(newPropGuide) || 0, auctionDate: newPropDate, status: 'Sourced', sourcePlatform: newPropPlatform || 'Manual', propertyType: newPropType, bedrooms: 0, maxBid: 0, auctionTime: '', isStrongBid: false, isConsideration: false, planningToBid: false, notesList: [], files: {}, surveyJobs: [], checklist: { legalReviewed: false, financeApproved: false, costsPriced: false }, activityLog: [{ id: Date.now() + Math.random(), type: 'created', detail: 'Property created', user: user.name || 'You', at: new Date().toISOString() }], postcode: extractPostcode(newPropAddress.trim()) };
               setProperties(prev => [...prev, newProp]);
               fireNotif('/api/notify/property-added', { property: newProp, addedBy: user.name || 'A team member' });
               setShowAddPropertyModal(false);

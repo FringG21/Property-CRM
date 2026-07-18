@@ -543,7 +543,11 @@ function extractPropertyDetails(html, pageUrl) {
   else if (u.includes('rightmove')) platform = 'Rightmove';
   else if (u.includes('zoopla')) platform = 'Zoopla';
 
-  return { address, guidePrice, bedrooms, auctionDate, auctionTime, platform };
+  // Postcode — search the full cleaned body text first, then fall back to the address
+  let postcode = extractPostcodeParts(clean).postcode || '';
+  if (!postcode) postcode = extractPostcodeParts(address).postcode || '';
+
+  return { address, guidePrice, bedrooms, auctionDate, auctionTime, platform, postcode };
 }
 
 // ============================================================
