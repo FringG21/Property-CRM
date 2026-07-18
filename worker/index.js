@@ -3051,7 +3051,7 @@ async function indexDocumentForSearch(env, { key, name, propertyId, userId, blob
 // and parsed with parseJsonLoose.
 
 function anyAiProviderConfigured(env) {
-  return !!(env.ANTHROPIC_API_KEY || env.GROQ_API_KEY || env.GOOGLE_AI_API_KEY || env.OPENROUTER_API_KEY || env.AI);
+  return !!(env.ANTHROPIC_API_KEY || env.GROQ_API_KEY || env.GOOGLE_AI_API_KEY || env.OPENROUTER_API_KEY || env.MISTRAL_API_KEY || env.QWEN_API_KEY || env.HUGGINGFACE_API_KEY || env.ROUTEWAY_API_KEY || env.AI);
 }
 
 function parseJsonLoose(text) {
@@ -3159,6 +3159,89 @@ async function callOpenRouter({ system, prompt, schema, env }) {
   return { text, provider: 'openrouter' };
 }
 
+async function callMistral({ system, prompt, schema, env }) {
+  if (!env.MISTRAL_API_KEY) return null;
+  const res = await fetch('https://api.mistral.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${env.MISTRAL_API_KEY}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'mistral-small-latest',
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: `${prompt}\n\n${schemaAsPromptInstructions(schema)}` },
+      ],
+      response_format: { type: 'json_object' },
+    }),
+  });
+  if (!res.ok) throw new Error(`Mistral HTTP ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new Error('Mistral returned no content');
+  return { text, provider: 'mistral' };
+}
+
+async function callQwen({ system, prompt, schema, env }) {
+  if (!env.QWEN_API_KEY) return null;
+  const res = await fetch('https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${env.QWEN_API_KEY}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'qwen-turbo',
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: `${prompt}\n\n${schemaAsPromptInstructions(schema)}` },
+      ],
+      response_format: { type: 'json_object' },
+    }),
+  });
+  if (!res.ok) throw new Error(`Qwen HTTP ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new Error('Qwen returned no content');
+  return { text, provider: 'qwen' };
+}
+
+async function callHuggingFace({ system, prompt, schema, env }) {
+  if (!env.HUGGINGFACE_API_KEY) return null;
+  const res = await fetch('https://router.huggingface.co/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${env.HUGGINGFACE_API_KEY}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'meta-llama/Llama-3.1-8B-Instruct',
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: `${prompt}\n\n${schemaAsPromptInstructions(schema)}` },
+      ],
+    }),
+  });
+  if (!res.ok) throw new Error(`HuggingFace HTTP ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new Error('HuggingFace returned no content');
+  return { text, provider: 'huggingface' };
+}
+
+async function callRouteway({ system, prompt, schema, env }) {
+  if (!env.ROUTEWAY_API_KEY) return null;
+  const res = await fetch('https://api.routeway.ai/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${env.ROUTEWAY_API_KEY}`, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: 'deepseek-r1:free',
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: `${prompt}\n\n${schemaAsPromptInstructions(schema)}` },
+      ],
+      response_format: { type: 'json_object' },
+    }),
+  });
+  if (!res.ok) throw new Error(`Routeway HTTP ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new Error('Routeway returned no content');
+  return { text, provider: 'routeway' };
+}
+
 async function callWorkersAI({ system, prompt, schema, env }) {
   if (!env.AI) return null;
   const res = await env.AI.run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
@@ -3221,7 +3304,7 @@ function areaMarketStatsLine(stats) {
   return `Area auction stats (your Market Intel, outcode ${stats.outcode}): guide-to-sold ratio ${stats.guideToSoldRatio.toFixed(2)} — the average lot sells ${dir} across ${stats.soldConfirmed ?? stats.sampleSize ?? 0} confirmed sales.${score} Use this as the local signal for how far above guide to expect.`;
 }
 
-const AI_PROVIDER_CHAIN = [callAnthropic, callGroq, callGemini, callOpenRouter, callWorkersAI];
+const AI_PROVIDER_CHAIN = [callAnthropic, callGroq, callGemini, callMistral, callQwen, callOpenRouter, callHuggingFace, callRouteway, callWorkersAI];
 
 // Tries each configured provider in priority order; validates the parsed JSON
 // has every field in requiredFields before accepting it, so a provider that
@@ -3245,7 +3328,7 @@ async function generateInsight({ system, prompt, schema, requiredFields = [], en
     if (missing.length) { lastError = new Error(`${outcome.provider} response missing fields: ${missing.join(', ')}`); continue; }
     return { result: parsed, provider: outcome.provider };
   }
-  throw lastError || new Error('No AI provider is configured — set at least one of ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY, or bind Workers AI');
+  throw lastError || new Error('No AI provider is configured — set at least one of ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, QWEN_API_KEY, HUGGINGFACE_API_KEY, ROUTEWAY_API_KEY, or bind Workers AI');
 }
 
 // ============================================================
@@ -5104,7 +5187,7 @@ async function handleApiRoutes(request, env, url, ctx) {
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       if (!env.AI) return corsResponse({ success: false, message: 'Document parsing unavailable — AI binding not configured' }, 400);
       if (!anyAiProviderConfigured(env)) {
-        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, QWEN_API_KEY, HUGGINGFACE_API_KEY, ROUTEWAY_API_KEY' }, 400);
       }
       const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
       if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
@@ -5173,7 +5256,7 @@ async function handleApiRoutes(request, env, url, ctx) {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       if (!anyAiProviderConfigured(env)) {
-        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, QWEN_API_KEY, HUGGINGFACE_API_KEY, ROUTEWAY_API_KEY' }, 400);
       }
       const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
       if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
@@ -5243,7 +5326,7 @@ async function handleApiRoutes(request, env, url, ctx) {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       if (!anyAiProviderConfigured(env)) {
-        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, QWEN_API_KEY, HUGGINGFACE_API_KEY, ROUTEWAY_API_KEY' }, 400);
       }
       const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
       if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
@@ -5309,7 +5392,7 @@ async function handleApiRoutes(request, env, url, ctx) {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       if (!anyAiProviderConfigured(env)) {
-        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, QWEN_API_KEY, HUGGINGFACE_API_KEY, ROUTEWAY_API_KEY' }, 400);
       }
       const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
       if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
@@ -5373,7 +5456,7 @@ async function handleApiRoutes(request, env, url, ctx) {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       if (!anyAiProviderConfigured(env)) {
-        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, QWEN_API_KEY, HUGGINGFACE_API_KEY, ROUTEWAY_API_KEY' }, 400);
       }
       const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
       if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
@@ -5443,7 +5526,7 @@ async function handleApiRoutes(request, env, url, ctx) {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       if (!anyAiProviderConfigured(env)) {
-        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, QWEN_API_KEY, HUGGINGFACE_API_KEY, ROUTEWAY_API_KEY' }, 400);
       }
       const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
       if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
@@ -5507,7 +5590,7 @@ async function handleApiRoutes(request, env, url, ctx) {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       if (!anyAiProviderConfigured(env)) {
-        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, QWEN_API_KEY, HUGGINGFACE_API_KEY, ROUTEWAY_API_KEY' }, 400);
       }
       const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
       if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
@@ -5572,7 +5655,7 @@ async function handleApiRoutes(request, env, url, ctx) {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       if (!anyAiProviderConfigured(env)) {
-        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY' }, 400);
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, QWEN_API_KEY, HUGGINGFACE_API_KEY, ROUTEWAY_API_KEY' }, 400);
       }
       const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
       if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
