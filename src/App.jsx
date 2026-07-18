@@ -6892,6 +6892,38 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                       </div>
                     </div>
 
+                    {/* Attention-needed smart list — standing panel, not an AI call */}
+                    {(() => {
+                      const staleIntelProps = properties.filter(p => p.intelligence?.lastRun && (Date.now() - new Date(p.intelligence.lastRun)) > 30 * 86400000);
+                      const noBidAuctions = auctionsThisWeek.filter(p => !p.maxBid);
+                      const attentionItems = [
+                        ...overdueTasks.slice(0, 10).map(t => ({ key: `task-${t.id}`, text: `${t.title}${t.linkedId ? ` — ${propName(t.linkedId)}` : ''}`, reason: `Overdue · due ${t.dueDate}`, onClick: () => setActiveTab('tasks') })),
+                        ...noBidAuctions.slice(0, 10).map(p => ({ key: `nobid-${p.id}`, text: p.dealName || p.address?.split(',')[0], reason: `No max bid · auction ${new Date(p.auctionDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}`, onClick: () => { setActiveTab('pipeline'); setCurrentViewProperty(p); } })),
+                        ...staleIntelProps.slice(0, 10).map(p => ({ key: `stale-${p.id}`, text: p.dealName || p.address?.split(',')[0], reason: `Intelligence stale · ran ${fmtAgo(p.intelligence.lastRun)}`, onClick: () => { setActiveTab('pipeline'); setCurrentViewProperty(p); } })),
+                      ];
+                      return (
+                        <div style={{ ...panel, border: `1px solid ${attentionItems.length > 0 ? '#fecaca' : '#e2e8f0'}` }}>
+                          <div style={panelHead}>
+                            <span>⚠️ Needs attention</span>
+                            {attentionItems.length > 0 && <span style={{ fontSize: '11px', color: '#dc2626', fontWeight: '700' }}>{attentionItems.length}</span>}
+                          </div>
+                          {attentionItems.length === 0 ? (
+                            <div style={dashEmpty}>✓ Nothing needs attention right now.</div>
+                          ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                              {attentionItems.slice(0, 8).map(item => (
+                                <div key={item.key} onClick={item.onClick} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+                                  <span style={{ fontSize: '12px', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.text}</span>
+                                  <span style={{ fontSize: '11px', color: '#dc2626', whiteSpace: 'nowrap', flexShrink: 0 }}>{item.reason}</span>
+                                </div>
+                              ))}
+                              {attentionItems.length > 8 && <div style={{ fontSize: '11px', color: '#94a3b8' }}>+{attentionItems.length - 8} more</div>}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
                     {/* 3-column grid */}
                     <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: '16px', alignItems: 'flex-start' }}>
 
