@@ -2943,6 +2943,18 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
     setActiveTab('scraper');
   };
 
+  // "Since your last visit" digest banner — baseline read once at mount, updated on dismiss
+  const [digestBaseline] = useState(() => localStorage.getItem('dashboard_digest_seen'));
+  const [digestDismissed, setDigestDismissed] = useState(false);
+  const [digestExpanded, setDigestExpanded] = useState(false);
+  const dismissDigestBanner = () => {
+    localStorage.setItem('dashboard_digest_seen', new Date().toISOString());
+    setDigestDismissed(true);
+  };
+  useEffect(() => {
+    if (activeTab === 'dashboard' && !digestBaseline) localStorage.setItem('dashboard_digest_seen', new Date().toISOString());
+  }, [activeTab]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // KV persistence — declared here so all state vars above are in scope
   const [saveStatus, setSaveStatus] = useState('idle');
   const [dataLoaded, setDataLoaded] = useState(false);
@@ -6791,6 +6803,53 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         <button onClick={openAddProp} style={{ background: '#7C3AED', color: '#fff', border: 'none', borderRadius: '8px', padding: '9px 16px', fontSize: '13px', fontWeight: '600', cursor: 'pointer', fontFamily: 'inherit' }}>+ Add property</button>
                       </div>
                     </div>
+
+                    {/* "Since your last visit" digest banner */}
+                    {(() => {
+                      if (digestDismissed || !digestBaseline) return null;
+                      const baselineMs = new Date(digestBaseline).getTime();
+                      const newLots = auctionLots.filter(l => l.firstSeenAt && l.firstSeenAt > digestBaseline);
+                      const guideDropLots = auctionLots.filter(l => l.guidePriceChanged);
+                      const newProps = properties.filter(p => typeof p.id === 'number' && p.id > baselineMs);
+                      const statusChanges = properties.flatMap(p => (p.activityLog || []).filter(a => a.type !== 'created' && a.at && a.at > digestBaseline));
+                      const digestTotal = newLots.length + guideDropLots.length + newProps.length + statusChanges.length;
+                      if (digestTotal === 0) return null;
+                      const digestParts = [
+                        newLots.length > 0 && `${newLots.length} new lot${newLots.length !== 1 ? 's' : ''}`,
+                        guideDropLots.length > 0 && `${guideDropLots.length} guide change${guideDropLots.length !== 1 ? 's' : ''}`,
+                        newProps.length > 0 && `${newProps.length} new propert${newProps.length !== 1 ? 'ies' : 'y'}`,
+                        statusChanges.length > 0 && `${statusChanges.length} status change${statusChanges.length !== 1 ? 's' : ''}`,
+                      ].filter(Boolean);
+                      return (
+                        <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '12px 16px' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                            <div style={{ fontSize: '12px', color: '#1e40af' }}>
+                              🕐 <b style={{ fontWeight: '600' }}>Since your last visit:</b> {digestParts.join(' · ')}
+                            </div>
+                            <div style={{ display: 'flex', gap: '14px', alignItems: 'center', flexShrink: 0 }}>
+                              <span onClick={() => setDigestExpanded(e => !e)} style={{ fontSize: '11px', color: '#2563eb', cursor: 'pointer' }}>{digestExpanded ? 'Hide details' : 'View details'}</span>
+                              <span onClick={dismissDigestBanner} title="Dismiss" style={{ fontSize: '11px', color: '#64748b', cursor: 'pointer' }}>✕ Dismiss</span>
+                            </div>
+                          </div>
+                          {digestExpanded && (
+                            <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                              {newLots.slice(0, 5).map(l => (
+                                <div key={`nl-${l.id}`} onClick={() => setActiveTab('scraper')} style={{ fontSize: '11px', color: '#334155', cursor: 'pointer' }}>New lot: {l.address}</div>
+                              ))}
+                              {guideDropLots.slice(0, 5).map(l => (
+                                <div key={`gd-${l.id}`} onClick={() => setActiveTab('scraper')} style={{ fontSize: '11px', color: '#334155', cursor: 'pointer' }}>Guide changed: {l.address}{l.previousGuidePrice ? ` (was £${Number(l.previousGuidePrice).toLocaleString()})` : ''}</div>
+                              ))}
+                              {newProps.slice(0, 5).map(p => (
+                                <div key={`np-${p.id}`} onClick={() => { setActiveTab('pipeline'); setCurrentViewProperty(p); }} style={{ fontSize: '11px', color: '#334155', cursor: 'pointer' }}>New property: {p.dealName || p.address?.split(',')[0]}</div>
+                              ))}
+                              {statusChanges.slice(0, 5).map((a, i) => (
+                                <div key={`sc-${i}`} style={{ fontSize: '11px', color: '#334155' }}>{a.detail}</div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {/* 5 KPI tiles — emoji + trend */}
                     <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(5, 1fr)', gap: '12px' }}>
