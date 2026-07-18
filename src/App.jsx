@@ -2603,6 +2603,10 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
   const [pipelineDateTo, setPipelineDateTo] = useState(_pf.pipelineDateTo || '');
   const [pipelineColFilters, setPipelineColFilters] = useState(_pf.pipelineColFilters || { propertyType: [], sourcePlatform: [], status: [] });
   const [pipelineFilterPopover, setPipelineFilterPopover] = useState(null);
+  const [pipelineSavedViews, setPipelineSavedViews] = useState(() => { try { return JSON.parse(localStorage.getItem('crm_pipeline_saved_views') || '[]'); } catch { return []; } });
+  const [pipelineSavedViewId, setPipelineSavedViewId] = useState('');
+  const [pipelineSaveViewOpen, setPipelineSaveViewOpen] = useState(false);
+  const [pipelineSaveViewName, setPipelineSaveViewName] = useState('');
   const [showPipelineFilters, setShowPipelineFilters] = useState(false);
   const [showMapView, setShowMapView] = useState(false);
   const [mapGeoCache, setMapGeoCache] = useState({});
@@ -3155,6 +3159,28 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
   useEffect(() => {
     localStorage.setItem('crm_pipeline_filters', JSON.stringify({ pipelineSort, pipelineTypeFilter, pipelineStageFilter, pipelineDateFrom, pipelineDateTo, pipelineColFilters }));
   }, [pipelineSort, pipelineTypeFilter, pipelineStageFilter, pipelineDateFrom, pipelineDateTo, pipelineColFilters]);
+
+  useEffect(() => {
+    localStorage.setItem('crm_pipeline_saved_views', JSON.stringify(pipelineSavedViews));
+  }, [pipelineSavedViews]);
+
+  const applyPipelineSavedView = (view) => {
+    if (!view) return;
+    setPipelineSort(view.pipelineSort || 'newest');
+    setPipelineTypeFilter(view.pipelineTypeFilter || 'ALL');
+    setPipelineStageFilter(view.pipelineStageFilter || 'ALL');
+    setPipelineDateFrom(view.pipelineDateFrom || '');
+    setPipelineDateTo(view.pipelineDateTo || '');
+    setPipelineColFilters(view.pipelineColFilters || { propertyType: [], sourcePlatform: [], status: [] });
+  };
+  const saveCurrentPipelineView = (name) => {
+    if (!name.trim()) return;
+    setPipelineSavedViews(prev => [...prev, { id: Date.now(), name: name.trim(), pipelineSort, pipelineTypeFilter, pipelineStageFilter, pipelineDateFrom, pipelineDateTo, pipelineColFilters }]);
+  };
+  const deletePipelineSavedView = (id) => {
+    setPipelineSavedViews(prev => prev.filter(v => String(v.id) !== String(id)));
+    setPipelineSavedViewId(prev => String(prev) === String(id) ? '' : prev);
+  };
 
   useEffect(() => {
     if (activeTab === 'scraper' || activeTab === 'auctionintel') {
@@ -7159,6 +7185,28 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                   {/* Filter panel */}
                   {showPipelineFilters && (
                     <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '14px 16px', display: 'flex', flexWrap: 'wrap', gap: '12px', alignItems: 'flex-end' }}>
+                      <div style={{ position: 'relative' }}>
+                        <div style={{ fontSize: '10px', fontWeight: '600', color: '#64748b', marginBottom: '4px' }}>SAVED VIEWS</div>
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                          <select value={pipelineSavedViewId} onChange={e => { const v = pipelineSavedViews.find(x => String(x.id) === e.target.value); setPipelineSavedViewId(e.target.value); if (v) applyPipelineSavedView(v); }} style={{ padding: '7px 10px', borderRadius: '6px', border: '1px solid #e2e8f0', fontSize: '12px', backgroundColor: '#fff' }}>
+                            <option value="">— Select a view —</option>
+                            {pipelineSavedViews.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+                          </select>
+                          {pipelineSavedViewId && (
+                            <button onClick={() => deletePipelineSavedView(pipelineSavedViewId)} title="Delete this saved view" style={{ padding: '7px 9px', borderRadius: '6px', border: '1px solid #e2e8f0', backgroundColor: '#fff', cursor: 'pointer', color: '#ef4444' }}><Trash2 size={13} /></button>
+                          )}
+                          <button onClick={() => { setPipelineSaveViewName(''); setPipelineSaveViewOpen(o => !o); }} title="Save current filters as a view" style={{ padding: '7px 10px', borderRadius: '6px', border: '1px solid #e2e8f0', backgroundColor: '#fff', fontSize: '12px', cursor: 'pointer', color: '#475569' }}>Save view</button>
+                        </div>
+                        {pipelineSaveViewOpen && (
+                          <>
+                            <div style={{ position: 'fixed', inset: 0, zIndex: 150 }} onClick={() => setPipelineSaveViewOpen(false)} />
+                            <div onClick={e => e.stopPropagation()} style={{ position: 'absolute', top: '100%', left: 0, marginTop: '4px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 151, padding: '10px', width: '200px' }}>
+                              <input value={pipelineSaveViewName} onChange={e => setPipelineSaveViewName(e.target.value)} placeholder="View name…" autoFocus style={{ width: '100%', padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', boxSizing: 'border-box', marginBottom: '8px' }} onKeyDown={e => { if (e.key === 'Enter' && pipelineSaveViewName.trim()) { saveCurrentPipelineView(pipelineSaveViewName); setPipelineSaveViewOpen(false); } }} />
+                              <button onClick={() => { if (pipelineSaveViewName.trim()) { saveCurrentPipelineView(pipelineSaveViewName); setPipelineSaveViewOpen(false); } }} disabled={!pipelineSaveViewName.trim()} style={{ width: '100%', padding: '6px', borderRadius: '6px', border: 'none', background: pipelineSaveViewName.trim() ? '#7C3AED' : '#e2e8f0', color: '#fff', fontSize: '12px', fontWeight: '600', cursor: pipelineSaveViewName.trim() ? 'pointer' : 'default' }}>Save</button>
+                            </div>
+                          </>
+                        )}
+                      </div>
                       <div>
                         <div style={{ fontSize: '10px', fontWeight: '600', color: '#64748b', marginBottom: '4px' }}>SORT</div>
                         <select value={pipelineSort} onChange={e => setPipelineSort(e.target.value)} style={{ padding: '7px 10px', borderRadius: '6px', border: '1px solid #e2e8f0', fontSize: '12px', backgroundColor: '#fff' }}>
