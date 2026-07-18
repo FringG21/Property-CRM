@@ -2595,6 +2595,8 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
   const [pipelineStageFilter, setPipelineStageFilter] = useState(_pf.pipelineStageFilter || 'ALL');
   const [pipelineDateFrom, setPipelineDateFrom] = useState(_pf.pipelineDateFrom || '');
   const [pipelineDateTo, setPipelineDateTo] = useState(_pf.pipelineDateTo || '');
+  const [pipelineColFilters, setPipelineColFilters] = useState(_pf.pipelineColFilters || { propertyType: [], sourcePlatform: [], status: [] });
+  const [pipelineFilterPopover, setPipelineFilterPopover] = useState(null);
   const [showPipelineFilters, setShowPipelineFilters] = useState(false);
   const [showMapView, setShowMapView] = useState(false);
   const [mapGeoCache, setMapGeoCache] = useState({});
@@ -3126,8 +3128,8 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('crm_pipeline_filters', JSON.stringify({ pipelineSort, pipelineTypeFilter, pipelineStageFilter, pipelineDateFrom, pipelineDateTo }));
-  }, [pipelineSort, pipelineTypeFilter, pipelineStageFilter, pipelineDateFrom, pipelineDateTo]);
+    localStorage.setItem('crm_pipeline_filters', JSON.stringify({ pipelineSort, pipelineTypeFilter, pipelineStageFilter, pipelineDateFrom, pipelineDateTo, pipelineColFilters }));
+  }, [pipelineSort, pipelineTypeFilter, pipelineStageFilter, pipelineDateFrom, pipelineDateTo, pipelineColFilters]);
 
   useEffect(() => {
     if (activeTab === 'scraper' || activeTab === 'auctionintel') {
@@ -3368,6 +3370,9 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
     if (pipelineStageFilter !== 'ALL' && normaliseStatus(p.status) !== pipelineStageFilter) return false;
     if (pipelineDateFrom && p.auctionDate && p.auctionDate < pipelineDateFrom) return false;
     if (pipelineDateTo && p.auctionDate && p.auctionDate > pipelineDateTo) return false;
+    if (pipelineColFilters.propertyType?.length && !pipelineColFilters.propertyType.includes(p.propertyType)) return false;
+    if (pipelineColFilters.sourcePlatform?.length && !pipelineColFilters.sourcePlatform.includes(p.sourcePlatform)) return false;
+    if (pipelineColFilters.status?.length && !pipelineColFilters.status.includes(normaliseStatus(p.status))) return false;
     return true;
   }).sort((a, b) => {
     if (pipelineSort === 'newest') return b.id - a.id;
@@ -3375,8 +3380,63 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
     if (pipelineSort === 'priceDesc') return (b.guidePrice || 0) - (a.guidePrice || 0);
     if (pipelineSort === 'dateAsc') return (a.auctionDate || '').localeCompare(b.auctionDate || '');
     if (pipelineSort === 'dateDesc') return (b.auctionDate || '').localeCompare(a.auctionDate || '');
+    if (pipelineSort === 'addrAsc') return (a.address || '').localeCompare(b.address || '');
+    if (pipelineSort === 'addrDesc') return (b.address || '').localeCompare(a.address || '');
+    if (pipelineSort === 'typeAsc') return (a.propertyType || '').localeCompare(b.propertyType || '');
+    if (pipelineSort === 'typeDesc') return (b.propertyType || '').localeCompare(a.propertyType || '');
+    if (pipelineSort === 'platAsc') return (a.sourcePlatform || '').localeCompare(b.sourcePlatform || '');
+    if (pipelineSort === 'platDesc') return (b.sourcePlatform || '').localeCompare(a.sourcePlatform || '');
+    if (pipelineSort === 'bidAsc') return (a.maxBid || 0) - (b.maxBid || 0);
+    if (pipelineSort === 'bidDesc') return (b.maxBid || 0) - (a.maxBid || 0);
+    if (pipelineSort === 'stageAsc') return normaliseStatus(a.status).localeCompare(normaliseStatus(b.status));
+    if (pipelineSort === 'stageDesc') return normaliseStatus(b.status).localeCompare(normaliseStatus(a.status));
+    if (pipelineSort === 'ppsmAsc' || pipelineSort === 'ppsmDesc') {
+      const ppsm = (p) => { const fa = parseFloat(p.floorArea) || parseFloat(p.analytics?.floorArea) || 0; return (fa > 0 && p.guidePrice > 0) ? p.guidePrice / fa : null; };
+      const av = ppsm(a), bv = ppsm(b);
+      if (av == null && bv == null) return 0;
+      if (av == null) return 1;
+      if (bv == null) return -1;
+      return pipelineSort === 'ppsmAsc' ? av - bv : bv - av;
+    }
     return 0;
   });
+  const pipelineColFilterOptions = {
+    propertyType: [...new Set(properties.map(p => p.propertyType).filter(Boolean))].sort(),
+    sourcePlatform: [...new Set(properties.map(p => p.sourcePlatform).filter(Boolean))].sort(),
+    status: [...new Set(properties.map(p => normaliseStatus(p.status)))].sort(),
+  };
+  const togglePipelineColFilterValue = (field, value) => {
+    setPipelineColFilters(prev => {
+      const cur = prev[field] || [];
+      const next = cur.includes(value) ? cur.filter(v => v !== value) : [...cur, value];
+      return { ...prev, [field]: next };
+    });
+  };
+  const pipelineSortToggle = (ascKey, descKey) => () => setPipelineSort(prev => prev === ascKey ? descKey : ascKey);
+  const pipelineSortCaret = (ascKey, descKey) => pipelineSort === ascKey ? ' ▲' : pipelineSort === descKey ? ' ▼' : '';
+  const renderPipelineFilterIcon = (field) => (
+    <span onClick={e => { e.stopPropagation(); setPipelineFilterPopover(f => f === field ? null : field); }} style={{ marginLeft: '4px', cursor: 'pointer', display: 'inline-flex', verticalAlign: 'middle', color: (pipelineColFilters[field] || []).length ? '#7C3AED' : '#94a3b8' }}>
+      <Filter size={11} />
+      {pipelineFilterPopover === field && (
+        <>
+          <div style={{ position: 'fixed', inset: 0, zIndex: 150 }} onClick={e => { e.stopPropagation(); setPipelineFilterPopover(null); }} />
+          <div onClick={e => e.stopPropagation()} style={{ position: 'absolute', top: '100%', left: 0, marginTop: '4px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: '8px', boxShadow: '0 8px 24px rgba(0,0,0,0.12)', zIndex: 151, padding: '8px', minWidth: '160px', maxHeight: '240px', overflowY: 'auto', fontWeight: '400', textTransform: 'none', cursor: 'default' }}>
+            {(pipelineColFilterOptions[field] || []).length === 0 ? (
+              <div style={{ fontSize: '11px', color: '#94a3b8', padding: '4px' }}>No values</div>
+            ) : pipelineColFilterOptions[field].map(v => (
+              <label key={v} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '12px', color: '#334155', padding: '4px', cursor: 'pointer' }}>
+                <input type="checkbox" checked={(pipelineColFilters[field] || []).includes(v)} onChange={() => togglePipelineColFilterValue(field, v)} />
+                {v}
+              </label>
+            ))}
+            {(pipelineColFilters[field] || []).length > 0 && (
+              <div onClick={() => setPipelineColFilters(prev => ({ ...prev, [field]: [] }))} style={{ fontSize: '11px', color: '#7C3AED', cursor: 'pointer', marginTop: '4px', padding: '4px' }}>Clear</div>
+            )}
+          </div>
+        </>
+      )}
+    </span>
+  );
 
   const RESPONSIVE_CSS = `
     *, *::before, *::after { box-sizing: border-box; }
@@ -7223,15 +7283,24 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                             <tr style={{ backgroundColor: '#f8fafc', borderBottom: '1px solid #e2e8f0' }}>
                               {bulkMode && <th style={{ padding: '12px 16px', width: '36px', textAlign: 'center' }}><input type="checkbox" checked={bulkSelectedIds.length === pipelineProperties.length && pipelineProperties.length > 0} onChange={e => setBulkSelectedIds(e.target.checked ? pipelineProperties.map(p => p.id) : [])} /></th>}
                               <th style={{ padding: '12px 16px', width: '36px', textAlign: 'center' }}><Star size={13} /></th>
-                              <th style={{ padding: '12px 16px' }}>Address</th>
-                              <th style={{ padding: '12px 16px' }}>Type</th>
-                              <th style={{ padding: '12px 16px' }}>Platform</th>
-                              <th style={{ padding: '12px 16px' }}>Guide</th>
-                              <th style={{ padding: '12px 16px' }}>Guide £/m²</th>
-                              <th style={{ padding: '12px 16px' }}>Max bid</th>
-                              <th style={{ padding: '12px 16px' }}>Auction date</th>
-                              <th style={{ padding: '12px 16px' }}>Countdown</th>
-                              <th style={{ padding: '12px 16px' }}>Stage</th>
+                              <th style={{ padding: '12px 16px', cursor: 'pointer', userSelect: 'none' }} onClick={pipelineSortToggle('addrAsc', 'addrDesc')}>Address{pipelineSortCaret('addrAsc', 'addrDesc')}</th>
+                              <th style={{ padding: '12px 16px', position: 'relative' }}>
+                                <span onClick={pipelineSortToggle('typeAsc', 'typeDesc')} style={{ cursor: 'pointer', userSelect: 'none' }}>Type{pipelineSortCaret('typeAsc', 'typeDesc')}</span>
+                                {renderPipelineFilterIcon('propertyType')}
+                              </th>
+                              <th style={{ padding: '12px 16px', position: 'relative' }}>
+                                <span onClick={pipelineSortToggle('platAsc', 'platDesc')} style={{ cursor: 'pointer', userSelect: 'none' }}>Platform{pipelineSortCaret('platAsc', 'platDesc')}</span>
+                                {renderPipelineFilterIcon('sourcePlatform')}
+                              </th>
+                              <th style={{ padding: '12px 16px', cursor: 'pointer', userSelect: 'none' }} onClick={pipelineSortToggle('priceAsc', 'priceDesc')}>Guide{pipelineSortCaret('priceAsc', 'priceDesc')}</th>
+                              <th style={{ padding: '12px 16px', cursor: 'pointer', userSelect: 'none' }} onClick={pipelineSortToggle('ppsmAsc', 'ppsmDesc')}>Guide £/m²{pipelineSortCaret('ppsmAsc', 'ppsmDesc')}</th>
+                              <th style={{ padding: '12px 16px', cursor: 'pointer', userSelect: 'none' }} onClick={pipelineSortToggle('bidAsc', 'bidDesc')}>Max bid{pipelineSortCaret('bidAsc', 'bidDesc')}</th>
+                              <th style={{ padding: '12px 16px', cursor: 'pointer', userSelect: 'none' }} onClick={pipelineSortToggle('dateAsc', 'dateDesc')}>Auction date{pipelineSortCaret('dateAsc', 'dateDesc')}</th>
+                              <th style={{ padding: '12px 16px', cursor: 'pointer', userSelect: 'none' }} onClick={pipelineSortToggle('dateAsc', 'dateDesc')}>Countdown{pipelineSortCaret('dateAsc', 'dateDesc')}</th>
+                              <th style={{ padding: '12px 16px', position: 'relative' }}>
+                                <span onClick={pipelineSortToggle('stageAsc', 'stageDesc')} style={{ cursor: 'pointer', userSelect: 'none' }}>Stage{pipelineSortCaret('stageAsc', 'stageDesc')}</span>
+                                {renderPipelineFilterIcon('status')}
+                              </th>
                               <th style={{ padding: '12px 16px', textAlign: 'center' }}></th>
                             </tr>
                           </thead>
