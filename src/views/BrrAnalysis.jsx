@@ -293,6 +293,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
   const [ladderFullScreen, setLadderFullScreen] = useState(false);
   const [liveMode, setLiveMode] = useState(false);
   const [confirmHammerDraft, setConfirmHammerDraft] = useState(null);
+  const [dashboardCollapsed, setDashboardCollapsed] = useState(false);
   const toggle = key => setExpanded(e => ({ ...e, [key]: !e[key] }));
 
   if (!property) return null;
@@ -809,8 +810,20 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
 
   return (
     <div style={{ padding: isMobile ? '10px' : '16px 20px', background: '#0b1120' }}>
-      {/* Sticky summary dashboard */}
-      <div style={{ position: 'sticky', top: 0, zIndex: 5, background: COLORS.cardBg, border: `0.5px solid ${COLORS.borderLight}`, borderRadius: '10px', padding: '12px 16px', marginBottom: '14px' }}>
+      {/* Summary dashboard — collapsed compact sticky bar */}
+      {dashboardCollapsed && (
+        <div style={{ position: 'sticky', top: 0, zIndex: 5, background: COLORS.cardBg, border: `0.5px solid ${COLORS.borderLight}`, borderRadius: '10px', padding: '8px 12px', marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '12px', fontWeight: '600', color: COLORS.text }}>{scenario.name}</span>
+          <span style={{ fontSize: '11px', fontWeight: '600', padding: '3px 9px', borderRadius: '10px', background: `${verdict.color}22`, color: verdict.color, border: `1px solid ${verdict.color}` }}>{verdict.label}</span>
+          <span style={{ fontSize: '11px', color: COLORS.textMuted }}>Max BRR bid <strong style={{ color: COLORS.text }}>{maxBidResult && maxBidResult.maxBid != null ? fmtGbp(maxBidResult.maxBid) : (maxBidResult ? 'No bid passes' : '—')}</strong></span>
+          {cautionPlusWarnings.length > 0 && <span style={{ fontSize: '11px', color: COLORS.warnText }}>⚠ {cautionPlusWarnings.length} warning{cautionPlusWarnings.length !== 1 ? 's' : ''}</span>}
+          <button onClick={() => setDashboardCollapsed(false)} style={{ marginLeft: 'auto', fontSize: '11px', fontWeight: '600', color: COLORS.textMuted, background: 'transparent', border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '5px 10px', minHeight: '32px', cursor: 'pointer' }}>Expand ▾</button>
+        </div>
+      )}
+
+      {/* Summary dashboard — full (scrolls with the page so it never pins over the sections below) */}
+      {!dashboardCollapsed && (
+      <div style={{ background: COLORS.cardBg, border: `0.5px solid ${COLORS.borderLight}`, borderRadius: '10px', padding: '12px 16px', marginBottom: '14px' }}>
         <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '10px', marginBottom: '10px' }}>
           {isMobile ? (
             <div style={{ display: 'flex', gap: '6px', overflowX: 'auto', flex: '1 1 100%' }}>
@@ -838,6 +851,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
             )}
             {!liveMode && <button onClick={() => saveSnapshot('review')} style={{ fontSize: '11px', fontWeight: '600', color: COLORS.accent, background: 'transparent', border: `1px solid ${COLORS.accent}`, borderRadius: '6px', padding: '5px 10px', minHeight: '32px', cursor: 'pointer' }}>Save pre-auction snapshot</button>}
             <button onClick={() => setLiveMode(m => !m)} style={{ fontSize: '11px', fontWeight: '600', color: liveMode ? '#fff' : COLORS.textMuted, background: liveMode ? COLORS.accent : 'transparent', border: `1px solid ${liveMode ? COLORS.accent : COLORS.borderLight}`, borderRadius: '6px', padding: '5px 10px', minHeight: '32px', cursor: 'pointer' }}>{liveMode ? '✕ Exit Live Auction' : 'Live Auction mode'}</button>
+            <button onClick={() => setDashboardCollapsed(true)} title="Collapse summary" style={{ fontSize: '11px', fontWeight: '600', color: COLORS.textMuted, background: 'transparent', border: `1px solid ${COLORS.borderLight}`, borderRadius: '6px', padding: '5px 10px', minHeight: '32px', cursor: 'pointer' }}>Collapse ▴</button>
           </div>
         </div>
         <div style={{ fontSize: '12px', color: COLORS.textMuted, marginBottom: '12px' }}>{verdict.explanation}</div>
@@ -865,6 +879,7 @@ export default function BrrAnalysis({ property, updateFieldInView, addBid, logTi
           {kpis.map(k => <KpiTile key={k.l} label={k.l} value={k.v} valueColor={k.c} isMobile={isMobile} />)}
         </div>
       </div>
+      )}
 
       {liveMode ? (
       <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
