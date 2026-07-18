@@ -2205,6 +2205,13 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
             accepted: propQuotes.filter(q => q.status === 'accepted').map(q => ({ trade: q.tradeCategory, amount: q.totalAmount })),
           },
           comparables: (prop.comparables || []).slice(0, 10).map(c => ({ address: c.address, price: c.soldPrice ?? c.price, date: c.soldDate || c.date })),
+          marketComparison: (prop.analytics?.dealAnalysisSummary) ? {
+            positioning: prop.analytics.dealAnalysisPositioning || null,
+            confidence: prop.analytics.dealAnalysisConfidence || null,
+            marketSummary: prop.analytics.dealAnalysisSummary,
+            generatedAt: prop.analytics.dealAnalysisGeneratedAt || null,
+            comparables: (prop.analytics.dealAnalysisComparables || []).slice(0, 8),
+          } : null,
         },
       };
       const res = await fetch('/api/ai/deal-review', {
@@ -2224,11 +2231,24 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
       }, 'intelligence', `AI deal review — ${scoreLabel} (${verdictLabel})`);
       setProperties(prev => prev.map(p => p.id === prop.id ? updated : p));
       if (currentViewProperty?.id === prop.id) setCurrentViewProperty(updated);
+      return updated;
     } catch (err) {
       console.error('AI deal review failed:', err);
       alert('AI review failed — please try again.');
     } finally {
       setAiReviewLoadingId(null);
+    }
+  };
+
+  const [fullReviewLoadingId, setFullReviewLoadingId] = useState(null);
+  const runFullReview = async (prop) => {
+    if (!prop || fullReviewLoadingId || aiReviewLoadingId || aiAnalysisLoadingId) return;
+    setFullReviewLoadingId(prop.id);
+    try {
+      const afterAnalysis = await runDealAnalysis(prop);
+      await runAiDealReview(afterAnalysis || prop);
+    } finally {
+      setFullReviewLoadingId(null);
     }
   };
 
@@ -2451,6 +2471,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
       }, 'intelligence', `AI market comparison — ${a.positioning.replace('_', ' ')} (${a.confidence} confidence)`);
       setProperties(prev => prev.map(p => p.id === prop.id ? updated : p));
       if (currentViewProperty?.id === prop.id) setCurrentViewProperty(updated);
+      return updated;
     } catch {
       alert('Market comparison failed — network error.');
     } finally {
@@ -3999,8 +4020,16 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         {intelligenceRunning ? '⏳' : '🔍'}
                       </button>
                       <button
+                        onClick={() => runFullReview(currentViewProperty)}
+                        disabled={fullReviewLoadingId === currentViewProperty.id || aiReviewLoadingId === currentViewProperty.id || aiAnalysisLoadingId === currentViewProperty.id}
+                        title="Full review — market comparison then AI review"
+                        style={{ display: 'flex', alignItems: 'center', fontSize: '11px', padding: '4px 8px', borderRadius: '6px', border: '1px solid', cursor: fullReviewLoadingId === currentViewProperty.id ? 'wait' : 'pointer', whiteSpace: 'nowrap', background: an.aiDealScore != null && an.dealAnalysisSummary ? '#2e1065' : 'transparent', borderColor: an.aiDealScore != null && an.dealAnalysisSummary ? '#6d28d9' : '#334155', color: an.aiDealScore != null && an.dealAnalysisSummary ? '#c4b5fd' : '#94a3b8', fontFamily: 'inherit' }}
+                      >
+                        {fullReviewLoadingId === currentViewProperty.id ? (aiAnalysisLoadingId === currentViewProperty.id ? '🌐⏳' : '🤖⏳') : '⚡'}
+                      </button>
+                      <button
                         onClick={() => runAiDealReview(currentViewProperty)}
-                        disabled={aiReviewLoadingId === currentViewProperty.id}
+                        disabled={aiReviewLoadingId === currentViewProperty.id || fullReviewLoadingId === currentViewProperty.id}
                         title={an.aiSummary ? 'Re-run AI deal review' : 'Run AI deal review'}
                         style={{ display: 'flex', alignItems: 'center', fontSize: '11px', padding: '4px 8px', borderRadius: '6px', border: '1px solid', cursor: aiReviewLoadingId === currentViewProperty.id ? 'wait' : 'pointer', whiteSpace: 'nowrap', background: an.aiDealScore != null ? '#2e1065' : 'transparent', borderColor: an.aiDealScore != null ? '#6d28d9' : '#334155', color: an.aiDealScore != null ? '#c4b5fd' : '#94a3b8', fontFamily: 'inherit' }}
                       >
@@ -4008,7 +4037,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                       </button>
                       <button
                         onClick={() => runDealAnalysis(currentViewProperty)}
-                        disabled={aiAnalysisLoadingId === currentViewProperty.id}
+                        disabled={aiAnalysisLoadingId === currentViewProperty.id || fullReviewLoadingId === currentViewProperty.id}
                         title={an.dealAnalysisSummary ? 'Re-run market comparison' : 'Run market comparison (live web search)'}
                         style={{ display: 'flex', alignItems: 'center', fontSize: '11px', padding: '4px 8px', borderRadius: '6px', border: '1px solid', cursor: aiAnalysisLoadingId === currentViewProperty.id ? 'wait' : 'pointer', whiteSpace: 'nowrap', background: an.dealAnalysisSummary ? '#172554' : 'transparent', borderColor: an.dealAnalysisSummary ? '#1d4ed8' : '#334155', color: an.dealAnalysisSummary ? '#93c5fd' : '#94a3b8', fontFamily: 'inherit' }}
                       >
@@ -4064,15 +4093,22 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         {intelligenceRunning ? '⏳ Running…' : intel.lastRun ? '🔍 Refresh Intel' : '🔍 Run Intelligence'}
                       </button>
                       <button
+                        onClick={() => runFullReview(currentViewProperty)}
+                        disabled={fullReviewLoadingId === currentViewProperty.id || aiReviewLoadingId === currentViewProperty.id || aiAnalysisLoadingId === currentViewProperty.id}
+                        style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', padding: '5px 10px', borderRadius: '6px', border: '1px solid', cursor: fullReviewLoadingId === currentViewProperty.id ? 'wait' : 'pointer', whiteSpace: 'nowrap', background: an.aiDealScore != null && an.dealAnalysisSummary ? '#2e1065' : 'transparent', borderColor: an.aiDealScore != null && an.dealAnalysisSummary ? '#6d28d9' : '#334155', color: an.aiDealScore != null && an.dealAnalysisSummary ? '#c4b5fd' : '#94a3b8', fontFamily: 'inherit' }}
+                      >
+                        {fullReviewLoadingId === currentViewProperty.id ? (aiAnalysisLoadingId === currentViewProperty.id ? '⏳ Comparing market…' : '⏳ Reviewing…') : '⚡ Full review'}
+                      </button>
+                      <button
                         onClick={() => runAiDealReview(currentViewProperty)}
-                        disabled={aiReviewLoadingId === currentViewProperty.id}
+                        disabled={aiReviewLoadingId === currentViewProperty.id || fullReviewLoadingId === currentViewProperty.id}
                         style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', padding: '5px 10px', borderRadius: '6px', border: '1px solid', cursor: aiReviewLoadingId === currentViewProperty.id ? 'wait' : 'pointer', whiteSpace: 'nowrap', background: an.aiDealScore != null ? '#2e1065' : 'transparent', borderColor: an.aiDealScore != null ? '#6d28d9' : '#334155', color: an.aiDealScore != null ? '#c4b5fd' : '#94a3b8', fontFamily: 'inherit' }}
                       >
                         {aiReviewLoadingId === currentViewProperty.id ? '⏳ Reviewing…' : an.aiDealScore != null ? '🤖 Re-run AI review' : '🤖 AI review'}
                       </button>
                       <button
                         onClick={() => runDealAnalysis(currentViewProperty)}
-                        disabled={aiAnalysisLoadingId === currentViewProperty.id}
+                        disabled={aiAnalysisLoadingId === currentViewProperty.id || fullReviewLoadingId === currentViewProperty.id}
                         style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', padding: '5px 10px', borderRadius: '6px', border: '1px solid', cursor: aiAnalysisLoadingId === currentViewProperty.id ? 'wait' : 'pointer', whiteSpace: 'nowrap', background: an.dealAnalysisSummary ? '#172554' : 'transparent', borderColor: an.dealAnalysisSummary ? '#1d4ed8' : '#334155', color: an.dealAnalysisSummary ? '#93c5fd' : '#94a3b8', fontFamily: 'inherit' }}
                       >
                         {aiAnalysisLoadingId === currentViewProperty.id ? '⏳ Analysing…' : an.dealAnalysisSummary ? '🌐 Re-run comparison' : '🌐 Market comparison'}
@@ -10008,10 +10044,13 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                             {/* Export + AI actions */}
                             <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
                               <button onClick={() => exportDealPack(activeDeal)} style={{ padding: '8px 16px', backgroundColor: '#0f172a', color: '#fff', border: 'none', borderRadius: '7px', fontSize: '12px', fontWeight: '600', cursor: 'pointer' }}>📄 Export lender deal pack</button>
-                              <button onClick={() => runAiDealReview(activeDeal)} disabled={aiReviewLoadingId === activeDeal.id} style={{ padding: '8px 16px', backgroundColor: aiReviewLoadingId === activeDeal.id ? '#c4b5fd' : '#7C3AED', color: '#fff', border: 'none', borderRadius: '7px', fontSize: '12px', fontWeight: '600', cursor: aiReviewLoadingId === activeDeal.id ? 'wait' : 'pointer' }}>
+                              <button onClick={() => runFullReview(activeDeal)} disabled={fullReviewLoadingId === activeDeal.id || aiReviewLoadingId === activeDeal.id || aiAnalysisLoadingId === activeDeal.id} style={{ padding: '8px 16px', backgroundColor: fullReviewLoadingId === activeDeal.id ? '#c4b5fd' : '#4c1d95', color: '#fff', border: 'none', borderRadius: '7px', fontSize: '12px', fontWeight: '600', cursor: fullReviewLoadingId === activeDeal.id ? 'wait' : 'pointer' }}>
+                                {fullReviewLoadingId === activeDeal.id ? (aiAnalysisLoadingId === activeDeal.id ? '⏳ 1/2 Market comparison…' : '⏳ 2/2 AI review…') : '⚡ Full review'}
+                              </button>
+                              <button onClick={() => runAiDealReview(activeDeal)} disabled={aiReviewLoadingId === activeDeal.id || fullReviewLoadingId === activeDeal.id} style={{ padding: '8px 16px', backgroundColor: aiReviewLoadingId === activeDeal.id ? '#c4b5fd' : '#7C3AED', color: '#fff', border: 'none', borderRadius: '7px', fontSize: '12px', fontWeight: '600', cursor: aiReviewLoadingId === activeDeal.id ? 'wait' : 'pointer' }}>
                                 {aiReviewLoadingId === activeDeal.id ? '⏳ Reviewing… (can take a minute)' : an.aiSummary ? '🤖 Re-run AI review' : '🤖 AI deal review'}
                               </button>
-                              <button onClick={() => runDealAnalysis(activeDeal)} disabled={aiAnalysisLoadingId === activeDeal.id} style={{ padding: '8px 16px', backgroundColor: aiAnalysisLoadingId === activeDeal.id ? '#93c5fd' : '#2563eb', color: '#fff', border: 'none', borderRadius: '7px', fontSize: '12px', fontWeight: '600', cursor: aiAnalysisLoadingId === activeDeal.id ? 'wait' : 'pointer' }}>
+                              <button onClick={() => runDealAnalysis(activeDeal)} disabled={aiAnalysisLoadingId === activeDeal.id || fullReviewLoadingId === activeDeal.id} style={{ padding: '8px 16px', backgroundColor: aiAnalysisLoadingId === activeDeal.id ? '#93c5fd' : '#2563eb', color: '#fff', border: 'none', borderRadius: '7px', fontSize: '12px', fontWeight: '600', cursor: aiAnalysisLoadingId === activeDeal.id ? 'wait' : 'pointer' }}>
                                 {aiAnalysisLoadingId === activeDeal.id ? '⏳ Analysing… (can take a minute)' : an.dealAnalysisSummary ? '🌐 Re-run market comparison' : '🌐 Market comparison'}
                               </button>
                             </div>
