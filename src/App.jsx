@@ -2896,6 +2896,22 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
   const [calendarToast, setCalendarToast] = useState(null);
   const [calendarAdding, setCalendarAdding] = useState(null);
 
+  // Dashboard — Market Intelligence signals widget (fetched once, on first dashboard visit)
+  const [miSignals, setMiSignals] = useState(null);
+  useEffect(() => {
+    if (activeTab !== 'dashboard' || miSignals !== null) return;
+    const token = localStorage.getItem('crm_session');
+    Promise.all([
+      fetch('/api/market/overview', { headers: { 'Authorization': `Bearer ${token}` } }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/market/areas?type=outcode&limit=5&sort=score', { headers: { 'Authorization': `Bearer ${token}` } }).then(r => r.ok ? r.json() : null).catch(() => null),
+    ]).then(([overview, areas]) => {
+      setMiSignals({
+        overview: overview?.success ? overview : null,
+        topAreas: areas?.success ? (areas.areas || []) : [],
+      });
+    }).catch(() => setMiSignals({ overview: null, topAreas: [] }));
+  }, [activeTab]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // KV persistence — declared here so all state vars above are in scope
   const [saveStatus, setSaveStatus] = useState('idle');
   const [dataLoaded, setDataLoaded] = useState(false);
@@ -6625,6 +6641,13 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                 const wlDrops = watchlist.filter(w => w.guidePrev && w.guidePrice && w.guidePrev > w.guidePrice).map(w => ({ ...w, _kind: 'drop' }));
                 const wlNew = watchlist.filter(w => { if (!w.addedDate) return false; const days = (today - new Date(w.addedDate)) / 86400000; return days >= 0 && days <= 14 && !(w.guidePrev && w.guidePrev > w.guidePrice); }).map(w => ({ ...w, _kind: 'new' }));
                 const wlAlerts = [...wlDrops, ...wlNew].slice(0, 6);
+                // Auction Triage activity widget — same formulas as the Auction Triage tab KPIs
+                const dashKpiInbox = auctionLots.filter(l => l.status === 'unreviewed' || l.isNew).length;
+                const dashKpiShortlisted = auctionLots.filter(l => l.status === 'shortlisted').length;
+                const dashKpiWatching = auctionLots.filter(l => l.status === 'watching').length;
+                const dashKpiAnalysis = auctionLots.filter(l => l.status === 'deal_analysis' || l.status === 'promoted').length;
+                const dashNewSinceVisit = auctionLots.filter(l => l.isNew || (l.firstSeenAt && triageVisitBaseline && l.firstSeenAt > triageVisitBaseline)).length;
+                const dashLastScan = auctionDates.reduce((latest, d) => (d.lastScannedAt && (!latest || d.lastScannedAt > latest)) ? d.lastScannedAt : latest, null);
                 const tile = { background: '#fff', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '14px 16px' };
                 const kpiNum = { fontSize: '26px', fontWeight: '700', color: '#0f172a', marginTop: '4px' };
                 const kpiLabel = { fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '.04em' };
@@ -6726,6 +6749,55 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         </div>
                       );
                     })()}
+
+                    {/* Auction Triage activity + Market Intelligence signals */}
+                    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '16px', alignItems: 'flex-start' }}>
+                      <div style={panel}>
+                        <div style={panelHead}><span>🔎 Auction Triage Activity</span><span onClick={() => setActiveTab('scraper')} style={dashLink}>View triage →</span></div>
+                        {auctionLots.length === 0 ? (
+                          <div style={dashEmpty}>No triage lots scanned yet.</div>
+                        ) : (
+                          <>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px', marginBottom: '10px' }}>
+                              {[
+                                { label: 'Inbox', n: dashKpiInbox, onClick: () => { setAuctionLotFilter(f => ({ ...f, status: 'unreviewed' })); setActiveTab('scraper'); } },
+                                { label: 'Shortlisted', n: dashKpiShortlisted, onClick: () => { setAuctionLotFilter(f => ({ ...f, status: 'shortlisted' })); setActiveTab('scraper'); } },
+                                { label: 'Watching', n: dashKpiWatching, onClick: () => { setAuctionLotFilter(f => ({ ...f, status: 'watching' })); setActiveTab('scraper'); } },
+                                { label: 'New', n: dashNewSinceVisit, onClick: () => { setAuctionLotFilter(f => ({ ...f, newOnly: true })); setActiveTab('scraper'); } },
+                              ].map(s => (
+                                <div key={s.label} onClick={s.onClick} style={{ cursor: 'pointer', textAlign: 'center', padding: '8px 4px', borderRadius: '8px', background: '#f8fafc' }}>
+                                  <div style={{ fontSize: '18px', fontWeight: '700', color: s.label === 'New' && s.n > 0 ? '#dc2626' : '#0f172a' }}>{s.n}</div>
+                                  <div style={{ fontSize: '10px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '.03em' }}>{s.label}</div>
+                                </div>
+                              ))}
+                            </div>
+                            <div style={{ fontSize: '11px', color: '#94a3b8' }}>{dashLastScan ? `Last scan ${fmtAgo(dashLastScan)}` : 'No scans recorded yet.'}{dashKpiAnalysis > 0 ? ` · ${dashKpiAnalysis} in analysis/promoted` : ''}</div>
+                          </>
+                        )}
+                      </div>
+                      <div style={panel}>
+                        <div style={panelHead}><span>📡 Market Intelligence Signals</span><span onClick={() => setActiveTab('marketintel')} style={dashLink}>View Market Intel →</span></div>
+                        {!miSignals || (!miSignals.overview && miSignals.topAreas.length === 0) ? (
+                          <div style={dashEmpty}>{miSignals ? 'No market intelligence data yet — run a national scan from Market Intel.' : 'Loading…'}</div>
+                        ) : (
+                          <>
+                            <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '10px' }}>{miSignals.overview?.lastAggregatedAt ? `Last national refresh ${fmtAgo(miSignals.overview.lastAggregatedAt)}` : 'No national refresh recorded yet.'}{miSignals.overview?.areasScored ? ` · ${miSignals.overview.areasScored} areas scored` : ''}</div>
+                            {miSignals.topAreas.length === 0 ? (
+                              <div style={dashEmpty}>No ranked areas yet.</div>
+                            ) : (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                {miSignals.topAreas.map((a, i) => (
+                                  <div key={a.area_id} onClick={() => setActiveTab('marketintel')} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', fontSize: '12px', color: '#334155' }}>
+                                    <span><b style={{ fontWeight: '600', color: '#0f172a' }}>#{i + 1}</b> {a.area_id}</span>
+                                    <span style={{ fontSize: '11px', fontWeight: '600', color: '#7C3AED', background: '#faf5ff', borderRadius: '6px', padding: '2px 8px' }}>{a.score != null ? Math.round(a.score) : '—'}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    </div>
 
                     {/* 3-column grid */}
                     <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: '16px', alignItems: 'flex-start' }}>
