@@ -1011,11 +1011,11 @@ export default function App({ user = {}, onLogout }) {
     // All fields the report parser can produce — must be kept in sync with parseFullReportAnalytics
     const reportFields = [
       'maxBid', 'netProfit', 'margin', 'profitMargin', 'roi',
-      'gdvBase', 'gdvConservative', 'gdvOptimistic', 'conservativeGDV', 'maxGDV',
+      'gdvBase', 'gdvConservative', 'gdvExpected', 'gdvOptimistic', 'conservativeGDV', 'maxGDV',
       'totalInvestment', 'worksTotal', 'epcRating', 'floorArea', 'verdict', 'bidStrength',
       'walkAway', 'targetBid', 'stretchBid', 'breakEvenBid',
       // GDV scenario matrices (required for the bid matrix display)
-      'matrixConservative', 'matrixBase', 'matrixOptimistic', 'matrixHeaders',
+      'matrixConservative', 'matrixBase', 'matrixExpected', 'matrixOptimistic', 'matrixHeaders',
       // Cost stack breakdown
       'buyersPremium', 'sdlt', 'acquisitionFeesTotal', 'holdingTotal', 'exitTotal',
       // Refurb scenarios
@@ -1412,10 +1412,10 @@ export default function App({ user = {}, onLogout }) {
     //   <table class="scenario"><thead>...</thead><tbody>...</tbody></table>  ← matrix
     // We scan for every label-sm that names a GDV scenario, then find the next
     // table.scenario immediately after it.
-    const scenarioLabelRe = /class="label-sm"[^>]*>([^<]*(Conservative|Base|Optimistic)\s+GDV[^<]*)<\/div>\s*<div[^>]*>(£[\d,]+)/gi;
+    const scenarioLabelRe = /class="label-sm"[^>]*>([^<]*(Conservative|Base|Expected|Optimistic)\s+GDV[^<]*)<\/div>\s*<div[^>]*>(£[\d,]+)/gi;
     let slm;
     while ((slm = scenarioLabelRe.exec(htmlText)) !== null) {
-      const type  = slm[2];                                    // "Conservative" | "Base" | "Optimistic"
+      const type  = slm[2];                                    // "Conservative" | "Base" | "Expected" | "Optimistic"
       const gdvVal = parseInt(slm[3].replace(/[£,]/g, ''));
 
       // Find the <table class="scenario"> that follows this label
@@ -1464,6 +1464,12 @@ export default function App({ user = {}, onLogout }) {
       } else if (/base/i.test(type)) {
         if (!a.gdvBase) a.gdvBase = gdvVal;
         if (!a.matrixBase) a.matrixBase = matrix;
+      } else if (/expect/i.test(type)) {
+        // The property-analyser emits a 4th "Expected" scenario (between Base and
+        // Optimistic). Captured as its own keys so it never overwrites Base or
+        // Optimistic; display code that only knows the 3 originals is unaffected.
+        if (!a.gdvExpected) a.gdvExpected = gdvVal;
+        if (!a.matrixExpected) a.matrixExpected = matrix;
       } else if (/optim/i.test(type)) {
         if (!a.gdvOptimistic) a.gdvOptimistic = gdvVal;
         if (!a.matrixOptimistic) a.matrixOptimistic = matrix;
@@ -1473,10 +1479,12 @@ export default function App({ user = {}, onLogout }) {
     // GDV fallback patterns for reports where label-sm regex didn't match
     if (!a.gdvConservative) a.gdvConservative = n(/Conservative\s+GDV[^£\d<]{0,40}(£[\d,]+)/i) || n(/Lender\s+Floor[^£\d<]{0,40}(£[\d,]+)/i);
     if (!a.gdvBase)         a.gdvBase         = n(/Base\s+(?:Case\s+)?GDV[^£\d<]{0,40}(£[\d,]+)/i);
+    if (!a.gdvExpected)     a.gdvExpected     = n(/Expected\s+GDV[^£\d<]{0,40}(£[\d,]+)/i);
     if (!a.gdvOptimistic)   a.gdvOptimistic   = n(/Optimistic\s+GDV[^£\d<]{0,40}(£[\d,]+)/i) || n(/Best\s+Case\s+GDV[^£\d<]{0,40}(£[\d,]+)/i);
     // Reversed-order labels: "GDV — Conservative", "GDV — Base", "GDV — Optimistic" (value in a following tag)
     if (!a.gdvConservative) a.gdvConservative = n(/GDV\s*[—–-]\s*Conservative[\s\S]{0,80}?(£[\d,]+)/i);
     if (!a.gdvBase)         a.gdvBase         = n(/GDV\s*[—–-]\s*Base[\s\S]{0,80}?(£[\d,]+)/i);
+    if (!a.gdvExpected)     a.gdvExpected     = n(/GDV\s*[—–-]\s*Expected[\s\S]{0,80}?(£[\d,]+)/i);
     if (!a.gdvOptimistic)   a.gdvOptimistic   = n(/GDV\s*[—–-]\s*Optimistic[\s\S]{0,80}?(£[\d,]+)/i);
 
     // Aliases so display code works regardless of which key it reads
