@@ -3457,7 +3457,7 @@ function inferDocKind(fileKey, filename) {
   const fn = (filename || '').toLowerCase();
   if (fk.startsWith('legal') || fn.includes('legal pack') || fn.includes('legalpack')) return 'legalpack';
   if (fk === 'rightmoveplus' || fn.includes('rightmove')) return 'rmplus';
-  if (fn.includes('sprift')) return 'sprift';
+  if (fk === 'sprift' || fk.includes('sprift') || fn.includes('sprift')) return 'sprift';
   if (fk.includes('survey') || fn.includes('survey')) return 'survey';
   return 'other';
 }
