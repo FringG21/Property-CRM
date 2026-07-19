@@ -9,7 +9,7 @@ import {
   ChevronUp, ChevronLeft, ChevronRight, Undo2, Bookmark, User, Gavel, Settings, Users, Link2, Plus, Trash2,
   Briefcase, Contact, Search, Globe, Mail, Phone, ClipboardList, TrendingUp, LogOut, Filter, Map, BarChart2, Pencil,
   Bell, Download, MessageSquare, ListChecks, Activity, AlertTriangle, MoreHorizontal, Layers, RefreshCw,
-  Bold, Italic, Underline, List, ListOrdered, Sparkles
+  Bold, Italic, Underline, List, ListOrdered, Sparkles, Sun, Moon
 } from 'lucide-react';
 import MarketIntel from './views/MarketIntel.jsx';
 import BrrAnalysis from './views/BrrAnalysis.jsx';
@@ -2552,6 +2552,35 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
       setBriefingLoading(false);
     }
   };
+  // Auto-generate the briefing once per day (cache key above is date-scoped) instead of
+  // waiting for a manual click — it's presented collapsed on the dashboard, so it needs
+  // to already have content the first time the strip is expanded. Snapshot fields here
+  // intentionally mirror the ones in the dashboard's briefingSnapshot below; kept
+  // separate (not shared state) because this runs before the dashboard tab's own
+  // render-scoped variables exist.
+  const [briefingExpanded, setBriefingExpanded] = useState(false);
+  useEffect(() => {
+    if (!dataLoaded || dailyBriefing || briefingLoading) return;
+    const todayStr = new Date().toISOString().split('T')[0];
+    const overdue = tasks.filter(t => t.status !== 'done' && t.dueDate && t.dueDate < todayStr);
+    const strong = properties.filter(p => p.isStrongBid);
+    const upcoming = properties.filter(p => { if (!p.auctionDate) return false; const d = Math.ceil((new Date(p.auctionDate) - new Date()) / 86400000); return d >= 0 && d <= 14; });
+    const staleIntel = properties.filter(p => p.intelligence?.lastRun && (Date.now() - new Date(p.intelligence.lastRun)) > 30 * 86400000);
+    const wDrops = watchlist.filter(w => w.guidePrev && w.guidePrice && w.guidePrev > w.guidePrice);
+    runDailyBriefing({
+      pipelineCounts: { active: properties.filter(p => LIVE_DEAL_STAGES.includes(normaliseStatus(p.status))).length, strongBids: strong.length, overdue: overdue.length, dueToday: tasks.filter(t => t.status !== 'done' && t.dueDate === todayStr).length },
+      overdueTasks: overdue.slice(0, 10).map(t => ({ title: t.title, due: t.dueDate })),
+      upcomingAuctions: upcoming.slice(0, 10).map(p => ({ name: p.dealName || p.address?.split(',')[0], date: p.auctionDate, guide: p.guidePrice })),
+      strongBids: strong.slice(0, 10).map(p => ({ name: p.dealName || p.address?.split(',')[0], auctionDate: p.auctionDate, maxBid: p.maxBid })),
+      staleIntel: staleIntel.slice(0, 10).map(p => ({ name: p.dealName || p.address?.split(',')[0], lastRun: p.intelligence.lastRun })),
+      watchlistAlerts: wDrops.slice(0, 6).map(w => ({ address: w.address, kind: 'drop', guide: w.guidePrice })),
+    });
+  }, [dataLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Dashboard visual theme — dark "Holographic HUD" (default) or a light equivalent.
+  // Scoped to the dashboard tab only (not an app-wide theme); remembered across visits.
+  const [dashboardTheme, setDashboardTheme] = useState(() => localStorage.getItem('crm_dashboard_theme') || 'dark');
+  const toggleDashboardTheme = () => setDashboardTheme(t => { const next = t === 'dark' ? 'light' : 'dark'; try { localStorage.setItem('crm_dashboard_theme', next); } catch { /* ignore */ } return next; });
 
   // ── AI deal analysis — live market comparison via web search ──
   const [aiAnalysisLoadingId, setAiAnalysisLoadingId] = useState(null);
@@ -2701,6 +2730,42 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
     'Withdrawn':          'Lost',
   };
   const normaliseStatus = (s) => LEGACY_STATUS_MAP[s] || s || 'Sourced';
+
+  // Live/open pipeline stages — used wherever "active pipeline" should exclude
+  // settled deals (Won/Lost/Not Proceeding/Completed). Kept distinct from the
+  // narrower OPEN_STATUSES used for company-linked-property filtering.
+  const LIVE_DEAL_STAGES = ['Sourced', 'Under Review', 'Bidding', 'Refurb', 'For Sale'];
+
+  // Deal readiness — the same 9-point checklist shown on a property's Overview
+  // tab, generalised so it can be run across every live property (e.g. for the
+  // dashboard's "Properties needing review" KPI) and not just currentViewProperty.
+  // Returns checks WITHOUT a `tab` field — the property canvas attaches its own
+  // tab-navigation via CHECK_TABS below so this helper stays UI-agnostic.
+  const getDealReadiness = (property) => {
+    const an = property.analytics || {};
+    const propFiles = property.files || {};
+    const surveyJobs = property.surveyJobs || [];
+    const intel = property.intelligence || {};
+    const gp = property.guidePrice || 0;
+    const ourMaxBid = parseFloat(property.ourMaxBid) || 0;
+    const lrCount = (intel.connectors?.landRegistry?.data?.items || []).length;
+    const compCount = (an.compsList || []).length + lrCount + (property.comparables || []).filter(c => !c.fromIntelligence).length;
+    const checks = [
+      { id: 'report', label: 'Assessment report', done: !!propFiles.mainReport },
+      { id: 'parsed', label: 'Report parsed', done: an.maxBid != null || !!an.reportSummary },
+      { id: 'aiReview', label: 'AI review run', done: an.aiDealScore != null },
+      { id: 'legalPack', label: 'Legal pack', done: !!propFiles.legalPack || (property.legalPackFiles || []).length > 0 },
+      { id: 'survey', label: 'Survey', done: !!propFiles.surveyReport || surveyJobs.length > 0 },
+      { id: 'intelRun', label: 'Intelligence run', done: !!intel.lastRun },
+      { id: 'comparables', label: '3+ comparables', done: compCount >= 3 },
+      { id: 'guidePrice', label: 'Guide price', done: gp > 0 },
+      { id: 'maxBid', label: 'Our max bid', done: ourMaxBid > 0 },
+    ];
+    const doneCount = checks.filter(c => c.done).length;
+    return { checks, doneCount, ready: doneCount === checks.length };
+  };
+  const CHECK_TABS = { report: 'documents', parsed: 'documents', aiReview: 'overview', legalPack: 'documents', survey: 'documents', intelRun: 'intel', comparables: 'comparables', guidePrice: 'overview', maxBid: 'financials' };
+
   const reconstructLotUrl = (p) => {
     if (!p || p.sourceOrigin === 'manual') return '';
     const m = String(p.sourceLotId || '').match(/(\d+)$/);
@@ -3062,15 +3127,23 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
   useEffect(() => {
     if (activeTab !== 'dashboard' || miSignals !== null) return;
     const token = localStorage.getItem('crm_session');
+    // Dashboard signal is scoped to South Yorkshire (our actual buying area) rather
+    // than the national leaderboard: fetch a deep-enough national slice (max allowed
+    // by the API) sorted by score, then filter client-side to S* and DN* outcodes.
+    // Regex (not the API's `prefix` LIKE-match) is required because a plain "S" prefix
+    // would also match SW/SE/SM/SN/SK/SL/SG/SS/ST/SA/SY etc — this matches S<digit> only.
     Promise.all([
       fetch('/api/market/overview', { headers: { 'Authorization': `Bearer ${token}` } }).then(r => r.ok ? r.json() : null).catch(() => null),
-      fetch('/api/market/areas?type=outcode&limit=5&sort=score', { headers: { 'Authorization': `Bearer ${token}` } }).then(r => r.ok ? r.json() : null).catch(() => null),
+      fetch('/api/market/areas?type=outcode&limit=500&sort=score', { headers: { 'Authorization': `Bearer ${token}` } }).then(r => r.ok ? r.json() : null).catch(() => null),
     ]).then(([overview, areas]) => {
+      const isSouthYorks = (id) => /^S\d/.test(id || '') || /^DN\d/.test(id || '');
+      const syAreas = (areas?.success ? (areas.areas || []) : []).filter(a => isSouthYorks(a.area_id));
       setMiSignals({
         overview: overview?.success ? overview : null,
-        topAreas: areas?.success ? (areas.areas || []) : [],
+        topAreas: syAreas.slice(0, 5),
+        localAreasScored: syAreas.length,
       });
-    }).catch(() => setMiSignals({ overview: null, topAreas: [] }));
+    }).catch(() => setMiSignals({ overview: null, topAreas: [], localAreasScored: 0 }));
   }, [activeTab]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cross-link: outcode → Market Intel area row, fetched once on first visit to Triage or Market Intel
@@ -3461,9 +3534,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
   properties.forEach(p => p.notesList.forEach(n => { if (n.bookmarked) dashboardBookmarkedTasks.push({ ...n, propertyId: p.id, propName: p.address.split(',')[0], fullPropertyRef: p, originType: 'Property' }); }));
   globalNotes.forEach(n => { if (n.bookmarked) dashboardBookmarkedTasks.push({ ...n, id: `global-${n.id}`, done: n.done, text: n.text, date: n.date, author: n.author, originType: n.targetType.toUpperCase(), propName: n.targetType === 'company' ? companies.find(c => c.id === n.targetId)?.name : contacts.find(c => c.id === n.targetId)?.name }); });
 
-  const totalDeals = properties.length;
   const considerationCount = properties.filter(p => p.isConsideration).length;
-  const strongBidCount = properties.filter(p => p.isStrongBid).length;
   const unreviewedScrapedCount = scrapedAuctions.filter(s => !s.reviewed).length;
 
   const filteredCompanies = (() => {
@@ -4875,21 +4946,10 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                   {/* Deal readiness checklist — Overview tab, live deals only.
                       Purely derived from existing data; nothing stored. */}
                   {propCanvasTab === 'overview' && !['Won', 'Lost', 'Refurb', 'For Sale', 'Completed', 'Not Proceeding'].includes(st) && (() => {
-                    const lrCount = (intel.connectors?.landRegistry?.data?.items || []).length;
-                    const compCount = (an.compsList || []).length + lrCount + (currentViewProperty.comparables || []).filter(c => !c.fromIntelligence).length;
-                    const checks = [
-                      { label: 'Assessment report', done: !!propFiles.mainReport, tab: 'documents' },
-                      { label: 'Report parsed', done: an.maxBid != null || !!an.reportSummary, tab: 'documents' },
-                      { label: 'AI review run', done: an.aiDealScore != null, tab: 'overview' },
-                      { label: 'Legal pack', done: !!propFiles.legalPack || (currentViewProperty.legalPackFiles || []).length > 0, tab: 'documents' },
-                      { label: 'Survey', done: !!propFiles.surveyReport || surveyJobs.length > 0, tab: 'documents' },
-                      { label: 'Intelligence run', done: !!intel.lastRun, tab: 'intel' },
-                      { label: '3+ comparables', done: compCount >= 3, tab: 'comparables' },
-                      { label: 'Guide price', done: gp > 0, tab: 'overview' },
-                      { label: 'Our max bid', done: ourMaxBid > 0, tab: 'financials' },
-                    ];
-                    const doneCount = checks.filter(c => c.done).length;
-                    const ready = doneCount === checks.length;
+                    const readiness = getDealReadiness(currentViewProperty);
+                    const checks = readiness.checks.map(c => ({ ...c, tab: CHECK_TABS[c.id] }));
+                    const doneCount = readiness.doneCount;
+                    const ready = readiness.ready;
                     return (
                       <div style={{ margin: '14px 20px 0', borderRadius: '10px', border: `1px solid ${ready ? '#bbf7d0' : '#e2e8f0'}`, background: ready ? '#f0fdf4' : '#fff', padding: '12px 14px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px', flexWrap: 'wrap' }}>
@@ -6972,348 +7032,302 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                 const hour = today.getHours();
                 const greeting = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
                 const firstName = (user.name || 'there').split(' ')[0];
+                const dark = dashboardTheme !== 'light';
+
+                // ---- Holographic HUD theme tokens (dark, default) / light equivalent ----
+                const T = {
+                  text: dark ? '#e8f1ff' : '#0f172a',
+                  textDim: dark ? '#7d8fb0' : '#64748b',
+                  panelBg: dark ? 'rgba(23,41,71,0.45)' : 'rgba(255,255,255,0.8)',
+                  panelBorder: dark ? 'rgba(96,165,250,0.28)' : 'rgba(59,130,246,0.2)',
+                  panelShadow: dark ? '0 0 0 1px rgba(96,165,250,0.06), 0 12px 28px rgba(0,0,0,0.35)' : '0 1px 2px rgba(15,23,42,0.04), 0 8px 20px rgba(59,130,246,0.07)',
+                  chip: dark ? 'rgba(255,255,255,0.08)' : '#f1f5f9',
+                  accent: '#3b82f6',
+                  accent2: '#8b5cf6',
+                  cyan: dark ? '#67e8f9' : '#0891b2',
+                  danger: dark ? '#fb7185' : '#dc2626',
+                  warn: dark ? '#fbbf24' : '#d97706',
+                  good: dark ? '#34d399' : '#059669',
+                  ringTrack: dark ? 'rgba(255,255,255,0.09)' : 'rgba(15,23,42,0.08)',
+                  divider: dark ? 'rgba(148,163,184,0.18)' : 'rgba(148,163,184,0.3)',
+                  rowHover: dark ? 'rgba(255,255,255,0.03)' : 'rgba(15,23,42,0.02)',
+                };
+                const pageWrapStyle = {
+                  display: 'flex', flexDirection: 'column', gap: '18px', margin: '-32px', padding: isMobile ? '16px' : '32px',
+                  background: dark ? 'radial-gradient(circle at 20% 0%, #111f3d 0%, #060b16 60%)' : 'radial-gradient(circle at 20% 0%, #eef3fc 0%, #f7f9fd 60%)',
+                  minHeight: '100%',
+                };
+                const glass = { background: T.panelBg, backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: `1px solid ${T.panelBorder}`, borderRadius: '16px', boxShadow: T.panelShadow };
+                const panelHead = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', fontSize: '12.5px', fontWeight: '700', color: T.text };
+                const dashLink = { fontSize: '11px', color: T.accent2, cursor: 'pointer', fontWeight: '600' };
+                const dashEmpty = { fontSize: '12px', color: T.textDim, padding: '8px 0' };
+
                 const strongBids = properties.filter(p => p.isStrongBid);
-                const settledStages = ['Won', 'Lost', 'Refurb', 'For Sale', 'Completed'];
-                const capitalAtRisk = properties.filter(p => !settledStages.includes(normaliseStatus(p.status))).reduce((s, p) => s + (p.maxBid || 0), 0);
-                const marginsArr = properties.map(p => p.analytics?.margin ?? p.analytics?.profitMargin).filter(m => m != null && !isNaN(m));
-                const avgMargin = marginsArr.length ? (marginsArr.reduce((a, b) => a + parseFloat(b), 0) / marginsArr.length) : null;
-                let lastMonthMargin = null;
-                try { const h = JSON.parse(localStorage.getItem('crm_margin_history') || '{}'); const d = new Date(); d.setMonth(d.getMonth() - 1); lastMonthMargin = h[d.toISOString().slice(0, 7)] ?? null; } catch { /* ignore */ }
                 const weekAgoMs = Date.now() - 7 * 86400000;
                 const newThisWeek = properties.filter(p => typeof p.id === 'number' && p.id > weekAgoMs).length;
                 const overdueTasks = tasks.filter(t => t.status !== 'done' && t.dueDate && t.dueDate < todayStr);
                 const todayTasks = tasks.filter(t => t.status !== 'done' && t.dueDate === todayStr);
-                const strongSoon = strongBids.filter(p => { if (!p.auctionDate) return false; const d = Math.ceil((new Date(p.auctionDate) - today) / 86400000); return d >= 0 && d <= 7; }).length;
+                const upcomingTasks = tasks.filter(t => t.status !== 'done' && t.dueDate && t.dueDate > todayStr).sort((a, b) => a.dueDate.localeCompare(b.dueDate));
                 const auctionsThisWeek = properties.filter(p => { if (!p.auctionDate) return false; const d = Math.ceil((new Date(p.auctionDate) - today) / 86400000); return d >= 0 && d <= 14; }).sort((a, b) => new Date(a.auctionDate) - new Date(b.auctionDate));
-                const openTasks = tasks.filter(t => t.status !== 'done' && t.dueDate).sort((a, b) => a.dueDate.localeCompare(b.dueDate)).slice(0, 6);
-                const relDate = (ds) => { const d = new Date(ds); const diff = Math.round((new Date(ds) - new Date(todayStr)) / 86400000); if (diff < 0) return { txt: `${Math.abs(diff)} day${Math.abs(diff) !== 1 ? 's' : ''} ago`, color: '#dc2626', dot: '#dc2626' }; if (diff === 0) return { txt: 'Today', color: '#92400e', dot: '#d97706' }; if (diff === 1) return { txt: 'Tomorrow', color: '#64748b', dot: '#d97706' }; return { txt: d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }), color: '#64748b', dot: '#059669' }; };
+                const relDate = (ds) => { const d = new Date(ds); const diff = Math.round((new Date(ds) - new Date(todayStr)) / 86400000); if (diff < 0) return { txt: `${Math.abs(diff)} day${Math.abs(diff) !== 1 ? 's' : ''} ago` }; if (diff === 0) return { txt: 'Today' }; if (diff === 1) return { txt: 'Tomorrow' }; return { txt: d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) }; };
                 const propName = (pid) => { const p = properties.find(x => x.id === pid); return p ? (p.dealName || p.address?.split(',')[0] || '') : ''; };
-                const recentActivity = properties
-                  .flatMap(p => (p.activityLog || []).map(a => ({ ...a, propName: p.dealName || p.address?.split(',')[0] || 'Property', propId: p.id })))
-                  .filter(a => a.at)
-                  .sort((a, b) => new Date(b.at) - new Date(a.at))
-                  .slice(0, 5);
                 const fmtAgo = iso => { const d = new Date(iso); const h = Math.floor((Date.now() - d) / 3600000); return isNaN(d) ? '' : h < 1 ? 'just now' : h < 24 ? `${h}h ago` : `${Math.floor(h / 24)}d ago`; };
-                const wlDrops = watchlist.filter(w => w.guidePrev && w.guidePrice && w.guidePrev > w.guidePrice).map(w => ({ ...w, _kind: 'drop' }));
-                const wlNew = watchlist.filter(w => { if (!w.addedDate) return false; const days = (today - new Date(w.addedDate)) / 86400000; return days >= 0 && days <= 14 && !(w.guidePrev && w.guidePrev > w.guidePrice); }).map(w => ({ ...w, _kind: 'new' }));
-                const wlAlerts = [...wlDrops, ...wlNew].slice(0, 6);
-                // Auction Triage activity widget — same formulas as the Auction Triage tab KPIs
-                const dashKpiInbox = auctionLots.filter(l => l.status === 'unreviewed' || l.isNew).length;
+
+                const livePipeline = properties.filter(p => LIVE_DEAL_STAGES.includes(normaliseStatus(p.status)));
+                const needingReview = livePipeline.filter(p => !getDealReadiness(p).ready);
+                const noBidAuctions = auctionsThisWeek.filter(p => !p.maxBid);
+                const staleIntelProps = properties.filter(p => p.intelligence?.lastRun && (Date.now() - new Date(p.intelligence.lastRun)) > 30 * 86400000);
+
+                // Auction Triage activity — same formulas as the Auction Triage tab KPIs
                 const dashKpiShortlisted = auctionLots.filter(l => l.status === 'shortlisted').length;
                 const dashKpiWatching = auctionLots.filter(l => l.status === 'watching').length;
                 const dashKpiAnalysis = auctionLots.filter(l => l.status === 'deal_analysis' || l.status === 'promoted').length;
                 const dashNewSinceVisit = auctionLots.filter(l => l.isNew || (l.firstSeenAt && triageVisitBaseline && l.firstSeenAt > triageVisitBaseline)).length;
                 const dashLastScan = auctionDates.reduce((latest, d) => (d.lastScannedAt && (!latest || d.lastScannedAt > latest)) ? d.lastScannedAt : latest, null);
-                const tile = { background: '#fff', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '14px 16px' };
-                const kpiNum = { fontSize: '26px', fontWeight: '700', color: '#0f172a', marginTop: '4px' };
-                const kpiLabel = { fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '.04em' };
-                const panel = { background: '#fff', border: '1px solid #e2e8f0', borderRadius: '12px', padding: '16px' };
-                const panelHead = { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px', fontSize: '12px', fontWeight: '600', color: '#0f172a' };
-                const dashLink = { fontSize: '11px', color: '#7C3AED', cursor: 'pointer' };
-                const dashEmpty = { fontSize: '12px', color: '#94a3b8', padding: '8px 0' };
-                const openAddProp = () => { const ah = companies.filter(c => c.type === 'Auction House'); setNewPropPlatform(ah[0]?.name || ''); setNewPropAddress(''); setNewPropGuide(''); setNewPropDate(''); setNewPropType('Residential'); setShowAddPropertyModal(true); };
-                return (
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
 
-                    {/* Greeting header */}
+                // Merged "Needs attention" — overdue tasks, due-today, no-max-bid auctions,
+                // stale intelligence, then upcoming open tasks. One list, urgency-ordered,
+                // replacing the old separate Needs Attention + Actions Required panels.
+                const attentionItems = [
+                  ...overdueTasks.map(t => ({ key: `task-${t.id}`, text: `${t.title}${t.linkedId ? ` — ${propName(t.linkedId)}` : ''}`, reason: `Overdue · due ${t.dueDate}`, sev: 'danger', onClick: () => setActiveTab('tasks') })),
+                  ...todayTasks.map(t => ({ key: `today-${t.id}`, text: `${t.title}${t.linkedId ? ` — ${propName(t.linkedId)}` : ''}`, reason: 'Due today', sev: 'warn', onClick: () => setActiveTab('tasks') })),
+                  ...noBidAuctions.map(p => ({ key: `nobid-${p.id}`, text: p.dealName || p.address?.split(',')[0], reason: `No max bid · auction ${new Date(p.auctionDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}`, sev: 'warn', onClick: () => { setActiveTab('pipeline'); setCurrentViewProperty(p); } })),
+                  ...staleIntelProps.map(p => ({ key: `stale-${p.id}`, text: p.dealName || p.address?.split(',')[0], reason: `Intelligence stale · ran ${fmtAgo(p.intelligence.lastRun)}`, sev: 'dim', onClick: () => { setActiveTab('pipeline'); setCurrentViewProperty(p); } })),
+                  ...upcomingTasks.map(t => ({ key: `up-${t.id}`, text: `${t.title}${t.linkedType === 'Property' && t.linkedId ? ` — ${propName(t.linkedId)}` : ''}`, reason: relDate(t.dueDate).txt, sev: 'accent', onClick: () => setActiveTab('tasks') })),
+                ];
+                const sevColor = { danger: T.danger, warn: T.warn, dim: T.textDim, accent: T.accent };
+
+                // Recent activity — stage changes + bids surface first (what actually moved),
+                // then fill remaining slots with other event types (documents, notes, etc).
+                const allActivity = properties
+                  .flatMap(p => (p.activityLog || []).map(a => ({ ...a, propName: p.dealName || p.address?.split(',')[0] || 'Property', propId: p.id })))
+                  .filter(a => a.at)
+                  .sort((a, b) => new Date(b.at) - new Date(a.at));
+                const priorityActivity = allActivity.filter(a => a.type === 'stage' || a.type === 'bid');
+                const otherActivity = allActivity.filter(a => a.type !== 'stage' && a.type !== 'bid');
+                const recentActivity = [...priorityActivity, ...otherActivity].slice(0, 5);
+
+                const wlDrops = watchlist.filter(w => w.guidePrev && w.guidePrice && w.guidePrev > w.guidePrice).map(w => ({ ...w, _kind: 'drop' }));
+                const wlNew = watchlist.filter(w => { if (!w.addedDate) return false; const days = (today - new Date(w.addedDate)) / 86400000; return days >= 0 && days <= 14 && !(w.guidePrev && w.guidePrev > w.guidePrice); }).map(w => ({ ...w, _kind: 'new' }));
+                const wlAlerts = [...wlDrops, ...wlNew].slice(0, 6);
+
+                const openAddProp = () => { const ah = companies.filter(c => c.type === 'Auction House'); setNewPropPlatform(ah[0]?.name || ''); setNewPropAddress(''); setNewPropGuide(''); setNewPropDate(''); setNewPropType('Residential'); setShowAddPropertyModal(true); };
+
+                const kpiDefs = [
+                  { key: 'pipeline', val: livePipeline.length, label: 'Active pipeline', sub: newThisWeek > 0 ? `↑ ${newThisWeek} this wk` : 'No new this wk', pct: Math.min(100, livePipeline.length * 5), color: T.accent, onClick: () => setActiveTab('pipeline') },
+                  { key: 'triage', val: dashNewSinceVisit, label: 'New in triage', sub: dashLastScan ? `Scan ${fmtAgo(dashLastScan)}` : 'No scans yet', pct: Math.min(100, dashNewSinceVisit * 12), color: T.cyan, onClick: () => setActiveTab('scraper') },
+                  { key: 'review', val: needingReview.length, label: 'Needing review', sub: `of ${livePipeline.length} live`, pct: livePipeline.length ? Math.round(needingReview.length / livePipeline.length * 100) : 0, color: T.warn, onClick: () => setActiveTab('pipeline') },
+                  { key: 'overdue', val: overdueTasks.length, label: 'Tasks overdue', sub: overdueTasks.length > 0 ? 'Alert' : (todayTasks.length > 0 ? `${todayTasks.length} today` : 'All clear'), pct: overdueTasks.length > 0 ? 100 : 0, color: overdueTasks.length > 0 ? T.danger : T.good, onClick: () => setActiveTab('tasks') },
+                  { key: 'shortlisted', val: dashKpiShortlisted, label: 'Shortlisted', sub: 'in triage', pct: Math.min(100, dashKpiShortlisted * 10), color: T.accent2, onClick: () => setActiveTab('scraper') },
+                ];
+
+                // Small radial-gauge KPI tile — stroke-dashoffset (not a rotate transform) so the
+                // arc always starts at 12 o'clock consistently across browsers/zoom levels.
+                const Ring = ({ pct, color, value, label, sub, size, onClick }) => {
+                  const r = (size - 14) / 2;
+                  const circumference = 2 * Math.PI * r;
+                  const dash = circumference * Math.min(100, Math.max(0, pct)) / 100;
+                  return (
+                    <div onClick={onClick} style={{ cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
+                      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+                        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={T.ringTrack} strokeWidth="9" />
+                        <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth="9" strokeDasharray={`${dash} ${circumference - dash}`} strokeDashoffset={circumference * 0.25} strokeLinecap="round" />
+                        <text x={size / 2} y={size / 2 + 7} textAnchor="middle" fontSize={size < 90 ? '17' : '21'} fontWeight="700" fill={T.text} fontFamily="inherit">{value}</text>
+                      </svg>
+                      <div style={{ textAlign: 'center' }}>
+                        <div style={{ fontSize: '9.5px', fontWeight: '700', letterSpacing: '.05em', textTransform: 'uppercase', color: T.textDim }}>{label}</div>
+                        <div style={{ fontSize: '10px', fontWeight: '600', color, marginTop: '2px' }}>{sub}</div>
+                      </div>
+                    </div>
+                  );
+                };
+
+                return (
+                  <div style={pageWrapStyle}>
+
+                    {/* Greeting header + theme toggle */}
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '12px' }}>
                       <div>
-                        <div style={{ fontSize: '22px', fontWeight: '700', color: '#0f172a' }}>{greeting}, {firstName}</div>
-                        <div style={{ fontSize: '12px', color: '#64748b', marginTop: '3px' }}>{today.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} · A&amp;A Investment Partners</div>
+                        <div style={{ fontSize: '22px', fontWeight: '700', color: T.text }}>{greeting}, {firstName}</div>
+                        <div style={{ fontSize: '12px', color: T.textDim, marginTop: '3px' }}>{today.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} · A&amp;A Investment Partners</div>
                       </div>
                       <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                        <button onClick={() => setShowCmdPalette(true)} title="Search (Ctrl+K)" style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '9px 12px', border: '1px solid #e2e8f0', borderRadius: '8px', background: '#fff', fontSize: '12px', color: '#64748b', cursor: 'pointer', fontFamily: 'inherit' }}>
-                          🔍 <span style={{ fontSize: '10px', background: '#f1f5f9', padding: '1px 6px', borderRadius: '4px', border: '1px solid #e2e8f0' }}>⌘K</span>
+                        <button onClick={toggleDashboardTheme} title={dark ? 'Switch to light mode' : 'Switch to dark mode'} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '38px', height: '38px', border: `1px solid ${T.panelBorder}`, borderRadius: '10px', background: T.panelBg, color: T.text, cursor: 'pointer' }}>
+                          {dark ? <Sun size={16} /> : <Moon size={16} />}
                         </button>
-                        <button onClick={openAddProp} style={{ background: '#7C3AED', color: '#fff', border: 'none', borderRadius: '8px', padding: '9px 16px', fontSize: '13px', fontWeight: '600', cursor: 'pointer', fontFamily: 'inherit' }}>+ Add property</button>
+                        <button onClick={() => setShowCmdPalette(true)} title="Search (Ctrl+K)" style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '9px 12px', border: `1px solid ${T.panelBorder}`, borderRadius: '10px', background: T.panelBg, fontSize: '12px', color: T.textDim, cursor: 'pointer', fontFamily: 'inherit' }}>
+                          <Search size={13} /> <span style={{ fontSize: '10px', background: T.chip, padding: '1px 6px', borderRadius: '4px' }}>⌘K</span>
+                        </button>
+                        <button onClick={openAddProp} style={{ background: `linear-gradient(135deg, ${T.accent}, ${T.accent2})`, color: '#fff', border: 'none', borderRadius: '10px', padding: '9px 16px', fontSize: '13px', fontWeight: '600', cursor: 'pointer', fontFamily: 'inherit' }}>+ Add property</button>
                       </div>
                     </div>
 
-                    {/* "Since your last visit" digest banner */}
-                    {(() => {
-                      if (digestDismissed || !digestBaseline) return null;
-                      const baselineMs = new Date(digestBaseline).getTime();
-                      const newLots = auctionLots.filter(l => l.firstSeenAt && l.firstSeenAt > digestBaseline);
-                      const guideDropLots = auctionLots.filter(l => l.guidePriceChanged);
-                      const newProps = properties.filter(p => typeof p.id === 'number' && p.id > baselineMs);
-                      const statusChanges = properties.flatMap(p => (p.activityLog || []).filter(a => a.type !== 'created' && a.at && a.at > digestBaseline));
-                      const digestTotal = newLots.length + guideDropLots.length + newProps.length + statusChanges.length;
-                      if (digestTotal === 0) return null;
-                      const digestParts = [
-                        newLots.length > 0 && `${newLots.length} new lot${newLots.length !== 1 ? 's' : ''}`,
-                        guideDropLots.length > 0 && `${guideDropLots.length} guide change${guideDropLots.length !== 1 ? 's' : ''}`,
-                        newProps.length > 0 && `${newProps.length} new propert${newProps.length !== 1 ? 'ies' : 'y'}`,
-                        statusChanges.length > 0 && `${statusChanges.length} status change${statusChanges.length !== 1 ? 's' : ''}`,
-                      ].filter(Boolean);
-                      return (
-                        <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '10px', padding: '12px 16px' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-                            <div style={{ fontSize: '12px', color: '#1e40af' }}>
-                              🕐 <b style={{ fontWeight: '600' }}>Since your last visit:</b> {digestParts.join(' · ')}
-                            </div>
-                            <div style={{ display: 'flex', gap: '14px', alignItems: 'center', flexShrink: 0 }}>
-                              <span onClick={() => setDigestExpanded(e => !e)} style={{ fontSize: '11px', color: '#2563eb', cursor: 'pointer' }}>{digestExpanded ? 'Hide details' : 'View details'}</span>
-                              <span onClick={dismissDigestBanner} title="Dismiss" style={{ fontSize: '11px', color: '#64748b', cursor: 'pointer' }}>✕ Dismiss</span>
-                            </div>
-                          </div>
-                          {digestExpanded && (
-                            <div style={{ marginTop: '10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                              {newLots.slice(0, 5).map(l => (
-                                <div key={`nl-${l.id}`} onClick={() => setActiveTab('scraper')} style={{ fontSize: '11px', color: '#334155', cursor: 'pointer' }}>New lot: {l.address}</div>
-                              ))}
-                              {guideDropLots.slice(0, 5).map(l => (
-                                <div key={`gd-${l.id}`} onClick={() => setActiveTab('scraper')} style={{ fontSize: '11px', color: '#334155', cursor: 'pointer' }}>Guide changed: {l.address}{l.previousGuidePrice ? ` (was £${Number(l.previousGuidePrice).toLocaleString()})` : ''}</div>
-                              ))}
-                              {newProps.slice(0, 5).map(p => (
-                                <div key={`np-${p.id}`} onClick={() => { setActiveTab('pipeline'); setCurrentViewProperty(p); }} style={{ fontSize: '11px', color: '#334155', cursor: 'pointer' }}>New property: {p.dealName || p.address?.split(',')[0]}</div>
-                              ))}
-                              {statusChanges.slice(0, 5).map((a, i) => (
-                                <div key={`sc-${i}`} style={{ fontSize: '11px', color: '#334155' }}>{a.detail}</div>
-                              ))}
-                            </div>
-                          )}
+                    {/* Daily briefing — collapsed one-liner by default, auto-generated once per day */}
+                    <div style={{ ...glass, padding: '13px 18px' }}>
+                      <div onClick={() => setBriefingExpanded(e => !e)} style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+                        <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: briefingLoading ? T.textDim : (dailyBriefing?.priorities?.length ? T.warn : T.good), flexShrink: 0 }} />
+                        <div style={{ flex: 1, fontSize: '12.5px', color: T.text, fontWeight: '500', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: briefingExpanded ? 'normal' : 'nowrap' }}>
+                          {briefingLoading ? 'Preparing today’s briefing…' : dailyBriefing ? dailyBriefing.briefing : 'Briefing not yet available.'}
                         </div>
-                      );
-                    })()}
-
-                    {/* 5 KPI tiles — emoji + trend */}
-                    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(5, 1fr)', gap: '12px' }}>
-                      <div style={tile}>
-                        <div style={{ fontSize: '20px' }}>🏠</div>
-                        <div style={kpiNum}>{totalDeals}</div>
-                        <div style={kpiLabel}>Active pipeline</div>
-                        <div style={{ fontSize: '11px', color: newThisWeek > 0 ? '#059669' : '#94a3b8', marginTop: '4px' }}>{newThisWeek > 0 ? `↑ ${newThisWeek} this week` : 'No new this week'}</div>
+                        <span style={{ fontSize: '11px', color: T.textDim, flexShrink: 0 }}>{briefingExpanded ? 'Hide ▴' : 'Details ▾'}</span>
                       </div>
-                      <div style={tile}>
-                        <div style={{ fontSize: '20px' }}>🔥</div>
-                        <div style={{ ...kpiNum, color: '#059669' }}>{strongBidCount}</div>
-                        <div style={kpiLabel}>Strong bids</div>
-                        <div style={{ fontSize: '11px', color: strongSoon > 0 ? '#d97706' : '#94a3b8', marginTop: '4px' }}>{strongSoon > 0 ? `${strongSoon} auction${strongSoon !== 1 ? 's' : ''} < 7 days` : 'None imminent'}</div>
-                      </div>
-                      <div style={tile}>
-                        <div style={{ fontSize: '20px' }}>💰</div>
-                        <div style={{ ...kpiNum, fontSize: '22px' }}>£{(capitalAtRisk / 1000).toFixed(0)}k</div>
-                        <div style={kpiLabel}>Capital at risk</div>
-                        <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '4px' }}>Across active bids</div>
-                      </div>
-                      <div style={{ ...tile, border: `1px solid ${overdueTasks.length > 0 ? '#fecaca' : '#e2e8f0'}`, background: overdueTasks.length > 0 ? '#fff5f5' : '#fff' }}>
-                        <div style={{ fontSize: '20px' }}>📋</div>
-                        <div style={{ ...kpiNum, color: overdueTasks.length > 0 ? '#dc2626' : '#0f172a' }}>{overdueTasks.length}</div>
-                        <div style={kpiLabel}>Tasks overdue</div>
-                        <div style={{ fontSize: '11px', color: overdueTasks.length > 0 ? '#dc2626' : '#94a3b8', marginTop: '4px' }}>{overdueTasks.length > 0 ? 'Needs attention' : todayTasks.length > 0 ? `${todayTasks.length} due today` : 'All clear'}</div>
-                      </div>
-                      <div style={tile}>
-                        <div style={{ fontSize: '20px' }}>📊</div>
-                        <div style={{ ...kpiNum, color: avgMargin != null ? '#0f172a' : '#94a3b8' }}>{avgMargin != null ? `${avgMargin.toFixed(0)}%` : '—'}</div>
-                        <div style={kpiLabel}>Avg margin</div>
-                        <div style={{ fontSize: '11px', marginTop: '4px', color: (avgMargin != null && lastMonthMargin != null) ? (avgMargin >= lastMonthMargin ? '#059669' : '#dc2626') : '#94a3b8' }}>
-                          {(avgMargin != null && lastMonthMargin != null) ? `${avgMargin >= lastMonthMargin ? '↑' : '↓'} vs ${lastMonthMargin.toFixed(0)}% last month` : `${marginsArr.length} deal${marginsArr.length !== 1 ? 's' : ''} with data`}
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* AI daily briefing */}
-                    {(() => {
-                      const briefingSnapshot = {
-                        pipelineCounts: { active: totalDeals, strongBids: strongBidCount, overdue: overdueTasks.length, dueToday: todayTasks.length },
-                        overdueTasks: overdueTasks.slice(0, 10).map(t => ({ title: t.title, due: t.dueDate, linkedName: t.linkedName || propName(t.linkedId) })),
-                        upcomingAuctions: auctionsThisWeek.slice(0, 10).map(p => ({ name: p.dealName || p.address?.split(',')[0], date: p.auctionDate, guide: p.guidePrice })),
-                        strongBids: strongBids.slice(0, 10).map(p => ({ name: p.dealName || p.address?.split(',')[0], auctionDate: p.auctionDate, maxBid: p.maxBid })),
-                        staleIntel: properties.filter(p => p.intelligence?.lastRun && (Date.now() - new Date(p.intelligence.lastRun)) > 30 * 86400000).slice(0, 10).map(p => ({ name: p.dealName || p.address?.split(',')[0], lastRun: p.intelligence.lastRun })),
-                        watchlistAlerts: wlAlerts.map(w => ({ address: w.address, kind: w._kind, guide: w.guidePrice })),
-                      };
-                      return (
-                        <div style={{ ...panel, border: '1px solid #e9d5ff', background: '#faf5ff' }}>
-                          <div style={panelHead}>
-                            <span>🧠 Daily briefing</span>
-                            <button onClick={() => runDailyBriefing(briefingSnapshot)} disabled={briefingLoading} style={{ fontSize: '11px', fontWeight: '600', color: briefingLoading ? '#94a3b8' : '#fff', background: briefingLoading ? '#f1f5f9' : '#7C3AED', border: 'none', borderRadius: '6px', padding: '5px 12px', cursor: briefingLoading ? 'wait' : 'pointer', fontFamily: 'inherit' }}>{briefingLoading ? '⏳ Thinking…' : dailyBriefing ? 'Refresh' : 'Generate'}</button>
-                          </div>
-                          {!dailyBriefing ? (
-                            <div style={dashEmpty}>Generate an AI briefing of what needs attention today.</div>
-                          ) : (
-                            <div>
-                              <div style={{ fontSize: '12px', color: '#334155', lineHeight: '1.6', marginBottom: dailyBriefing.priorities?.length ? '10px' : 0 }}>{dailyBriefing.briefing}</div>
-                              {dailyBriefing.priorities?.length > 0 && (
-                                <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                                  {dailyBriefing.priorities.map((pr, i) => {
-                                    const u = pr.urgency === 'today' ? { bg: '#fef2f2', fg: '#b91c1c', l: 'Today' } : pr.urgency === 'this_week' ? { bg: '#fffbeb', fg: '#92400e', l: 'This week' } : { bg: '#f1f5f9', fg: '#64748b', l: 'Watch' };
-                                    return (
-                                      <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '7px', fontSize: '11px', color: '#334155' }}>
-                                        <span style={{ fontSize: '9px', fontWeight: '700', textTransform: 'uppercase', color: u.fg, background: u.bg, borderRadius: '4px', padding: '1px 5px', flexShrink: 0, marginTop: '1px' }}>{u.l}</span>
-                                        <span>{pr.text}</span>
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              )}
-                              <div style={{ fontSize: '9px', color: '#94a3b8', marginTop: '10px' }}>{AI_PROVIDER_LABELS[dailyBriefing.provider] || dailyBriefing.provider || 'AI'} · {dailyBriefing.generatedAt ? new Date(dailyBriefing.generatedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : ''}{dailyBriefing.forDate && dailyBriefing.forDate !== todayStr ? ' · from an earlier day — refresh' : ''}</div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })()}
-
-                    {/* Auction Triage activity + Market Intelligence signals */}
-                    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '16px', alignItems: 'flex-start' }}>
-                      <div style={panel}>
-                        <div style={panelHead}><span>🔎 Auction Triage Activity</span><span onClick={() => setActiveTab('scraper')} style={dashLink}>View triage →</span></div>
-                        {auctionLots.length === 0 ? (
-                          <div style={dashEmpty}>No triage lots scanned yet.</div>
-                        ) : (
-                          <>
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px', marginBottom: '10px' }}>
-                              {[
-                                { label: 'Inbox', n: dashKpiInbox, onClick: () => { setAuctionLotFilter(f => ({ ...f, status: 'unreviewed' })); setActiveTab('scraper'); } },
-                                { label: 'Shortlisted', n: dashKpiShortlisted, onClick: () => { setAuctionLotFilter(f => ({ ...f, status: 'shortlisted' })); setActiveTab('scraper'); } },
-                                { label: 'Watching', n: dashKpiWatching, onClick: () => { setAuctionLotFilter(f => ({ ...f, status: 'watching' })); setActiveTab('scraper'); } },
-                                { label: 'New', n: dashNewSinceVisit, onClick: () => { setAuctionLotFilter(f => ({ ...f, newOnly: true })); setActiveTab('scraper'); } },
-                              ].map(s => (
-                                <div key={s.label} onClick={s.onClick} style={{ cursor: 'pointer', textAlign: 'center', padding: '8px 4px', borderRadius: '8px', background: '#f8fafc' }}>
-                                  <div style={{ fontSize: '18px', fontWeight: '700', color: s.label === 'New' && s.n > 0 ? '#dc2626' : '#0f172a' }}>{s.n}</div>
-                                  <div style={{ fontSize: '10px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '.03em' }}>{s.label}</div>
-                                </div>
-                              ))}
-                            </div>
-                            <div style={{ fontSize: '11px', color: '#94a3b8' }}>{dashLastScan ? `Last scan ${fmtAgo(dashLastScan)}` : 'No scans recorded yet.'}{dashKpiAnalysis > 0 ? ` · ${dashKpiAnalysis} in analysis/promoted` : ''}</div>
-                          </>
-                        )}
-                      </div>
-                      <div style={panel}>
-                        <div style={panelHead}><span>📡 Market Intelligence Signals</span><span onClick={() => { setMarketIntelTarget({ sub: 'ranking' }); setActiveTab('marketintel'); }} style={dashLink}>View Market Intel →</span></div>
-                        {!miSignals || (!miSignals.overview && miSignals.topAreas.length === 0) ? (
-                          <div style={dashEmpty}>{miSignals ? 'No market intelligence data yet — run a national scan from Market Intel.' : 'Loading…'}</div>
-                        ) : (
-                          <>
-                            <div style={{ fontSize: '11px', color: '#94a3b8', marginBottom: '10px' }}>{miSignals.overview?.lastAggregatedAt ? `Last national refresh ${fmtAgo(miSignals.overview.lastAggregatedAt)}` : 'No national refresh recorded yet.'}{miSignals.overview?.areasScored ? ` · ${miSignals.overview.areasScored} areas scored` : ''}</div>
-                            {miSignals.topAreas.length === 0 ? (
-                              <div style={dashEmpty}>No ranked areas yet.</div>
-                            ) : (
-                              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                {miSignals.topAreas.map((a, i) => (
-                                  <div key={a.area_id} onClick={() => { setMarketIntelTarget({ sub: 'detail', outcode: a.area_id }); setActiveTab('marketintel'); }} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', fontSize: '12px', color: '#334155' }}>
-                                    <span><b style={{ fontWeight: '600', color: '#0f172a' }}>#{i + 1}</b> {a.area_id}</span>
-                                    <span style={{ fontSize: '11px', fontWeight: '600', color: '#7C3AED', background: '#faf5ff', borderRadius: '6px', padding: '2px 8px' }}>{a.score != null ? Math.round(a.score) : '—'}</span>
-                                  </div>
-                                ))}
+                      {briefingExpanded && dailyBriefing?.priorities?.length > 0 && (
+                        <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: `1px solid ${T.divider}`, display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                          {dailyBriefing.priorities.map((pr, i) => {
+                            const u = pr.urgency === 'today' ? { c: T.danger, l: 'Today' } : pr.urgency === 'this_week' ? { c: T.warn, l: 'This week' } : { c: T.textDim, l: 'Watch' };
+                            return (
+                              <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '8px', fontSize: '11.5px', color: T.text }}>
+                                <span style={{ fontSize: '9px', fontWeight: '700', textTransform: 'uppercase', color: u.c, flexShrink: 0, marginTop: '2px' }}>{u.l}</span>
+                                <span>{pr.text}</span>
                               </div>
-                            )}
-                          </>
-                        )}
-                      </div>
+                            );
+                          })}
+                          <div style={{ fontSize: '9.5px', color: T.textDim, marginTop: '4px' }}>{AI_PROVIDER_LABELS[dailyBriefing.provider] || dailyBriefing.provider || 'AI'} · {dailyBriefing.generatedAt ? new Date(dailyBriefing.generatedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : ''}</div>
+                        </div>
+                      )}
                     </div>
 
-                    {/* Attention-needed smart list — standing panel, not an AI call */}
-                    {(() => {
-                      const staleIntelProps = properties.filter(p => p.intelligence?.lastRun && (Date.now() - new Date(p.intelligence.lastRun)) > 30 * 86400000);
-                      const noBidAuctions = auctionsThisWeek.filter(p => !p.maxBid);
-                      const attentionItems = [
-                        ...overdueTasks.slice(0, 10).map(t => ({ key: `task-${t.id}`, text: `${t.title}${t.linkedId ? ` — ${propName(t.linkedId)}` : ''}`, reason: `Overdue · due ${t.dueDate}`, onClick: () => setActiveTab('tasks') })),
-                        ...noBidAuctions.slice(0, 10).map(p => ({ key: `nobid-${p.id}`, text: p.dealName || p.address?.split(',')[0], reason: `No max bid · auction ${new Date(p.auctionDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}`, onClick: () => { setActiveTab('pipeline'); setCurrentViewProperty(p); } })),
-                        ...staleIntelProps.slice(0, 10).map(p => ({ key: `stale-${p.id}`, text: p.dealName || p.address?.split(',')[0], reason: `Intelligence stale · ran ${fmtAgo(p.intelligence.lastRun)}`, onClick: () => { setActiveTab('pipeline'); setCurrentViewProperty(p); } })),
-                      ];
-                      return (
-                        <div style={{ ...panel, border: `1px solid ${attentionItems.length > 0 ? '#fecaca' : '#e2e8f0'}` }}>
-                          <div style={panelHead}>
-                            <span>⚠️ Needs attention</span>
-                            {attentionItems.length > 0 && <span style={{ fontSize: '11px', color: '#dc2626', fontWeight: '700' }}>{attentionItems.length}</span>}
-                          </div>
-                          {attentionItems.length === 0 ? (
-                            <div style={dashEmpty}>✓ Nothing needs attention right now.</div>
-                          ) : (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                              {attentionItems.slice(0, 8).map(item => (
-                                <div key={item.key} onClick={item.onClick} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
-                                  <span style={{ fontSize: '12px', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.text}</span>
-                                  <span style={{ fontSize: '11px', color: '#dc2626', whiteSpace: 'nowrap', flexShrink: 0 }}>{item.reason}</span>
-                                </div>
-                              ))}
-                              {attentionItems.length > 8 && <div style={{ fontSize: '11px', color: '#94a3b8' }}>+{attentionItems.length - 8} more</div>}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })()}
+                    {/* 5 KPI radial gauges */}
+                    <div style={{ ...glass, display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : isTablet ? 'repeat(3, 1fr)' : 'repeat(5, 1fr)', gap: '16px', padding: isMobile ? '18px 12px' : '22px 12px' }}>
+                      {kpiDefs.map(k => <Ring key={k.key} pct={k.pct} color={k.color} value={k.val} label={k.label} sub={k.sub} size={isMobile ? 82 : 100} onClick={k.onClick} />)}
+                    </div>
 
-                    {/* 3-column grid */}
+                    {/* Auctions this week — hero timeline (the "line" showing upcoming bids) */}
+                    <div style={{ ...glass, padding: isMobile ? '16px' : '20px 24px 26px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: isMobile ? '12px' : '30px' }}>
+                        <div style={{ fontSize: '14px', fontWeight: '700', color: T.text }}>Auctions this week</div>
+                        <span onClick={() => setActiveTab('pipeline')} style={dashLink}>View pipeline →</span>
+                      </div>
+                      {auctionsThisWeek.length === 0 ? (
+                        <div style={dashEmpty}>No auctions in the next 14 days.</div>
+                      ) : isMobile ? (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                          {auctionsThisWeek.slice(0, 6).map(p => {
+                            const days = Math.ceil((new Date(p.auctionDate) - today) / 86400000);
+                            const c = days <= 2 ? T.danger : days <= 8 ? T.warn : T.good;
+                            return (
+                              <div key={p.id} onClick={() => { setActiveTab('pipeline'); setCurrentViewProperty(p); }} style={{ display: 'flex', gap: '12px', alignItems: 'center', cursor: 'pointer', padding: '10px', borderRadius: '10px', background: T.rowHover }}>
+                                <div style={{ width: '46px', height: '46px', borderRadius: '10px', border: `2px solid ${c}`, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: c, flexShrink: 0 }}>
+                                  <div style={{ fontSize: '15px', fontWeight: '700' }}>{days}</div><div style={{ fontSize: '8px', textTransform: 'uppercase' }}>days</div>
+                                </div>
+                                <div style={{ minWidth: 0, flex: 1 }}>
+                                  <div style={{ fontSize: '13px', fontWeight: '600', color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.dealName || p.address.split(',')[0]}</div>
+                                  <div style={{ fontSize: '11px', color: T.textDim, marginTop: '2px' }}>{p.maxBid ? `£${p.maxBid.toLocaleString()} max bid` : 'No max bid set'} · {normaliseStatus(p.status)}</div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div style={{ position: 'relative', height: '230px', margin: '0 6px' }}>
+                          <div style={{ position: 'absolute', left: 0, right: 0, top: '50%', height: '2px', background: dark ? 'rgba(96,165,250,0.25)' : 'rgba(59,130,246,0.2)' }} />
+                          {[0, 2, 4, 6, 8, 10, 12, 14].map(d => (
+                            <div key={d} style={{ position: 'absolute', left: `${Math.min(97, (d / 14) * 100)}%`, top: 'calc(50% + 92px)', transform: 'translateX(-50%)', fontSize: '9.5px', color: T.textDim }}>D{d}</div>
+                          ))}
+                          {auctionsThisWeek.slice(0, 5).map((p, i) => {
+                            const days = Math.max(0, Math.ceil((new Date(p.auctionDate) - today) / 86400000));
+                            const leftPct = Math.min(97, (Math.min(days, 14) / 14) * 100);
+                            const above = i % 2 === 0;
+                            const c = days <= 2 ? T.danger : days <= 8 ? T.warn : T.good;
+                            return (
+                              <div key={p.id} style={{ position: 'absolute', left: `${leftPct}%`, top: '50%' }}>
+                                <div onClick={() => { setActiveTab('pipeline'); setCurrentViewProperty(p); }} style={{ position: 'absolute', top: above ? '-96px' : '30px', left: '50%', transform: 'translateX(-50%)', width: '196px', cursor: 'pointer', background: dark ? 'rgba(8,14,28,0.92)' : '#ffffff', border: `1px solid ${c}`, borderRadius: '10px', padding: '10px 12px', boxShadow: dark ? `0 0 18px ${c}33` : '0 4px 14px rgba(15,23,42,0.1)' }}>
+                                  <div style={{ fontSize: '12px', fontWeight: '700', color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.dealName || p.address.split(',')[0]}</div>
+                                  <div style={{ fontSize: '11px', fontWeight: '600', color: c, marginTop: '3px' }}>{p.maxBid ? `£${p.maxBid.toLocaleString()} max bid` : 'NO MAX BID SET'}</div>
+                                </div>
+                                <div style={{ position: 'absolute', top: above ? '-16px' : '8px', left: 0, width: '1px', height: '24px', background: c }} />
+                                <div style={{ width: '13px', height: '13px', borderRadius: '50%', background: dark ? '#0a1424' : '#fff', border: `3px solid ${c}`, boxShadow: dark ? `0 0 10px ${c}` : 'none', transform: 'translate(-50%, -50%)' }} />
+                                <div style={{ position: 'absolute', top: '14px', left: 0, transform: 'translateX(-50%)', fontSize: '10px', fontWeight: '700', color: c, whiteSpace: 'nowrap' }}>{days}D</div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Merged Needs Attention */}
+                    <div style={{ ...glass, padding: '18px 20px', border: `1px solid ${attentionItems.length > 0 ? (dark ? 'rgba(251,113,133,0.35)' : 'rgba(220,38,38,0.22)') : T.panelBorder}` }}>
+                      <div style={panelHead}>
+                        <span>Needs attention</span>
+                        {attentionItems.length > 0 && <span style={{ fontSize: '11px', color: T.danger, fontWeight: '700' }}>{attentionItems.length}</span>}
+                      </div>
+                      {attentionItems.length === 0 ? (
+                        <div style={dashEmpty}>Nothing needs attention right now.</div>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                          {attentionItems.slice(0, 8).map(item => (
+                            <div key={item.key} onClick={item.onClick} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '10px', cursor: 'pointer', padding: '7px 6px', borderRadius: '8px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                                <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: sevColor[item.sev], flexShrink: 0 }} />
+                                <span style={{ fontSize: '12px', color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.text}</span>
+                              </div>
+                              <span style={{ fontSize: '11px', color: sevColor[item.sev], whiteSpace: 'nowrap', flexShrink: 0 }}>{item.reason}</span>
+                            </div>
+                          ))}
+                          {attentionItems.length > 8 && <div style={{ fontSize: '11px', color: T.textDim, padding: '2px 6px' }}>+{attentionItems.length - 8} more</div>}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 3-column: Market Intel (South Yorkshire) · Recent Activity · Other Signals */}
                     <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: '16px', alignItems: 'flex-start' }}>
 
-                      {/* Auctions this week */}
-                      <div style={panel}>
-                        <div style={panelHead}><span>⏱ Auctions this week</span><span onClick={() => setActiveTab('pipeline')} style={dashLink}>View all →</span></div>
-                        {auctionsThisWeek.length === 0 ? (
-                          <div style={dashEmpty}>No auctions in the next 14 days.</div>
-                        ) : auctionsThisWeek.slice(0, 6).map(p => {
-                          const days = Math.ceil((new Date(p.auctionDate) - today) / 86400000);
-                          const dc = days <= 2 ? { bg: '#fee2e2', c: '#dc2626' } : days <= 7 ? { bg: '#fef3c7', c: '#92400e' } : { bg: '#dcfce7', c: '#166534' };
-                          return (
-                            <div key={p.id} onClick={() => { setActiveTab('pipeline'); setCurrentViewProperty(p); }} style={{ display: 'flex', gap: '10px', marginBottom: '14px', cursor: 'pointer' }}>
-                              <div style={{ width: '44px', height: '44px', borderRadius: '10px', background: dc.bg, color: dc.c, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                                <div style={{ fontSize: '15px', fontWeight: '700', lineHeight: 1 }}>{days}</div>
-                                <div style={{ fontSize: '10px', textTransform: 'uppercase' }}>{days === 1 ? 'day' : 'days'}</div>
-                              </div>
-                              <div style={{ minWidth: 0 }}>
-                                <div style={{ fontSize: '13px', fontWeight: '600', color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.dealName || p.address.split(',')[0]} {p.isStrongBid ? <span style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '8px', background: '#dcfce7', color: '#166534' }}>Strong bid</span> : null}</div>
-                                <div style={{ fontSize: '11px', color: '#64748b', marginTop: '2px' }}>{p.sourcePlatform}{p.maxBid ? ` · £${p.maxBid.toLocaleString()} max bid` : ''} · {normaliseStatus(p.status)}</div>
-                              </div>
+                      <div style={{ ...glass, padding: '16px 18px' }}>
+                        <div style={panelHead}><span>Market intel · S. Yorks</span><span onClick={() => { setMarketIntelTarget({ sub: 'ranking' }); setActiveTab('marketintel'); }} style={dashLink}>View →</span></div>
+                        {!miSignals ? (
+                          <div style={dashEmpty}>Loading…</div>
+                        ) : miSignals.topAreas.length === 0 ? (
+                          <div style={dashEmpty}>No South Yorkshire areas scored yet — run a national scan from Market Intel.</div>
+                        ) : (
+                          <>
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '9px' }}>
+                              {miSignals.topAreas.map((a, i) => (
+                                <div key={a.area_id} onClick={() => { setMarketIntelTarget({ sub: 'detail', outcode: a.area_id }); setActiveTab('marketintel'); }} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer' }}>
+                                  <span style={{ fontSize: '12px', color: T.text }}><b style={{ fontWeight: '700' }}>#{i + 1}</b> {a.area_id}</span>
+                                  <span style={{ fontSize: '11px', fontWeight: '700', color: T.accent2, background: dark ? 'rgba(139,92,246,0.15)' : 'rgba(139,92,246,0.08)', borderRadius: '6px', padding: '2px 8px' }}>{a.score != null ? Math.round(a.score) : '—'}</span>
+                                </div>
+                              ))}
                             </div>
-                          );
-                        })}
+                            <div style={{ fontSize: '10px', color: T.textDim, marginTop: '12px' }}>{miSignals.overview?.lastAggregatedAt ? `Refreshed ${fmtAgo(miSignals.overview.lastAggregatedAt)}` : 'No refresh recorded yet'} · {miSignals.localAreasScored} S.Yorks areas scored</div>
+                          </>
+                        )}
                       </div>
 
-                      {/* Actions required */}
-                      <div style={panel}>
-                        <div style={panelHead}><span>⚡ Actions required</span><span onClick={() => setActiveTab('tasks')} style={dashLink}>All tasks →</span></div>
-                        {openTasks.length === 0 ? (
-                          <div style={dashEmpty}>✓ You're all caught up — no open tasks.</div>
+                      <div style={{ ...glass, padding: '16px 18px' }}>
+                        <div style={panelHead}><span>Recent activity</span></div>
+                        {recentActivity.length === 0 ? (
+                          <div style={dashEmpty}>No activity yet.</div>
                         ) : (
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                            {openTasks.map(t => {
-                              const rd = relDate(t.dueDate);
-                              const linked = t.linkedType === 'Property' && t.linkedId ? propName(t.linkedId) : '';
-                              return (
-                                <div key={t.id} onClick={() => setActiveTab('tasks')} style={{ display: 'flex', alignItems: 'flex-start', gap: '9px', cursor: 'pointer' }}>
-                                  <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: rd.dot, marginTop: '5px', flexShrink: 0 }} />
-                                  <div style={{ flex: 1, minWidth: 0 }}><div style={{ fontSize: '12px', color: '#0f172a' }}>{t.title}{linked ? ` — ${linked}` : ''}</div></div>
-                                  <span style={{ fontSize: '11px', color: rd.color, whiteSpace: 'nowrap', flexShrink: 0 }}>{rd.txt}</span>
-                                </div>
-                              );
-                            })}
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '11px' }}>
+                            {recentActivity.map((a, i) => (
+                              <div key={`${a.propId}-${a.id || i}`} onClick={() => { const pr = properties.find(p => p.id === a.propId); if (pr) { setActiveTab('pipeline'); setCurrentViewProperty(pr); } }} style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', cursor: 'pointer' }}>
+                                <span style={{ fontSize: '12px', color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><b style={{ fontWeight: '600' }}>{a.user || 'Someone'}</b> {a.detail} · {a.propName}</span>
+                                <span style={{ fontSize: '11px', color: T.textDim, whiteSpace: 'nowrap', flexShrink: 0 }}>{fmtAgo(a.at)}</span>
+                              </div>
+                            ))}
                           </div>
                         )}
                       </div>
 
-                      {/* Recent activity + Watchlist alerts */}
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                        <div style={panel}>
-                          <div style={panelHead}><span>🔔 Recent activity</span></div>
-                          {recentActivity.length === 0 ? (
-                            <div style={dashEmpty}>No activity yet.</div>
-                          ) : (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '11px' }}>
-                              {recentActivity.map((a, i) => (
-                                <div key={`${a.propId}-${a.id || i}`} onClick={() => { const pr = properties.find(p => p.id === a.propId); if (pr) { setActiveTab('pipeline'); setCurrentViewProperty(pr); } }} style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', cursor: 'pointer' }}>
-                                  <span style={{ fontSize: '12px', color: '#334155', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><b style={{ fontWeight: '600' }}>{a.user || 'Someone'}</b> {a.detail} · {a.propName}</span>
-                                  <span style={{ fontSize: '11px', color: '#94a3b8', whiteSpace: 'nowrap', flexShrink: 0 }}>{fmtAgo(a.at)}</span>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                        <div style={panel}>
-                          <div style={panelHead}><span>👁 Watchlist alerts</span></div>
-                          {wlAlerts.length === 0 ? (
-                            <div style={dashEmpty}>No watchlist alerts.</div>
-                          ) : (
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: '11px' }}>
-                              {wlAlerts.map(w => (
-                                <div key={w.id} onClick={() => setActiveTab('auctionintel')} style={{ fontSize: '12px', color: '#334155', cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                                  {w._kind === 'drop'
-                                    ? <><span style={{ color: '#059669' }}>↓ Guide</span> {w.address} · £{(w.guidePrev / 1000).toFixed(0)}k → £{(w.guidePrice / 1000).toFixed(0)}k</>
-                                    : <><span style={{ fontSize: '10px', fontWeight: '700', color: '#dc2626' }}>NEW</span> {w.address}{(w.auctionHouse || w.platform) ? ` · ${w.auctionHouse || w.platform}` : ''}{w.auctionDate ? ` · ${new Date(w.auctionDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}` : ''}{w.guidePrice ? ` · £${(w.guidePrice / 1000).toFixed(0)}k` : ''}</>}
-                                </div>
-                              ))}
-                            </div>
-                          )}
+                      <div style={{ ...glass, padding: '16px 18px' }}>
+                        <div style={panelHead}><span>Other signals</span></div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '11px' }}>
+                          <div onClick={() => setActiveTab('scraper')} style={{ display: 'flex', justifyContent: 'space-between', cursor: 'pointer' }}>
+                            <span style={{ fontSize: '12px', color: T.text }}>Triage — watching / analysis</span>
+                            <span style={{ fontSize: '12px', fontWeight: '700', color: T.text }}>{dashKpiWatching} / {dashKpiAnalysis}</span>
+                          </div>
+                          <div style={{ fontSize: '10.5px', color: T.textDim }}>{dashLastScan ? `Last scan ${fmtAgo(dashLastScan)}` : 'No scans recorded yet.'}</div>
+                          <div style={{ borderTop: `1px solid ${T.divider}`, paddingTop: '9px', display: 'flex', flexDirection: 'column', gap: '9px' }}>
+                            {wlAlerts.length === 0 ? (
+                              <div style={dashEmpty}>No watchlist alerts.</div>
+                            ) : wlAlerts.slice(0, 3).map(w => (
+                              <div key={w.id} onClick={() => setActiveTab('auctionintel')} style={{ fontSize: '11.5px', color: T.text, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {w._kind === 'drop'
+                                  ? <><span style={{ color: T.good }}>↓ Guide</span> {w.address} · £{(w.guidePrev / 1000).toFixed(0)}k → £{(w.guidePrice / 1000).toFixed(0)}k</>
+                                  : <><span style={{ fontSize: '10px', fontWeight: '700', color: T.danger }}>NEW</span> {w.address}</>}
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       </div>
 
