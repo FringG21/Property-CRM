@@ -2559,6 +2559,10 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
   // separate (not shared state) because this runs before the dashboard tab's own
   // render-scoped variables exist.
   const [briefingExpanded, setBriefingExpanded] = useState(false);
+  // dataLoaded is declared here (rather than down in the KV-persistence block below)
+  // because this effect's dependency array needs it — referencing it before
+  // declaration is a ReferenceError (TDZ), not just a stale-closure bug.
+  const [dataLoaded, setDataLoaded] = useState(false);
   useEffect(() => {
     if (!dataLoaded || dailyBriefing || briefingLoading) return;
     const todayStr = new Date().toISOString().split('T')[0];
@@ -3179,7 +3183,6 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
 
   // KV persistence — declared here so all state vars above are in scope
   const [saveStatus, setSaveStatus] = useState('idle');
-  const [dataLoaded, setDataLoaded] = useState(false);
 
   useEffect(() => {
     const token = localStorage.getItem('crm_session');
