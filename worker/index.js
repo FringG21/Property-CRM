@@ -150,13 +150,20 @@ async function getSession(env, request) {
 }
 
 // Rate limiter — returns true if allowed, false if limit exceeded
-// Uses a 60-second sliding bucket stored in KV
+// Uses a 60-second sliding bucket stored in D1 (moved off KV — KV's 1,000
+// writes/day free-tier quota gets exhausted by high-frequency callers like the
+// report-poller, which then breaks every other KV-backed route; D1's 100,000
+// rows-written/day quota has 100x the headroom for the same per-call write).
 async function checkRateLimit(env, key, limit, windowSeconds = 60) {
   const bucket = Math.floor(Date.now() / (windowSeconds * 1000));
-  const kvKey = `ratelimit:${key}:${bucket}`;
-  const current = parseInt((await env.SCRAPER_KV.get(kvKey)) || '0');
+  const rlKey = `${key}:${bucket}`;
+  const row = await env.CRM_DB.prepare('SELECT count FROM rate_limits WHERE rl_key = ?').bind(rlKey).first();
+  const current = row?.count || 0;
   if (current >= limit) return false;
-  await env.SCRAPER_KV.put(kvKey, String(current + 1), { expirationTtl: windowSeconds * 2 });
+  await env.CRM_DB.prepare(
+    `INSERT INTO rate_limits (rl_key, count, updated_at) VALUES (?, 1, ?)
+     ON CONFLICT(rl_key) DO UPDATE SET count = count + 1, updated_at = excluded.updated_at`
+  ).bind(rlKey, new Date().toISOString()).run();
   return true;
 }
 
