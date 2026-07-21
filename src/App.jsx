@@ -2656,6 +2656,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
     if (!auctionDate) return '—';
     const today = new Date(); today.setHours(0,0,0,0);
     const auction = new Date(auctionDate);
+    if (isNaN(auction)) return '—'; // unparseable date string (e.g. a raw scraped "27th Jul 2026") — don't render NaN
     const diff = Math.round((auction - today) / (1000 * 60 * 60 * 24));
     if (diff < 0) return 'Past';
     if (diff === 0) return 'Today';
@@ -7693,7 +7694,8 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                       {isMobile ? (
                         <div style={{ padding: '8px' }}>
                           {pipelineProperties.map(p => {
-                            const days = p.auctionDate ? Math.ceil((new Date(p.auctionDate) - new Date()) / 86400000) : null;
+                            const daysRaw = p.auctionDate ? Math.ceil((new Date(p.auctionDate) - new Date()) / 86400000) : null;
+                            const days = (daysRaw != null && !isNaN(daysRaw)) ? daysRaw : null; // guard unparseable auctionDate strings (e.g. raw scraped "27th Jul 2026")
                             const st = getStatusStyle(p.status || 'Sourced');
                             return (
                               <div key={p.id} onClick={() => setCurrentViewProperty(p)} style={{ display: 'flex', gap: '12px', padding: '12px', borderRadius: '8px', border: `1px solid ${p.isStrongBid ? '#bbf7d0' : '#e2e8f0'}`, borderLeft: `3px solid ${p.isStrongBid ? '#059669' : '#cbd5e1'}`, marginBottom: '8px', background: p.isStrongBid ? '#fafffe' : '#fff', cursor: 'pointer' }}>
