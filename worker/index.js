@@ -2987,6 +2987,47 @@ function computeScores(connectors) {
   };
 }
 
+// Deterministic auction-lot "data score" — guide price vs local Land Registry
+// comps (dominant signal), EPC refurb upside, and local price growth. Distinct
+// from computeScores() above (which scores a full subject property across 5
+// dimensions using ~10 connectors) — this is a lean, 3-signal score sized for
+// triaging many lots, most of which only have a guide price and an address.
+function computeLotDataScore({ guidePrice }, { landRegistry, epc, hpi } = {}) {
+  const clamp = n => Math.max(0, Math.min(100, Math.round(n)));
+  const parts = [];
+
+  let discountPct = null;
+  if (landRegistry?.avgPrice > 0 && guidePrice > 0) {
+    discountPct = Math.round((landRegistry.avgPrice - guidePrice) / landRegistry.avgPrice * 1000) / 10;
+    parts.push({
+      v: clamp(50 + discountPct * 1.6), w: 4,
+      label: `Guide ${discountPct >= 0 ? `${discountPct}% below` : `${Math.abs(discountPct)}% above`} local avg sold price (£${Math.round(landRegistry.avgPrice).toLocaleString()})`,
+    });
+  }
+
+  const EPC_RANK = { A: 7, B: 6, C: 5, D: 4, E: 3, F: 2, G: 1 };
+  if (epc?.epcRating && EPC_RANK[epc.epcRating] != null) {
+    const cur = EPC_RANK[epc.epcRating];
+    const pot = epc.potentialRating ? EPC_RANK[epc.potentialRating] : null;
+    const headroom = pot != null ? pot - cur : 0;
+    const v = headroom >= 2 ? 80 : headroom === 1 ? 65 : cur <= 3 ? 40 : 55;
+    parts.push({ v, w: 2, label: `EPC ${epc.epcRating}${epc.potentialRating ? ` → ${epc.potentialRating} potential` : ''}` });
+  }
+
+  const growth = hpi?.growth3yr ?? landRegistry?.priceGrowth ?? null;
+  if (growth != null) {
+    parts.push({
+      v: clamp(50 + growth * 1.4), w: 2.5,
+      label: `${growth >= 0 ? '+' : ''}${growth}% ${hpi?.growth3yr != null ? '3yr area' : 'local'} price growth`,
+    });
+  }
+
+  if (!parts.length) return null;
+  const tw = parts.reduce((s, p) => s + p.w, 0);
+  const score = clamp(parts.reduce((s, p) => s + p.v * p.w, 0) / tw);
+  return { score, discountPct, breakdown: parts.map(p => p.label), coverage: parts.length };
+}
+
 // ============================================================
 // SEMANTIC SEARCH — Workers AI (toMarkdown + bge embeddings) + Vectorize
 // All inert unless env.AI and env.VECTORIZE bindings are present.
@@ -3630,6 +3671,91 @@ async function handleApiRoutes(request, env, url, ctx) {
         }
       }
       return corsResponse({ success: true });
+    }
+
+    // Deterministic data score for one lot — Land Registry comps + EPC + HPI
+    // growth. On-demand (not run automatically for every lot): a real API
+    // pull, rate-limited per user like the AI triage insight route above it.
+    // Persisted onto the lot's D1 JSON blob (dataScore/dataScoreBreakdown/...)
+    // so it survives reloads, and carried onto the property if/when promoted
+    // (see sendLotToPipeline in App.jsx).
+    if (/^\/api\/auction\/lots\/[^/]+\/score$/.test(url.pathname) && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const scoreRateOk = await checkRateLimit(env, `lotscore:${session.userId}`, 15);
+      if (!scoreRateOk) return corsResponse({ success: false, message: 'Too many scoring requests — please wait a minute' }, 429);
+
+      const lotId = decodeURIComponent(url.pathname.split('/')[4]);
+      await ensureAuctionMigratedToD1(env);
+      const lot = await d1GetAuctionLotById(env, lotId);
+      if (!lot) return corsResponse({ success: false, message: 'Lot not found' }, 404);
+
+      const { postcode } = extractPostcodeParts(lot.address || '');
+      if (!postcode) {
+        return corsResponse({ success: false, message: 'No full postcode on this lot — EIG/OTM leads are locality-only. Try "Run AI triage" instead, or fill in a postcode once it\'s promoted to the pipeline.' }, 400);
+      }
+
+      const connectors = {};
+      let addrData = null;
+      try { addrData = await connectorPostcodes(postcode); } catch {}
+
+      const tasks = [
+        fetch(
+          `https://landregistry.data.gov.uk/data/ppi/transaction-record.json?propertyAddress.postcode=${encodeURIComponent(postcode)}&_pageSize=40&_sort=-transactionDate`,
+          { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(10000) },
+        ).then(r => r.json()).then(data => {
+          const items = (data.result?.items || []).map(it => ({ price: it.pricePaid || 0, date: it.transactionDate || '' })).filter(x => x.price > 0);
+          const sorted = [...items].sort((a, b) => b.date.localeCompare(a.date));
+          const recent = sorted.slice(0, 10), older = sorted.slice(10, 20);
+          const avgRecent = recent.length ? Math.round(recent.reduce((s, i) => s + i.price, 0) / recent.length) : 0;
+          const avgOlder = older.length ? Math.round(older.reduce((s, i) => s + i.price, 0) / older.length) : 0;
+          const priceGrowth = avgOlder > 0 ? Math.round((avgRecent - avgOlder) / avgOlder * 1000) / 10 : null;
+          return { key: 'landRegistry', status: 'success', data: { avgPrice: avgRecent, priceGrowth, salesCount: items.length }, source: 'Land Registry Price Paid' };
+        }).catch(err => ({ key: 'landRegistry', status: 'error', error: err.message, source: 'Land Registry' })),
+      ];
+
+      if (env.EPC_API_KEY && env.EPC_EMAIL) {
+        tasks.push(
+          fetch(
+            `https://epc.opendatacommunities.org/api/v1/domestic/search?postcode=${encodeURIComponent(postcode)}&size=5`,
+            { headers: { Authorization: 'Basic ' + btoa(`${env.EPC_EMAIL}:${env.EPC_API_KEY}`), Accept: 'application/json' }, signal: AbortSignal.timeout(8000) },
+          ).then(r => r.json()).then(data => {
+            const best = (data.rows || [])[0];
+            if (!best) return { key: 'epc', status: 'error', error: 'No EPC records for postcode', source: 'EPC Open Data' };
+            return { key: 'epc', status: 'success', data: { epcRating: best['current-energy-rating'] || '', potentialRating: best['potential-energy-rating'] || '' }, source: 'EPC Open Data' };
+          }).catch(err => ({ key: 'epc', status: 'error', error: err.message, source: 'EPC Open Data' })),
+        );
+      }
+
+      if (addrData?.laCode) {
+        tasks.push(
+          connectorHPI(addrData.laCode, addrData.localAuthority)
+            .then(data => ({ key: 'hpi', status: 'success', data, source: 'Land Registry UK HPI' }))
+            .catch(err => ({ key: 'hpi', status: 'error', error: err.message, source: 'Land Registry UK HPI' })),
+        );
+      }
+
+      const settled = await Promise.allSettled(tasks);
+      for (const s of settled) {
+        if (s.status === 'fulfilled' && s.value?.key) connectors[s.value.key] = s.value;
+      }
+
+      const result = computeLotDataScore(
+        { guidePrice: lot.guidePrice },
+        { landRegistry: connectors.landRegistry?.data, epc: connectors.epc?.data, hpi: connectors.hpi?.data },
+      );
+
+      const updatedLot = {
+        ...lot,
+        dataScore: result?.score ?? null,
+        dataScoreBreakdown: result?.breakdown ?? [],
+        dataScoreCoverage: result?.coverage ?? 0,
+        dataScorePostcode: postcode,
+        dataScoreSources: Object.fromEntries(Object.entries(connectors).map(([k, v]) => [k, v.status])),
+        dataScoredAt: new Date().toISOString(),
+      };
+      await d1PutAuctionLot(env, updatedLot);
+      return corsResponse({ success: true, lot: updatedLot });
     }
 
     // --------------------------------------------------------

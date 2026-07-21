@@ -2051,12 +2051,36 @@ export default function App({ user = {}, onLogout }) {
     }
   };
 
+  // ── Deterministic data score — on-demand, per lot (Land Registry + EPC + HPI) ──
+  const [dataScoreLoadingId, setDataScoreLoadingId] = useState(null);
+  const runLotDataScore = async (lot) => {
+    if (!lot || dataScoreLoadingId) return;
+    setDataScoreLoadingId(lot.id);
+    try {
+      const token = localStorage.getItem('crm_session');
+      const res = await fetch(`/api/auction/lots/${encodeURIComponent(lot.id)}/score`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (!data.success) { alert(data.message || 'Scoring failed.'); return; }
+      setAuctionLots(prev => prev.map(l => l.id === lot.id ? { ...l, ...data.lot } : l));
+    } catch {
+      alert('Scoring failed — network error.');
+    } finally {
+      setDataScoreLoadingId(null);
+    }
+  };
+
   const sendLotToPipeline = (lot) => {
     setProperties(prev => [...prev, {
       id: Date.now(), address: lot.address, guidePrice: lot.guidePrice || 0, auctionDate: lot.auctionDate, auctionTime: '12:00', maxBid: 0, refurb: 0, bedrooms: lot.bedrooms || 0, propertyType: lot.propertyType || 'Unknown', sourcePlatform: lot.houseName || 'Auction', listingUrl: lot.lotUrl || reconstructLotUrl({ sourceLotId: lot.id, sourceOrigin: lot.origin }), isConsideration: false, isStrongBid: false, planningToBid: true, surveyorStatus: 'called', surveyorDate: '', checklist: { legalReviewed: false, financeApproved: false, costsPriced: false }, notesList: [], files: { mainReport: null, spriftReport: null, surveyFile: null, legalPack: null }, status: 'Sourced', hammerPrice: null, outcome: '',
       postcode: lot.postcode || extractPostcode(lot.address || ''),
       // provenance back to the triage lead this property came from
       sourceLotId: lot.id, sourceOrigin: lot.origin || 'scraped', dataSource: 'auction_triage',
+      // carried over from the triage data score, if it was run before promotion — a
+      // snapshot at promotion time, not live; re-run intelligence for current data
+      ...(lot.dataScore != null ? { lotDataScore: lot.dataScore, lotDataScoreBreakdown: lot.dataScoreBreakdown, lotDataScoredAt: lot.dataScoredAt } : {}),
       activityLog: [{ id: Date.now() + Math.random(), type: 'created', detail: `Promoted from auction triage (${lot.origin === 'manual' ? 'manual lead' : lot.houseName || 'scraped lot'})`, user: user.name || 'You', at: new Date().toISOString() }],
     }]);
     triageLot(lot.id, 'promoted');
@@ -8247,6 +8271,9 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                     {lot.aiFlag
                                       ? <span title={lot.aiNote ? `${lot.aiNote}${lot.aiGuideAssessment ? ` (guide: ${lot.aiGuideAssessment.replace('_', ' ')})` : ''}` : ''} style={{ fontSize: '10px', padding: '1px 4px', background: TRIAGE_FLAG_BG[lot.aiFlag], color: TRIAGE_FLAG_COLOR[lot.aiFlag], borderRadius: '4px', fontWeight: '500', marginLeft: '4px', cursor: 'help' }}>🤖 {TRIAGE_FLAG_LABELS[lot.aiFlag]}</span>
                                       : <button onClick={(e) => { e.stopPropagation(); runTriageInsight(lot); }} disabled={aiTriageLoadingId === lot.id} title="AI triage insight" style={{ fontSize: '10px', padding: '1px 4px', marginLeft: '4px', background: 'transparent', border: '0.5px solid #e2e8f0', borderRadius: '4px', cursor: aiTriageLoadingId === lot.id ? 'wait' : 'pointer', color: '#64748b' }}>{aiTriageLoadingId === lot.id ? '…' : '🤖'}</button>}
+                                    {lot.dataScore != null
+                                      ? <span title={`Data score (Land Registry + EPC + price growth) · ${(lot.dataScoreBreakdown || []).join(' · ') || 'limited data'}`} style={{ fontSize: '10px', padding: '1px 4px', background: lot.dataScore >= 70 ? '#dcfce7' : lot.dataScore >= 40 ? '#fef3c7' : '#fee2e2', color: lot.dataScore >= 70 ? '#166534' : lot.dataScore >= 40 ? '#92400e' : '#991b1b', borderRadius: '4px', fontWeight: '500', marginLeft: '4px', cursor: 'help' }}>📊 {lot.dataScore}</span>
+                                      : <button onClick={(e) => { e.stopPropagation(); runLotDataScore(lot); }} disabled={dataScoreLoadingId === lot.id} title="Score using Land Registry + EPC + price growth data" style={{ fontSize: '10px', padding: '1px 4px', marginLeft: '4px', background: 'transparent', border: '0.5px solid #e2e8f0', borderRadius: '4px', cursor: dataScoreLoadingId === lot.id ? 'wait' : 'pointer', color: '#64748b' }}>{dataScoreLoadingId === lot.id ? '…' : '📊'}</button>}
                                     {(() => {
                                       const oc = extractOutcode(lot.address);
                                       const mi = oc && miByOutcode ? miByOutcode[oc] : null;
