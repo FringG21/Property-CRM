@@ -557,6 +557,50 @@ function extractPropertyDetails(html, pageUrl) {
   return { address, guidePrice, bedrooms, auctionDate, auctionTime, platform, postcode };
 }
 
+// Savills auction pages render the address/guide price client-side (Vue) and their
+// <title> puts the site name BEFORE the address ("Savills Property Auctions | 59 Fort
+// Hill Road..."), the opposite of the "Address - SiteName" convention extractPropertyDetails
+// assumes — so the generic parser strips the wrong half and misreads nav text as a price.
+// Savills does embed the full structured lot record as a JSON blob inside an inline Vue
+// init <script> (lot: JSON.parse('...')) — read that directly instead of guessing.
+function extractSavillsDetails(html, pageUrl) {
+  const lotMatch = html.match(/\blot:\s*JSON\.parse\('([\s\S]*?)'\)/);
+  if (!lotMatch) return null;
+  let lot;
+  try {
+    // The blob is JSON that's been re-escaped (addslashes-style) to sit inside a
+    // single-quoted JS string literal — undo that one layer, then JSON.parse.
+    const jsonText = lotMatch[1].replace(/\\(["'\\])/g, '$1');
+    lot = JSON.parse(jsonText);
+  } catch (e) {
+    return null;
+  }
+
+  const address = lot.name || lot.address_line_1 || '';
+  if (!address) return null;
+
+  const guidePrice = parseInt(String(lot.low_estimate || '').replace(/[^\d]/g, '')) || 0;
+  const bedrooms = parseInt(lot.bedrooms) || 0;
+
+  let postcode = lot.address_post_code_1
+    ? `${lot.address_post_code_1} ${lot.address_post_code_2 || ''}`.trim()
+    : '';
+  if (!postcode) postcode = extractPostcodeParts(address).postcode || '';
+
+  const dateAttrMatch = html.match(/data-auction-date="(\d{4}-\d{2}-\d{2})"/);
+  const auctionDate = dateAttrMatch ? dateAttrMatch[1] : '';
+
+  // Auction time isn't in the lot data or a data attribute — fall back to the
+  // same free-text scan extractPropertyDetails uses.
+  const clean = html.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+  let auctionTime = '';
+  const tMatch = clean.match(/(?:auction|commenc|start)[^0-9]{0,20}(\d{1,2})[.:](\d{2})\s*(am|pm)/i) ||
+                 clean.match(/(?:at|from)\s+(\d{1,2})[.:](\d{2})\s*(am|pm)/i);
+  if (tMatch) auctionTime = `${tMatch[1]}:${tMatch[2]} ${tMatch[3].toUpperCase()}`;
+
+  return { address, guidePrice, bedrooms, auctionDate, auctionTime, platform: 'Savills', postcode };
+}
+
 // ============================================================
 // CRM DATA HELPERS
 // ============================================================
@@ -4818,7 +4862,8 @@ async function handleApiRoutes(request, env, url, ctx) {
           headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
         });
         const html = await res.text();
-        const property = extractPropertyDetails(html, propertyUrl);
+        const property = (/savills\.co\.uk/i.test(propertyUrl) && extractSavillsDetails(html, propertyUrl))
+          || extractPropertyDetails(html, propertyUrl);
         return corsResponse({ success: true, property });
       } catch (err) {
         return corsResponse({ success: false, message: 'Could not fetch that URL. Check it is publicly accessible.' }, 400);
