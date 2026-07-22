@@ -12863,14 +12863,21 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                             <div style={{ fontSize: '15px', fontWeight: '600', color: '#0f172a' }}>AI Usage</div>
                             <button onClick={loadAiUsage} disabled={aiUsageLoading} style={{ padding: '6px 12px', backgroundColor: '#fff', color: '#475569', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '11px', fontWeight: '600', cursor: aiUsageLoading ? 'default' : 'pointer' }}>{aiUsageLoading ? '…' : 'Refresh'}</button>
                           </div>
-                          <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '20px' }}>How many times each AI provider has actually served an insight request. Claude is tried first when configured, then the free providers in order, with Cloudflare Workers AI as a guaranteed fallback. Free-tier caps vary by provider and plan — check each provider's own dashboard for your exact quota.</div>
+                          <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '20px' }}>How many times each AI provider has actually served an insight request. Claude is tried first when configured, then the free providers in order, with Cloudflare Workers AI as a guaranteed fallback. Anthropic, Groq and Mistral report their own live rate-limit quota on every response, shown below as "Live from provider" — the rest don't expose this, so check their own dashboard for exact quota.</div>
                           {!aiUsageData && aiUsageLoading && <div style={{ fontSize: '12px', color: '#94a3b8' }}>Loading…</div>}
                           {aiUsageData && (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
                               {AI_PROVIDER_ORDER.map(key => {
-                                const u = usage[key] || { today: 0, total: 0 };
+                                const u = usage[key] || { today: 0, total: 0, quota: null };
                                 const isConfigured = !!configured[key];
                                 const barPct = Math.round((u.today / maxToday) * 100);
+                                const q = u.quota;
+                                const reqPct = q?.limitRequests && q?.remainingRequests != null
+                                  ? Math.max(0, Math.min(100, 100 - (parseFloat(q.remainingRequests) / parseFloat(q.limitRequests)) * 100))
+                                  : null;
+                                const tokPct = q?.limitTokens && q?.remainingTokens != null
+                                  ? Math.max(0, Math.min(100, 100 - (parseFloat(q.remainingTokens) / parseFloat(q.limitTokens)) * 100))
+                                  : null;
                                 return (
                                   <div key={key} style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '10px', padding: '14px 18px', opacity: isConfigured ? 1 : 0.55 }}>
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
@@ -12891,6 +12898,33 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                     <div style={{ marginTop: '10px', height: '6px', borderRadius: '3px', backgroundColor: '#e2e8f0', overflow: 'hidden' }}>
                                       <div style={{ width: `${barPct}%`, height: '100%', backgroundColor: isConfigured ? '#059669' : '#cbd5e1', borderRadius: '3px' }} />
                                     </div>
+                                    {q && (
+                                      <div style={{ marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                        {reqPct != null && (
+                                          <div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#64748b' }}>
+                                              <span>Live from {AI_PROVIDER_LABELS[key]} — requests</span>
+                                              <span>{q.remainingRequests} / {q.limitRequests} left</span>
+                                            </div>
+                                            <div style={{ height: '4px', borderRadius: '2px', backgroundColor: '#e2e8f0', overflow: 'hidden', marginTop: '2px' }}>
+                                              <div style={{ width: `${reqPct}%`, height: '100%', backgroundColor: '#2563eb', borderRadius: '2px' }} />
+                                            </div>
+                                          </div>
+                                        )}
+                                        {tokPct != null && (
+                                          <div>
+                                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: '#64748b' }}>
+                                              <span>Live from {AI_PROVIDER_LABELS[key]} — tokens</span>
+                                              <span>{q.remainingTokens} / {q.limitTokens} left</span>
+                                            </div>
+                                            <div style={{ height: '4px', borderRadius: '2px', backgroundColor: '#e2e8f0', overflow: 'hidden', marginTop: '2px' }}>
+                                              <div style={{ width: `${tokPct}%`, height: '100%', backgroundColor: '#7c3aed', borderRadius: '2px' }} />
+                                            </div>
+                                          </div>
+                                        )}
+                                        <div style={{ fontSize: '9px', color: '#94a3b8' }}>Captured {new Date(q.capturedAt).toLocaleString()} — resets {q.resetRequests || q.resetTokens || 'per provider window'}</div>
+                                      </div>
+                                    )}
                                   </div>
                                 );
                               })}

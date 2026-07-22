@@ -3164,6 +3164,21 @@ function schemaAsPromptInstructions(schema) {
   return `Respond with ONLY a single valid JSON object (no markdown fences, no commentary) matching this schema:\n${JSON.stringify(schema, null, 2)}`;
 }
 
+// Reads provider-reported rate-limit headers off a fetch Response, trying each
+// candidate header name per field in order (providers vary in naming/casing).
+// Returns null if none of the fields were present, so callers can tell "not
+// supported by this provider" apart from "supported but zero remaining".
+function extractRateLimitHeaders(res, fields) {
+  const out = {};
+  for (const [field, headerNames] of Object.entries(fields)) {
+    for (const h of headerNames) {
+      const v = res.headers.get(h);
+      if (v != null) { out[field] = v; break; }
+    }
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 async function callAnthropic({ system, prompt, schema, env }) {
   if (!env.ANTHROPIC_API_KEY) return null;
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -3182,12 +3197,20 @@ async function callAnthropic({ system, prompt, schema, env }) {
       output_config: { format: { type: 'json_schema', schema } },
     }),
   });
+  const quota = extractRateLimitHeaders(res, {
+    limitRequests: ['anthropic-ratelimit-requests-limit'],
+    remainingRequests: ['anthropic-ratelimit-requests-remaining'],
+    resetRequests: ['anthropic-ratelimit-requests-reset'],
+    limitTokens: ['anthropic-ratelimit-tokens-limit', 'anthropic-ratelimit-input-tokens-limit'],
+    remainingTokens: ['anthropic-ratelimit-tokens-remaining', 'anthropic-ratelimit-input-tokens-remaining'],
+    resetTokens: ['anthropic-ratelimit-tokens-reset', 'anthropic-ratelimit-input-tokens-reset'],
+  });
   if (!res.ok) throw new Error(`Anthropic HTTP ${res.status}: ${await res.text()}`);
   const data = await res.json();
   if (data.stop_reason === 'refusal') throw new Error('Anthropic declined the request');
   const textBlock = (data.content || []).find(b => b.type === 'text');
   if (!textBlock) throw new Error('Anthropic returned no content');
-  return { text: textBlock.text, provider: 'anthropic' };
+  return { text: textBlock.text, provider: 'anthropic', quota };
 }
 
 async function callGroq({ system, prompt, schema, env }) {
@@ -3205,11 +3228,19 @@ async function callGroq({ system, prompt, schema, env }) {
       max_tokens: 2000,
     }),
   });
+  const quota = extractRateLimitHeaders(res, {
+    limitRequests: ['x-ratelimit-limit-requests'],
+    remainingRequests: ['x-ratelimit-remaining-requests'],
+    resetRequests: ['x-ratelimit-reset-requests'],
+    limitTokens: ['x-ratelimit-limit-tokens'],
+    remainingTokens: ['x-ratelimit-remaining-tokens'],
+    resetTokens: ['x-ratelimit-reset-tokens'],
+  });
   if (!res.ok) throw new Error(`Groq HTTP ${res.status}: ${await res.text()}`);
   const data = await res.json();
   const text = data.choices?.[0]?.message?.content;
   if (!text) throw new Error('Groq returned no content');
-  return { text, provider: 'groq' };
+  return { text, provider: 'groq', quota };
 }
 
 async function callGemini({ system, prompt, schema, env }) {
@@ -3265,11 +3296,19 @@ async function callMistral({ system, prompt, schema, env }) {
       response_format: { type: 'json_object' },
     }),
   });
+  const quota = extractRateLimitHeaders(res, {
+    limitRequests: ['x-ratelimit-limit-requests'],
+    remainingRequests: ['x-ratelimit-remaining-requests'],
+    resetRequests: ['x-ratelimit-reset-requests'],
+    limitTokens: ['x-ratelimit-limit-tokens'],
+    remainingTokens: ['x-ratelimit-remaining-tokens'],
+    resetTokens: ['x-ratelimit-reset-tokens'],
+  });
   if (!res.ok) throw new Error(`Mistral HTTP ${res.status}: ${await res.text()}`);
   const data = await res.json();
   const text = data.choices?.[0]?.message?.content;
   if (!text) throw new Error('Mistral returned no content');
-  return { text, provider: 'mistral' };
+  return { text, provider: 'mistral', quota };
 }
 
 async function callQwen({ system, prompt, schema, env }) {
@@ -3402,17 +3441,24 @@ const AI_PROVIDER_NAMES = ['anthropic', 'groq', 'gemini', 'mistral', 'qwen', 'op
 // Lifetime + per-day (UTC) call counters per provider, keyed in the same KV
 // used for rate limiting. Best-effort: never let a KV hiccup fail the AI
 // request that triggered it.
-async function incrementAiUsage(env, provider) {
+async function incrementAiUsage(env, provider, quota) {
   if (!env.SCRAPER_KV || !provider) return;
   try {
     const day = new Date().toISOString().slice(0, 10);
     const dayKey = `ai-usage:day:${day}:${provider}`;
     const totalKey = `ai-usage:total:${provider}`;
     const [dayCount, totalCount] = await Promise.all([env.SCRAPER_KV.get(dayKey), env.SCRAPER_KV.get(totalKey)]);
-    await Promise.all([
+    const puts = [
       env.SCRAPER_KV.put(dayKey, String((parseInt(dayCount) || 0) + 1), { expirationTtl: 172800 }),
       env.SCRAPER_KV.put(totalKey, String((parseInt(totalCount) || 0) + 1)),
-    ]);
+    ];
+    // Snapshot of the provider's own rate-limit headers from its most recent
+    // response — only Anthropic/Groq/Mistral send these, so quota is undefined
+    // for the rest and we simply skip storing anything for them.
+    if (quota) {
+      puts.push(env.SCRAPER_KV.put(`ai-usage:quota:${provider}`, JSON.stringify({ ...quota, capturedAt: new Date().toISOString() }), { expirationTtl: 172800 }));
+    }
+    await Promise.all(puts);
   } catch (err) {
     console.error('incrementAiUsage failed:', err.message);
   }
@@ -3438,7 +3484,7 @@ async function generateInsight({ system, prompt, schema, requiredFields = [], en
     if (!parsed || typeof parsed !== 'object') { lastError = new Error(`${outcome.provider} returned unparseable JSON`); continue; }
     const missing = requiredFields.filter(f => !(f in parsed));
     if (missing.length) { lastError = new Error(`${outcome.provider} response missing fields: ${missing.join(', ')}`); continue; }
-    await incrementAiUsage(env, outcome.provider);
+    await incrementAiUsage(env, outcome.provider, outcome.quota);
     return { result: parsed, provider: outcome.provider };
   }
   throw lastError || new Error('No AI provider is configured — set at least one of ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, QWEN_API_KEY, HUGGINGFACE_API_KEY, ROUTEWAY_API_KEY, or bind Workers AI');
@@ -5636,11 +5682,14 @@ async function handleApiRoutes(request, env, url, ctx) {
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       const day = new Date().toISOString().slice(0, 10);
       const entries = await Promise.all(AI_PROVIDER_NAMES.map(async (p) => {
-        const [todayCount, totalCount] = await Promise.all([
+        const [todayCount, totalCount, quotaRaw] = await Promise.all([
           env.SCRAPER_KV.get(`ai-usage:day:${day}:${p}`),
           env.SCRAPER_KV.get(`ai-usage:total:${p}`),
+          env.SCRAPER_KV.get(`ai-usage:quota:${p}`),
         ]);
-        return [p, { today: parseInt(todayCount) || 0, total: parseInt(totalCount) || 0 }];
+        let quota = null;
+        if (quotaRaw) { try { quota = JSON.parse(quotaRaw); } catch { quota = null; } }
+        return [p, { today: parseInt(todayCount) || 0, total: parseInt(totalCount) || 0, quota }];
       }));
       const configured = {
         anthropic: !!env.ANTHROPIC_API_KEY,
