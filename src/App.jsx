@@ -1920,8 +1920,23 @@ export default function App({ user = {}, onLogout }) {
 
   const handleDeleteProperty = (id) => {
     if (window.confirm('Delete this property from the pipeline?')) {
+      const toDelete = properties.find(p => p.id === id);
       setProperties(properties.filter(p => p.id !== id));
       if (currentViewProperty?.id === id) setCurrentViewProperty(null);
+      // Removing it from local state only drops it from THIS user's copy — the
+      // debounced /api/crm-data autosave replaces just this user's own D1 rows,
+      // so a teammate's older, still-undeleted copy of the same property would
+      // otherwise keep winning the merge and reappear on refresh. Tombstone it
+      // via the single-row ingest route so the delete is visible immediately,
+      // regardless of whose copy is newest.
+      if (toDelete) {
+        const token = localStorage.getItem('crm_session');
+        fetch('/api/properties/ingest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+          body: JSON.stringify({ ...toDelete, deleted: true }),
+        }).catch(() => {});
+      }
     }
   };
 
