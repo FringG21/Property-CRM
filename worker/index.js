@@ -620,10 +620,9 @@ function mergeUserData(datasets) {
     merged[key] = [];
     for (const dataset of sorted) {
       for (const record of (dataset[key] || [])) {
-        if (!seen.has(record.id) && !record.deleted) {
-          seen.add(record.id);
-          merged[key].push(record);
-        }
+        if (seen.has(record.id)) continue;
+        seen.add(record.id);
+        if (!record.deleted) merged[key].push(record);
       }
     }
   }
@@ -712,8 +711,8 @@ async function syncUserBlobToD1(env, userId, blob, savedAt) {
 }
 
 // Rebuild the merged dataset the frontend expects, from D1.
-// Mirrors mergeUserData(): newest updated_at wins per id, deleted rows are
-// skipped without claiming the id (so an older live copy can still surface).
+// Mirrors mergeUserData(): newest updated_at wins per id — including a
+// deleted verdict, which must not fall through to an older live copy.
 async function readCrmFromD1(env) {
   const keys = Object.keys(D1_ENTITY_TABLES);
   const results = await env.CRM_DB.batch(keys.map(k =>
@@ -724,8 +723,9 @@ async function readCrmFromD1(env) {
     const seen = new Set();
     merged[key] = [];
     for (const row of (results[i]?.results || [])) {
-      if (row.deleted || seen.has(row.id)) continue;
+      if (seen.has(row.id)) continue;
       seen.add(row.id);
+      if (row.deleted) continue;
       try { merged[key].push(JSON.parse(row.data)); } catch {}
     }
   });
