@@ -4168,6 +4168,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
               { key: 'mainReport', label: 'Assessment report', accept: '.html,.htm,.pdf' },
               { key: 'sprift', label: 'Sprift report', accept: '.html,.htm,.pdf' },
               { key: 'legalPack', label: 'Legal pack', accept: '.pdf,.zip,.doc,.docx' },
+              { key: 'legalSummary', label: 'Legal summary', accept: '.pdf,.doc,.docx,.txt' },
               { key: 'surveyReport', label: 'Survey report', accept: '.pdf' },
               { key: 'rightmovePlus', label: 'RightMove Plus report', accept: '.pdf,.html,.htm' },
             ];
