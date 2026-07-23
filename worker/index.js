@@ -6400,6 +6400,47 @@ async function handleApiRoutes(request, env, url, ctx) {
       return corsResponse({ success: true, property });
     }
 
+    // POST /api/properties/delete — globally tombstone a property across EVERY
+    // user's copy. The pipeline is merged from one D1 row per user per record
+    // (newest-updated wins), so deleting only the caller's own row lets a
+    // teammate's older, still-undeleted copy win the next merge and resurrect
+    // it — and the caller's own full-blob autosave (syncUserBlobToD1 wipes and
+    // re-inserts only their rows) erases any single-user tombstone 2s later.
+    // Marking every user's row deleted survives that autosave and makes the
+    // delete stick for the whole team.
+    if (url.pathname === '/api/properties/delete' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+
+      const allowed = await checkRateLimit(env, `delete:${session.userId}`, 30);
+      if (!allowed) return corsResponse({ success: false, message: 'Too many requests — please slow down' }, 429);
+
+      const { id } = await request.json();
+      if (id == null) return corsResponse({ success: false, message: 'id is required' }, 400);
+      const idStr = String(id);
+      const savedAt = new Date().toISOString();
+
+      await env.CRM_DB.prepare(
+        'UPDATE properties SET deleted = 1, updated_at = ? WHERE id = ?'
+      ).bind(savedAt, idStr).run();
+
+      // Keep the KV rollback blobs consistent so the D1-read-failure fallback
+      // (mergeUserData) also treats it as deleted, for every user that held it.
+      const userIds = (await env.SCRAPER_KV.get('crm:user-ids', 'json')) || [];
+      for (const uid of userIds) {
+        const blob = await env.SCRAPER_KV.get(`crm:user:${uid}`, 'json');
+        if (!blob || !Array.isArray(blob.properties)) continue;
+        let changed = false;
+        const properties = blob.properties.map(p => {
+          if (p && String(p.id) === idStr && !p.deleted) { changed = true; return { ...p, deleted: true }; }
+          return p;
+        });
+        if (changed) await env.SCRAPER_KV.put(`crm:user:${uid}`, JSON.stringify({ ...blob, properties }));
+      }
+
+      return corsResponse({ success: true, id: idStr });
+    }
+
     // POST /api/ingest/:entity — generic single-record upsert for external
     // callers (the Chrome extension). Identical mechanism to
     // /api/properties/ingest above, generalised to any capturable entity.
