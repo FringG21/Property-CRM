@@ -1026,8 +1026,11 @@ function extractPropertyType(text) {
 }
 
 function extractBedrooms(text) {
-  const m = String(text || '').match(/\b(\d+)\s*bed(?:room)?s?\b/i);
-  return m ? Number(m[1]) : 0;
+  // Negative lookbehind guards against room-dimension decimals ("... 4.10 x 3.71 Bedroom 2 ...")
+  // where stripped HTML loses the line break and "71" reads as a bedroom count.
+  const m = String(text || '').match(/(?<!\.)\b(\d{1,2})\s*bed(?:room)?s?\b/i);
+  const n = m ? Number(m[1]) : 0;
+  return n > 0 && n <= 20 ? n : 0;
 }
 
 const MONTHS_MAP = { january: '01', february: '02', march: '03', april: '04', may: '05', june: '06', july: '07', august: '08', september: '09', october: '10', november: '11', december: '12' };
