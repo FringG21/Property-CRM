@@ -6028,7 +6028,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                               <span>Legal pack{total ? ` · ${total} file${total > 1 ? 's' : ''}` : ''}</span>
                               <label style={{ fontSize: '11px', fontWeight: '600', color: '#7C3AED', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', textTransform: 'none', letterSpacing: 0 }}>
                                 <Plus size={13} /> Add files
-                                <input type="file" multiple accept=".pdf,.zip,.doc,.docx,.jpg,.jpeg,.png" style={{ display: 'none' }} onChange={handleLegalPackUpload} />
+                                <input type="file" multiple accept=".pdf,.zip,.doc,.docx,.jpg,.jpeg,.png,.html,.htm" style={{ display: 'none' }} onChange={handleLegalPackUpload} />
                               </label>
                             </div>
                             {total === 0 ? (
