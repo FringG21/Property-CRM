@@ -4167,7 +4167,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
             const FILE_KEYS = [
               { key: 'mainReport', label: 'Assessment report', accept: '.html,.htm,.pdf' },
               { key: 'sprift', label: 'Sprift report', accept: '.html,.htm,.pdf' },
-              { key: 'legalPack', label: 'Legal pack', accept: '.pdf,.zip,.doc,.docx' },
+              { key: 'legalPack', label: 'Legal pack', accept: '.pdf,.zip,.doc,.docx,.html,.htm' },
               { key: 'legalSummary', label: 'Legal summary', accept: '.pdf,.doc,.docx,.txt' },
               { key: 'surveyReport', label: 'Survey report', accept: '.pdf' },
               { key: 'rightmovePlus', label: 'RightMove Plus report', accept: '.pdf,.html,.htm' },
