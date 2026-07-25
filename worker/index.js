@@ -779,12 +779,12 @@ async function syncPropertyComps(env, userId, property, savedAt) {
 // common case; 'manual' is the fallback for anything else.
 const VALUATION_NUMERIC_FIELDS = ['gdvConservative', 'gdvBase', 'gdvOptimistic', 'maxBid', 'totalInvestment', 'netProfit', 'roi'];
 async function maybeSnapshotValuation(env, userId, oldProperty, newProperty, savedAt) {
-  if (!newProperty || newProperty.id == null) return;
+  if (!newProperty || newProperty.id == null) return { changed: false };
   const oldAn = oldProperty?.analytics || {};
   const newAn = newProperty?.analytics || {};
   const num = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
   const changed = VALUATION_NUMERIC_FIELDS.some(k => num(oldAn[k]) !== num(newAn[k])) || (oldAn.verdict || null) !== (newAn.verdict || null);
-  if (!changed) return;
+  if (!changed) return { changed: false };
   const margin = newAn.profitMargin ?? newAn.margin ?? null;
   const source = (oldAn.reportSummary !== newAn.reportSummary || JSON.stringify(oldAn.redFlags || []) !== JSON.stringify(newAn.redFlags || [])) ? 'report' : 'manual';
   const snapshot = {
@@ -800,6 +800,7 @@ async function maybeSnapshotValuation(env, userId, oldProperty, newProperty, sav
     snapshot.gdvConservative, snapshot.gdvBase, snapshot.gdvOptimistic, snapshot.maxBid, snapshot.totalInvestment,
     snapshot.netProfit, snapshot.margin, snapshot.roi, snapshot.verdict, null, JSON.stringify(snapshot)
   ).run();
+  return { changed: true, source };
 }
 
 // Rebuild the merged dataset the frontend expects, from D1.
@@ -3723,12 +3724,15 @@ async function incrementAiUsage(env, provider, quota) {
   if (!env.SCRAPER_KV || !provider) return;
   try {
     const day = new Date().toISOString().slice(0, 10);
+    const month = day.slice(0, 7); // YYYY-MM — the day bucket's 48h TTL can't support a monthly spend cap (Step 5.2)
     const dayKey = `ai-usage:day:${day}:${provider}`;
     const totalKey = `ai-usage:total:${provider}`;
-    const [dayCount, totalCount] = await Promise.all([env.SCRAPER_KV.get(dayKey), env.SCRAPER_KV.get(totalKey)]);
+    const monthKey = `ai-usage:month:${month}:${provider}`;
+    const [dayCount, totalCount, monthCount] = await Promise.all([env.SCRAPER_KV.get(dayKey), env.SCRAPER_KV.get(totalKey), env.SCRAPER_KV.get(monthKey)]);
     const puts = [
       env.SCRAPER_KV.put(dayKey, String((parseInt(dayCount) || 0) + 1), { expirationTtl: 172800 }),
       env.SCRAPER_KV.put(totalKey, String((parseInt(totalCount) || 0) + 1)),
+      env.SCRAPER_KV.put(monthKey, String((parseInt(monthCount) || 0) + 1), { expirationTtl: 2764800 }), // ~32 days
     ];
     // Snapshot of the provider's own rate-limit headers from its most recent
     // response — only Anthropic/Groq/Mistral send these, so quota is undefined
@@ -3742,13 +3746,59 @@ async function incrementAiUsage(env, provider, quota) {
   }
 }
 
+// Phase 5, Step 5.2 (property-view-v2 plan), Decision 2: a monthly ceiling on
+// AI *calls* — not true £ spend, since nothing in this codebase tracks token
+// counts or per-provider pricing today, and building that out is a separate,
+// speculative feature with no paid provider even configured to test it
+// against (ANTHROPIC_API_KEY is deliberately unset; the rest are free-tier).
+// Call count is the honest proxy available now. 0 or unset = no cap.
+const PAID_AI_PROVIDERS = ['anthropic', 'groq', 'gemini', 'mistral', 'qwen', 'openrouter', 'huggingface', 'routeway'];
+
+async function getAiSpendSettings(env) {
+  const stored = (await env.SCRAPER_KV.get('ai:spend-settings', 'json')) || {};
+  return { monthlyCallCap: 0, ...stored }; // default: no cap until explicitly set
+}
+
+async function setAiSpendSettings(env, patch) {
+  const current = await getAiSpendSettings(env);
+  const next = { ...current, ...patch };
+  await env.SCRAPER_KV.put('ai:spend-settings', JSON.stringify(next));
+  return next;
+}
+
+async function getMonthlyPaidAiCallCount(env) {
+  const month = new Date().toISOString().slice(0, 7);
+  const counts = await Promise.all(PAID_AI_PROVIDERS.map(p => env.SCRAPER_KV.get(`ai-usage:month:${month}:${p}`)));
+  return counts.reduce((sum, c) => sum + (parseInt(c) || 0), 0);
+}
+
+// Fail-open on any KV problem, for the same reason incrementAiUsage is
+// best-effort: this runs on every generateInsight call, so a KV hiccup here
+// must degrade to "no cap" rather than break every AI route in the app.
+async function isAiSpendCapExceeded(env) {
+  if (!env.SCRAPER_KV) return false;
+  try {
+    const { monthlyCallCap } = await getAiSpendSettings(env);
+    if (!monthlyCallCap || monthlyCallCap <= 0) return false;
+    return (await getMonthlyPaidAiCallCount(env)) >= monthlyCallCap;
+  } catch (err) {
+    console.error('isAiSpendCapExceeded failed (treating as uncapped):', err.message);
+    return false;
+  }
+}
+
 // Tries each configured provider in priority order; validates the parsed JSON
 // has every field in requiredFields before accepting it, so a provider that
 // silently drops a field falls through to the next one instead of shipping
 // incomplete data to the client.
 async function generateInsight({ system, prompt, schema, requiredFields = [], env }) {
   let lastError = null;
-  for (const call of AI_PROVIDER_CHAIN) {
+  // Spend cap (5.2, Decision 2): never hard-stop — once the monthly ceiling is
+  // hit, drop straight to the free Workers AI binding instead of trying paid
+  // providers first and failing over.
+  const capExceeded = await isAiSpendCapExceeded(env);
+  const chain = capExceeded ? [callWorkersAI] : AI_PROVIDER_CHAIN;
+  for (const call of chain) {
     let outcome;
     try {
       outcome = await call({ system, prompt, schema, env });
@@ -6204,15 +6254,17 @@ async function handleApiRoutes(request, env, url, ctx) {
       const session = await getSession(env, request);
       if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
       const day = new Date().toISOString().slice(0, 10);
+      const month = day.slice(0, 7);
       const entries = await Promise.all(AI_PROVIDER_NAMES.map(async (p) => {
-        const [todayCount, totalCount, quotaRaw] = await Promise.all([
+        const [todayCount, totalCount, monthCount, quotaRaw] = await Promise.all([
           env.SCRAPER_KV.get(`ai-usage:day:${day}:${p}`),
           env.SCRAPER_KV.get(`ai-usage:total:${p}`),
+          env.SCRAPER_KV.get(`ai-usage:month:${month}:${p}`),
           env.SCRAPER_KV.get(`ai-usage:quota:${p}`),
         ]);
         let quota = null;
         if (quotaRaw) { try { quota = JSON.parse(quotaRaw); } catch { quota = null; } }
-        return [p, { today: parseInt(todayCount) || 0, total: parseInt(totalCount) || 0, quota }];
+        return [p, { today: parseInt(todayCount) || 0, month: parseInt(monthCount) || 0, total: parseInt(totalCount) || 0, quota }];
       }));
       const configured = {
         anthropic: !!env.ANTHROPIC_API_KEY,
@@ -6225,7 +6277,26 @@ async function handleApiRoutes(request, env, url, ctx) {
         routeway: !!env.ROUTEWAY_API_KEY,
         'workers-ai': !!env.AI,
       };
-      return corsResponse({ success: true, day, usage: Object.fromEntries(entries), configured });
+      const { monthlyCallCap } = await getAiSpendSettings(env);
+      const monthlyPaidCalls = await getMonthlyPaidAiCallCount(env);
+      return corsResponse({
+        success: true, day, month, usage: Object.fromEntries(entries), configured,
+        spendCap: { monthlyCallCap, monthlyPaidCalls, capExceeded: monthlyCallCap > 0 && monthlyPaidCalls >= monthlyCallCap },
+      });
+    }
+
+    // POST /api/ai/spend-cap — set the monthly AI-call ceiling (Step 5.2,
+    // Decision 2). 0 (default) means no cap. Backend-ready ahead of a Settings
+    // UI control for it.
+    if (url.pathname === '/api/ai/spend-cap' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const { monthlyCallCap } = await request.json();
+      if (monthlyCallCap != null && (typeof monthlyCallCap !== 'number' || monthlyCallCap < 0)) {
+        return corsResponse({ success: false, message: 'monthlyCallCap must be a non-negative number' }, 400);
+      }
+      const settings = await setAiSpendSettings(env, { monthlyCallCap: monthlyCallCap ?? 0 });
+      return corsResponse({ success: true, settings });
     }
 
     // --------------------------------------------------------
@@ -6841,7 +6912,18 @@ async function handleApiRoutes(request, env, url, ctx) {
           try {
             await syncPropertyBidsAndScenarios(env, userId, property, savedAt);
             await syncPropertyComps(env, userId, property, savedAt);
-            await maybeSnapshotValuation(env, userId, property?.id != null ? oldPropertiesById[String(property.id)] : null, property, savedAt);
+            const valuation = await maybeSnapshotValuation(env, userId, property?.id != null ? oldPropertiesById[String(property.id)] : null, property, savedAt);
+            // Auto-trigger (5.2): a report parse just moved the numbers — auto-run
+            // the AI review + market comparison with no clicks. input_hash inside
+            // runDealPipeline means an unrelated re-save of the same report data
+            // won't re-spend tokens; the existing per-user AI rate limit still
+            // applies to the calls the pipeline makes.
+            if (valuation.changed && valuation.source === 'report' && anyAiProviderConfigured(env)) {
+              ctx.waitUntil(
+                runDealPipeline(env, { userId, property, reason: 'report-parsed-auto' })
+                  .catch(err => console.error('Auto-triggered pipeline failed for property', property.id, err))
+              );
+            }
           } catch (err) {
             console.error('Structured-table sync failed for property', property?.id, err);
           }
@@ -6892,8 +6974,15 @@ async function handleApiRoutes(request, env, url, ctx) {
 
       try {
         await syncPropertyBidsAndScenarios(env, userId, property, savedAt);
-        await maybeSnapshotValuation(env, userId, oldProperty, property, savedAt);
+        const valuation = await maybeSnapshotValuation(env, userId, oldProperty, property, savedAt);
         await syncPropertyComps(env, userId, property, savedAt);
+        // Auto-trigger (5.2) — see the matching comment in POST /api/crm-data above.
+        if (valuation.changed && valuation.source === 'report' && anyAiProviderConfigured(env)) {
+          ctx.waitUntil(
+            runDealPipeline(env, { userId, property, reason: 'report-parsed-auto' })
+              .catch(err => console.error('Auto-triggered pipeline failed for property', property.id, err))
+          );
+        }
       } catch (err) {
         console.error('Structured-table sync failed for property', property.id, err);
       }
