@@ -632,6 +632,7 @@ export default function App({ user = {}, onLogout }) {
   const [editingKpi, setEditingKpi] = useState(false);
   const [fetchingLotResult, setFetchingLotResult] = useState(false);
   const [propCanvasTab, setPropCanvasTab] = useState('overview');
+  const [docsHighlightKey, setDocsHighlightKey] = useState(null);
   const [compSort, setCompSort] = useState('default'); // 'default' | 'asc' | 'desc'
   const [narrativeTab, setNarrativeTab] = useState(null); // null = auto (AI review when scored, else report)
   const [bidAmountInput, setBidAmountInput] = useState('');
@@ -1884,6 +1885,9 @@ export default function App({ user = {}, onLogout }) {
     fetchReportJobStatus(currentViewProperty.id).then(job => { if (!cancelled && job !== undefined) setReportJob(job); });
     return () => { cancelled = true; };
   }, [currentViewProperty?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Clear the sidebar "jump to this document" highlight once the user leaves the Documents tab.
+  useEffect(() => { if (propCanvasTab !== 'documents') setDocsHighlightKey(null); }, [propCanvasTab]);
 
   // Poll every 15s ONLY while a job is in flight and the canvas is open.
   // Re-runs (and re-arms the interval) on each status transition; when the
@@ -4168,9 +4172,10 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
               { key: 'mainReport', label: 'Assessment report', accept: '.html,.htm,.pdf' },
               { key: 'sprift', label: 'Sprift report', accept: '.html,.htm,.pdf' },
               { key: 'legalPack', label: 'Legal pack', accept: '.pdf,.zip,.doc,.docx,.html,.htm' },
-              { key: 'legalSummary', label: 'Legal summary', accept: '.pdf,.doc,.docx,.txt' },
-              { key: 'surveyReport', label: 'Survey report', accept: '.pdf' },
+              { key: 'legalSummary', label: 'Legal summary', accept: '.pdf,.html,.htm,.doc,.docx,.txt,.zip,.jpg,.jpeg,.png' },
+              { key: 'surveyReport', label: 'Survey report', accept: '.pdf,.html,.htm,.doc,.docx,.txt,.zip,.jpg,.jpeg,.png' },
               { key: 'rightmovePlus', label: 'RightMove Plus report', accept: '.pdf,.html,.htm' },
+              { key: 'additionalInfo', label: 'Additional information', accept: '.pdf,.html,.htm,.doc,.docx,.txt,.zip,.jpg,.jpeg,.png' },
             ];
             const surveyJobs = currentViewProperty.surveyJobs || [];
             const latestJob = surveyJobs[surveyJobs.length - 1];
@@ -4437,7 +4442,7 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     { k: 'overview', l: 'Overview' },
                     { k: 'comparables', l: 'Comparables', count: ((an.compsList?.length || 0) + (intel.connectors?.landRegistry?.data?.items?.length || 0) + ((currentViewProperty.comparables || []).filter(c => !c.fromIntelligence).length)) || null },
                     { k: 'intel', l: 'Intelligence', dot: intel.lastRun },
-                    { k: 'financials', l: 'Deal Analysis' },
+                    { k: 'financials', l: 'Costs & GDV' },
                     { k: 'brr', l: 'BRR Analysis' },
                     { k: 'documents', l: 'Documents', count: (Object.values(propFiles).filter(Boolean).length + (currentViewProperty.customDocs?.length || 0) + (currentViewProperty.legalPackFiles?.length || 0)) || null },
                     { k: 'tasks', l: 'Tasks', count: tasks.filter(t => t.linkedType === 'Property' && t.linkedId === currentViewProperty.id).length || null },
@@ -4562,18 +4567,21 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     </div>
                   </div>
 
-                  {/* Deal score */}
-                  {an.bidStrength && (() => {
-                    const score = an.bidStrength === 'Strong' ? 78 : an.bidStrength === 'Conservative' ? 52 : 34;
-                    const sc = an.bidStrength === 'Strong' ? '#4ade80' : an.bidStrength === 'Conservative' ? '#fbbf24' : '#f87171';
+                  {/* Deal score — real AI score when we have one; otherwise the bidStrength chip alone, never an invented number */}
+                  {(an.aiDealScore != null || an.bidStrength) && (() => {
+                    const hasScore = an.aiDealScore != null;
+                    const score = hasScore ? Math.round(parseFloat(an.aiDealScore)) : null;
+                    const sc = an.bidStrength === 'Strong' ? '#4ade80' : an.bidStrength === 'Conservative' ? '#fbbf24' : an.bidStrength ? '#f87171' : '#94a3b8';
                     return (
                       <div style={{ padding: '12px 16px', borderBottom: '1px solid #1e293b', display: 'flex', alignItems: 'center', gap: '12px' }}>
-                        <div style={{ width: '48px', height: '48px', borderRadius: '8px', background: '#1e293b', border: `1px solid ${sc}22`, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                          <div style={{ fontSize: '20px', fontWeight: '500', color: sc, lineHeight: 1 }}>{score}</div>
-                          <div style={{ fontSize: '10px', color: '#475569' }}>/ 100</div>
-                        </div>
+                        {hasScore && (
+                          <div style={{ width: '48px', height: '48px', borderRadius: '8px', background: '#1e293b', border: `1px solid ${sc}22`, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                            <div style={{ fontSize: '20px', fontWeight: '500', color: sc, lineHeight: 1 }}>{score}</div>
+                            <div style={{ fontSize: '10px', color: '#475569' }}>/ 100</div>
+                          </div>
+                        )}
                         <div>
-                          <div style={{ fontSize: '12px', fontWeight: '500', color: '#f1f5f9', marginBottom: '5px' }}>{an.bidStrength} deal</div>
+                          <div style={{ fontSize: '12px', fontWeight: '500', color: '#f1f5f9', marginBottom: '5px' }}>{an.bidStrength ? `${an.bidStrength} deal` : 'Deal score'}</div>
                           <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px' }}>
                             {netProfit > 0 && <span style={{ padding: '2px 5px', borderRadius: '3px', fontSize: '10px', fontWeight: '500', background: '#052e16', color: '#86efac' }}>£{(netProfit / 1000).toFixed(0)}k profit</span>}
                             {an.comps && <span style={{ padding: '2px 5px', borderRadius: '3px', fontSize: '10px', fontWeight: '500', background: '#1e293b', color: '#64748b' }}>{an.comps} comps</span>}
@@ -4678,57 +4686,43 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     </div>
                   )}
 
-                  {/* Documents */}
+                  {/* Documents — read-only status; all upload/delete/re-parse lives in the Documents tab */}
                   <div style={{ padding: '12px 16px', borderBottom: '1px solid #1e293b' }}>
                     <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.07em', color: '#475569', marginBottom: '8px' }}>Documents</div>
-                    {FILE_KEYS.map(({ key, label, accept }) => {
+                    {FILE_KEYS.map(({ key, label }) => {
+                      const jump = () => { setPropCanvasTab('documents'); setDocsHighlightKey(key); };
                       if (key === 'legalPack') {
                         const lpCount = (currentViewProperty.legalPackFiles || []).length + (propFiles.legalPack ? 1 : 0);
                         return (
-                          <div key={key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: '0.5px solid #1e293b', fontSize: '11px' }}>
+                          <button key={key} onClick={jump} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', padding: '5px 0', borderBottom: '0.5px solid #1e293b', fontSize: '11px', background: 'none', border: 'none', borderBottomWidth: '0.5px', borderBottomStyle: 'solid', borderBottomColor: '#1e293b', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', minHeight: '28px' }}>
                             <span style={{ color: lpCount ? '#e2e8f0' : '#475569', display: 'flex', alignItems: 'center', gap: '5px' }}>
                               <FileText size={11} color={lpCount ? '#4ade80' : '#334155'} /> {label}{lpCount ? ` (${lpCount})` : ''}
                             </span>
-                            <label style={{ cursor: 'pointer', fontSize: '10px', color: '#475569' }}>
-                              Add
-                              <input type="file" multiple accept={accept} style={{ display: 'none' }} onChange={handleLegalPackUpload} />
-                            </label>
-                          </div>
+                            <span style={{ fontSize: '10px', color: lpCount ? '#4ade80' : '#475569' }}>{lpCount ? '✓' : 'Missing'}</span>
+                          </button>
                         );
                       }
                       const rec = propFiles[key];
                       return (
-                        <div key={key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: '0.5px solid #1e293b', fontSize: '11px' }}>
+                        <button key={key} onClick={jump} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', padding: '5px 0', borderBottom: '0.5px solid #1e293b', fontSize: '11px', background: 'none', border: 'none', borderBottomWidth: '0.5px', borderBottomStyle: 'solid', borderBottomColor: '#1e293b', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', minHeight: '28px' }}>
                           <span style={{ color: rec ? '#e2e8f0' : '#475569', display: 'flex', alignItems: 'center', gap: '5px' }}>
                             <FileText size={11} color={rec ? '#4ade80' : '#334155'} /> {label}
                           </span>
-                          {rec
-                            ? <button onClick={() => handleViewDocument(rec)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', padding: '1px', display: 'flex', fontSize: '10px', fontFamily: 'inherit' }}>View</button>
-                            : <label style={{ cursor: 'pointer', fontSize: '10px', color: '#475569' }}>
-                                Upload
-                                <input type="file" accept={accept} style={{ display: 'none' }} onChange={e => handleVaultUpload(e, key)} />
-                              </label>
-                          }
-                        </div>
+                          <span style={{ fontSize: '10px', color: rec ? '#4ade80' : '#475569' }}>{rec ? '✓' : 'Missing'}</span>
+                        </button>
                       );
                     })}
-                    {/* Flexible / additional documents */}
-                    {(currentViewProperty.customDocs || []).map(doc => (
-                      <div key={doc.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '5px 0', borderBottom: '0.5px solid #1e293b', fontSize: '11px' }}>
-                        <span style={{ color: '#e2e8f0', display: 'flex', alignItems: 'center', gap: '5px', minWidth: 0 }}>
-                          <FileText size={11} color="#4ade80" style={{ flexShrink: 0 }} />
-                          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={doc.name}>{doc.name}</span>
+                    {(currentViewProperty.customDocs || []).length > 0 && (
+                      <button onClick={() => setPropCanvasTab('documents')} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', padding: '5px 0', borderBottom: '0.5px solid #1e293b', fontSize: '11px', background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit', textAlign: 'left', minHeight: '28px' }}>
+                        <span style={{ color: '#e2e8f0', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                          <FileText size={11} color="#4ade80" /> Other documents
                         </span>
-                        <span style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-                          <button onClick={() => handleViewDocument(doc)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', padding: '1px', fontSize: '10px', fontFamily: 'inherit' }}>View</button>
-                          <button onClick={() => handleRemoveCustomDoc(doc.id)} title="Remove" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#64748b', padding: '1px', display: 'flex' }}><Trash2 size={10} /></button>
-                        </span>
-                      </div>
-                    ))}
-                    <label style={{ cursor: 'pointer', fontSize: '10px', color: '#60a5fa', display: 'flex', alignItems: 'center', gap: '5px', padding: '7px 0 1px' }}>
-                      <Plus size={11} /> Add document
-                      <input type="file" style={{ display: 'none' }} onChange={handleCustomDocUpload} />
-                    </label>
+                        <span style={{ fontSize: '10px', color: '#4ade80' }}>{currentViewProperty.customDocs.length}</span>
+                      </button>
+                    )}
+                    <button onClick={() => setPropCanvasTab('documents')} style={{ cursor: 'pointer', fontSize: '10px', color: '#60a5fa', display: 'flex', alignItems: 'center', gap: '5px', padding: '7px 0 1px', background: 'none', border: 'none', fontFamily: 'inherit', minHeight: '28px' }}>
+                      <FileText size={11} /> Manage documents →
+                    </button>
                   </div>
 
                   {/* Planning to bid + listing link */}
@@ -5993,8 +5987,9 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         {FILE_KEYS.filter(f => f.key !== 'legalPack').map(({ key, label, accept }) => {
                           const rec = propFiles[key];
                           const isReport = key === 'mainReport';
+                          const highlighted = docsHighlightKey === key;
                           return (
-                            <div key={key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 14px', border: `1px solid ${rec ? '#bbf7d0' : '#e2e8f0'}`, borderRadius: '8px', background: rec ? '#fafffe' : '#ffffff' }}>
+                            <div key={key} onClick={() => docsHighlightKey && setDocsHighlightKey(null)} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 14px', border: `1px solid ${highlighted ? '#7C3AED' : rec ? '#bbf7d0' : '#e2e8f0'}`, borderRadius: '8px', background: highlighted ? '#f5f3ff' : rec ? '#fafffe' : '#ffffff', boxShadow: highlighted ? '0 0 0 2px #ddd6fe' : 'none' }}>
                               <div style={{ display: 'flex', alignItems: 'center', gap: '9px', minWidth: 0 }}>
                                 <FileText size={16} color={rec ? '#059669' : '#cbd5e1'} style={{ flexShrink: 0 }} />
                                 <div style={{ minWidth: 0 }}>
