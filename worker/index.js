@@ -3803,6 +3803,196 @@ async function webSearch(query, env, maxResults = 5) {
 }
 
 // ============================================================
+// Phase 5, Step 5.1/5.M5 (property-view-v2 plan): deal-review and
+// deal-analysis logic extracted out of their route handlers, unchanged, so
+// runDealPipeline() (below) can call them directly and share one areaStats
+// call across a run instead of each route recomputing it. The routes
+// themselves now just build the request/response around these — same
+// schema, same prompts, same behaviour as before this refactor.
+// ============================================================
+async function runDealReviewInsight(env, property, { areaStats }) {
+  const clip = (obj) => JSON.stringify(obj ?? null).slice(0, 6000);
+  const context = [
+    `Address: ${property.address}${property.dealName ? ` (${property.dealName})` : ''}`,
+    `Status: ${property.status || 'Sourced'} · Guide price: £${Number(property.guidePrice || 0).toLocaleString()} · Auction: ${property.auctionDate || 'unknown'}`,
+    `Type: ${property.propertyType || 'unknown'} · Beds: ${property.bedrooms || 'unknown'}`,
+    areaMarketStatsLine(areaStats),
+    `Report analytics: ${clip(property.analytics)}`,
+    `Area intelligence highlights: ${clip(property.intelligenceSummary)}`,
+    `Refurb position: ${clip(property.refurbSummary)}`,
+    `Comparables: ${clip(property.comparables)}`,
+    property.marketComparison ? `Live market comparison (web-search grounded, run ${property.marketComparison.generatedAt || 'recently'}): ${clip(property.marketComparison)}` : 'Live market comparison: not run',
+  ].join('\n');
+
+  const schema = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['summary', 'riskFlags', 'strengths', 'dealScore', 'verdict', 'reportComparison'],
+    properties: {
+      summary: { type: 'string', description: '3-5 sentence plain-English assessment of this deal for a UK property flip investor' },
+      riskFlags: { type: 'array', items: { type: 'string' }, description: 'Specific risks found in the data — thin margin, low comps, flood/planning/crime issues, missing information, over-guide pressure. Empty if genuinely none.' },
+      strengths: { type: 'array', items: { type: 'string' }, description: 'Specific strengths of the deal grounded in the data.' },
+      dealScore: { type: 'integer', description: 'Deal quality score from 0 (avoid at any price) to 100 (exceptional opportunity)' },
+      verdict: { type: 'string', enum: ['strong_buy', 'buy', 'conditional', 'avoid'] },
+      bidGuidance: { type: 'string', description: "One or two sentences on the realistic hammer price and a disciplined maximum bid for this lot, given the guide is a floor and lots sell above it. Reference the area guide-to-sold ratio when supplied." },
+      blindSpots: { type: 'array', items: { type: 'string' }, description: 'Things NOT in the deal sheet that the investor should independently verify before bidding — e.g. tenure/lease, condition/structural, planning constraints, true local sold comps, service charges, vacant possession. Empty only if genuinely nothing is missing.' },
+      opportunities: { type: 'array', items: { type: 'string' }, description: 'Specific positive/upside signals grounded in the area intelligence (price growth, low crime, EPC improvement headroom, good schools/transport) that go beyond deal economics alone. Empty if none.' },
+      reportComparison: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['agreement', 'note'],
+        description: 'Your cross-check against the prior assessment report already in the analytics (its verdict, maxBid, netProfit, margin and GDV).',
+        properties: {
+          agreement: { type: 'string', enum: ['agree', 'partial', 'disagree'], description: "How well your view matches the report's conclusion. Use 'agree' if none was supplied." },
+          note: { type: 'string', description: "1-2 sentences: where you agree or diverge from the report's figures/verdict and why. Empty string if no report figures were supplied to compare against." },
+        },
+      },
+    },
+  };
+
+  return generateInsight({
+    system: 'You are a UK property investment analyst reviewing auction flip deals for a small investment partnership in South Yorkshire. Be direct and specific: ground every claim in the numbers provided, flag what is missing, and never invent figures. Margins under 15% are tight for a flip; under 5% are usually not worth the risk. A prior assessment report may already have scored this deal — its verdict, maxBid, netProfit, margin and GDV are in the report analytics. Act as an independent second opinion: validate those figures against the comparables and area intelligence, and in reportComparison state clearly whether you agree, partly agree, or disagree with the report and why. Do not simply restate the report. When a live market comparison is supplied, treat it as fresh third-party evidence: weigh its positioning, confidence and web comparables against the report GDV and your own view, and call out any conflict between them explicitly. ' + AUCTION_ANALYST_FRAMING,
+    prompt: `Review this auction deal and score it. If report analytics are present, cross-check your conclusion against them.\n\n${context}`,
+    schema,
+    requiredFields: ['summary', 'riskFlags', 'strengths', 'dealScore', 'verdict'],
+    env,
+  });
+}
+
+async function runMarketComparisonInsight(env, property, { areaStats }) {
+  const searchQuery = `recent sold property prices near ${property.postcode || property.address}${property.propertyType ? ` ${property.propertyType}` : ''}`;
+  const searchResults = await webSearch(searchQuery, env, 6);
+
+  const clip = (obj) => JSON.stringify(obj ?? null).slice(0, 4000);
+  const context = [
+    `Address: ${property.address}${property.dealName ? ` (${property.dealName})` : ''}`,
+    `Guide price: £${Number(property.guidePrice || 0).toLocaleString()}`,
+    areaMarketStatsLine(areaStats),
+    `Analytics (GDV/margin/costs): ${clip(property.analytics)}`,
+    searchResults.length
+      ? `Live web search results for local market context:\n${searchResults.map((r, i) => `${i + 1}. ${r.title} — ${r.snippet} (${r.url})`).join('\n')}`
+      : 'No live web search results were available — reason over the CRM data alone, and set positioning to "insufficient_data" and confidence to "low".',
+  ].join('\n\n');
+
+  const schema = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['marketSummary', 'comparables', 'positioning', 'confidence'],
+    properties: {
+      marketSummary: { type: 'string', description: '2-4 sentence assessment of this deal against current local market conditions' },
+      comparables: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            address: { type: 'string' }, price: { type: 'string' }, date: { type: 'string' }, source: { type: 'string' },
+          },
+        },
+        description: 'Comparable sold/listed properties grounded only in the provided search results — never invented. Empty if search results gave nothing usable.',
+      },
+      positioning: { type: 'string', enum: ['underpriced', 'fair', 'overpriced', 'insufficient_data'] },
+      confidence: { type: 'string', enum: ['low', 'medium', 'high'], description: 'How much live search data was actually available to ground this assessment' },
+    },
+  };
+
+  return generateInsight({
+    system: 'You are a UK property market analyst. Ground every claim in the search results and CRM data provided — never invent comparable prices or addresses. If search results are thin or absent, say so and lower your confidence rather than guessing. ' + AUCTION_ANALYST_FRAMING,
+    prompt: `Assess this deal against current local market conditions.\n\n${context}`,
+    schema,
+    requiredFields: ['marketSummary', 'comparables', 'positioning', 'confidence'],
+    env,
+  });
+}
+
+// ============================================================
+// Phase 5, Step 5.1 (property-view-v2 plan): the deal pipeline orchestrator.
+// Runs comps resolve -> AI review -> market comparison in order, sharing one
+// areaStats call (5.M5) instead of each step recomputing it, and logging
+// every AI step to property_ai_runs with an input_hash so unchanged inputs
+// skip re-running (and re-spending tokens) on the next call.
+//
+// Scope note: intelligence-connector running and legal-pack extraction are
+// NOT steps here. Intelligence running is a large pre-existing route
+// (/api/intelligence/run) not yet extracted into a reusable function — doing
+// that extraction wasn't necessary for this pass and risked the working
+// route for no tested benefit. Legal extraction already self-triggers at
+// upload time (Phase 4, ctx.waitUntil). Both are natural additions to a
+// future pipeline version.
+// ============================================================
+function hashInput(obj) {
+  return shortHash(JSON.stringify(obj ?? null));
+}
+
+async function getLastSuccessfulRun(env, userId, propertyId, kind) {
+  return env.CRM_DB.prepare(
+    `SELECT run_id, input_hash FROM property_ai_runs WHERE user_id = ? AND property_id = ? AND kind = ? AND status = 'done' ORDER BY finished_at DESC LIMIT 1`
+  ).bind(userId, String(propertyId), kind).first();
+}
+
+async function recordRunStart(env, { userId, propertyId, kind, inputHash }) {
+  const runId = crypto.randomUUID();
+  await env.CRM_DB.prepare(
+    `INSERT INTO property_ai_runs (user_id, run_id, property_id, kind, provider, started_at, finished_at, status, input_hash, output, cost_tokens) VALUES (?, ?, ?, ?, NULL, ?, NULL, 'running', ?, NULL, NULL)`
+  ).bind(userId, runId, String(propertyId), kind, new Date().toISOString(), inputHash).run();
+  return runId;
+}
+
+async function recordRunResult(env, { runId, status, provider, output }) {
+  await env.CRM_DB.prepare(
+    `UPDATE property_ai_runs SET status = ?, provider = ?, finished_at = ?, output = ? WHERE run_id = ?`
+  ).bind(status, provider ?? null, new Date().toISOString(), output != null ? JSON.stringify(output).slice(0, 8000) : null, runId).run();
+}
+
+async function runOnePipelineStep(env, { userId, propertyId, kind, inputHash, force, run }) {
+  const last = force ? null : await getLastSuccessfulRun(env, userId, propertyId, kind);
+  if (last && last.input_hash === inputHash) {
+    return { status: 'skipped', reason: 'unchanged inputs since last run', runId: last.run_id };
+  }
+  const runId = await recordRunStart(env, { userId, propertyId, kind, inputHash });
+  try {
+    const { result, provider } = await run();
+    await recordRunResult(env, { runId, status: 'done', provider, output: result });
+    return { status: 'done', runId, provider, result };
+  } catch (err) {
+    await recordRunResult(env, { runId, status: 'failed', output: { error: err.message } });
+    return { status: 'failed', runId, error: err.message };
+  }
+}
+
+async function runDealPipeline(env, { userId, property, reason, force = false }) {
+  const propertyId = property.id;
+  const steps = {};
+
+  // Comps: pure computation, no AI cost, no input_hash needed — always safe to refresh.
+  try {
+    const compsResolved = await syncPropertyComps(env, userId, property, new Date().toISOString());
+    property = { ...property, compsResolved };
+    steps.comps = { status: 'done', count: compsResolved.length };
+  } catch (err) {
+    steps.comps = { status: 'failed', error: err.message };
+  }
+
+  const areaStats = await getAreaMarketStats(env, property.postcode || property.address);
+
+  steps.review = await runOnePipelineStep(env, {
+    userId, propertyId, kind: 'review', force,
+    inputHash: hashInput({
+      analytics: property.analytics, intelligenceSummary: property.intelligenceSummary,
+      refurbSummary: property.refurbSummary, comparables: property.comparables, marketComparison: property.marketComparison,
+    }),
+    run: () => runDealReviewInsight(env, property, { areaStats }),
+  });
+
+  steps.market = await runOnePipelineStep(env, {
+    userId, propertyId, kind: 'market', force,
+    inputHash: hashInput({ analytics: property.analytics, postcode: property.postcode, propertyType: property.propertyType }),
+    run: () => runMarketComparisonInsight(env, property, { areaStats }),
+  });
+
+  return { reason: reason || 'manual', steps };
+}
+
+// ============================================================
 // MAIN WORKER EXPORT
 // ============================================================
 
@@ -6132,52 +6322,9 @@ async function handleApiRoutes(request, env, url, ctx) {
 
       // Compact, bounded context — never ship whole blobs to the model
       const areaStats = await getAreaMarketStats(env, property.postcode || property.address);
-      const clip = (obj) => JSON.stringify(obj ?? null).slice(0, 6000);
-      const context = [
-        `Address: ${property.address}${property.dealName ? ` (${property.dealName})` : ''}`,
-        `Status: ${property.status || 'Sourced'} · Guide price: £${Number(property.guidePrice || 0).toLocaleString()} · Auction: ${property.auctionDate || 'unknown'}`,
-        `Type: ${property.propertyType || 'unknown'} · Beds: ${property.bedrooms || 'unknown'}`,
-        areaMarketStatsLine(areaStats),
-        `Report analytics: ${clip(property.analytics)}`,
-        `Area intelligence highlights: ${clip(property.intelligenceSummary)}`,
-        `Refurb position: ${clip(property.refurbSummary)}`,
-        `Comparables: ${clip(property.comparables)}`,
-        property.marketComparison ? `Live market comparison (web-search grounded, run ${property.marketComparison.generatedAt || 'recently'}): ${clip(property.marketComparison)}` : 'Live market comparison: not run',
-      ].join('\n');
-
-      const schema = {
-        type: 'object',
-        additionalProperties: false,
-        required: ['summary', 'riskFlags', 'strengths', 'dealScore', 'verdict', 'reportComparison'],
-        properties: {
-          summary: { type: 'string', description: '3-5 sentence plain-English assessment of this deal for a UK property flip investor' },
-          riskFlags: { type: 'array', items: { type: 'string' }, description: 'Specific risks found in the data — thin margin, low comps, flood/planning/crime issues, missing information, over-guide pressure. Empty if genuinely none.' },
-          strengths: { type: 'array', items: { type: 'string' }, description: 'Specific strengths of the deal grounded in the data.' },
-          dealScore: { type: 'integer', description: 'Deal quality score from 0 (avoid at any price) to 100 (exceptional opportunity)' },
-          verdict: { type: 'string', enum: ['strong_buy', 'buy', 'conditional', 'avoid'] },
-          bidGuidance: { type: 'string', description: "One or two sentences on the realistic hammer price and a disciplined maximum bid for this lot, given the guide is a floor and lots sell above it. Reference the area guide-to-sold ratio when supplied." },
-          blindSpots: { type: 'array', items: { type: 'string' }, description: 'Things NOT in the deal sheet that the investor should independently verify before bidding — e.g. tenure/lease, condition/structural, planning constraints, true local sold comps, service charges, vacant possession. Empty only if genuinely nothing is missing.' },
-          reportComparison: {
-            type: 'object',
-            additionalProperties: false,
-            required: ['agreement', 'note'],
-            description: 'Your cross-check against the prior assessment report already in the analytics (its verdict, maxBid, netProfit, margin and GDV).',
-            properties: {
-              agreement: { type: 'string', enum: ['agree', 'partial', 'disagree'], description: "How well your view matches the report's conclusion. Use 'agree' if none was supplied." },
-              note: { type: 'string', description: "1-2 sentences: where you agree or diverge from the report's figures/verdict and why. Empty string if no report figures were supplied to compare against." },
-            },
-          },
-        },
-      };
 
       try {
-        const { result: review, provider } = await generateInsight({
-          system: 'You are a UK property investment analyst reviewing auction flip deals for a small investment partnership in South Yorkshire. Be direct and specific: ground every claim in the numbers provided, flag what is missing, and never invent figures. Margins under 15% are tight for a flip; under 5% are usually not worth the risk. A prior assessment report may already have scored this deal — its verdict, maxBid, netProfit, margin and GDV are in the report analytics. Act as an independent second opinion: validate those figures against the comparables and area intelligence, and in reportComparison state clearly whether you agree, partly agree, or disagree with the report and why. Do not simply restate the report. When a live market comparison is supplied, treat it as fresh third-party evidence: weigh its positioning, confidence and web comparables against the report GDV and your own view, and call out any conflict between them explicitly. ' + AUCTION_ANALYST_FRAMING,
-          prompt: `Review this auction deal and score it. If report analytics are present, cross-check your conclusion against them.\n\n${context}`,
-          schema,
-          requiredFields: ['summary', 'riskFlags', 'strengths', 'dealScore', 'verdict'],
-          env,
-        });
+        const { result: review, provider } = await runDealReviewInsight(env, property, { areaStats });
         return corsResponse({ success: true, review, provider, reviewedAt: new Date().toISOString() });
       } catch (err) {
         console.error('AI deal review failed:', err);
@@ -6200,54 +6347,42 @@ async function handleApiRoutes(request, env, url, ctx) {
       const { property } = await request.json();
       if (!property || !property.address) return corsResponse({ success: false, message: 'Missing property' }, 400);
 
-      const searchQuery = `recent sold property prices near ${property.postcode || property.address}${property.propertyType ? ` ${property.propertyType}` : ''}`;
-      const searchResults = await webSearch(searchQuery, env, 6);
       const areaStats = await getAreaMarketStats(env, property.postcode || property.address);
 
-      const clip = (obj) => JSON.stringify(obj ?? null).slice(0, 4000);
-      const context = [
-        `Address: ${property.address}${property.dealName ? ` (${property.dealName})` : ''}`,
-        `Guide price: £${Number(property.guidePrice || 0).toLocaleString()}`,
-        areaMarketStatsLine(areaStats),
-        `Analytics (GDV/margin/costs): ${clip(property.analytics)}`,
-        searchResults.length
-          ? `Live web search results for local market context:\n${searchResults.map((r, i) => `${i + 1}. ${r.title} — ${r.snippet} (${r.url})`).join('\n')}`
-          : 'No live web search results were available — reason over the CRM data alone, and set positioning to "insufficient_data" and confidence to "low".',
-      ].join('\n\n');
-
-      const schema = {
-        type: 'object',
-        additionalProperties: false,
-        required: ['marketSummary', 'comparables', 'positioning', 'confidence'],
-        properties: {
-          marketSummary: { type: 'string', description: '2-4 sentence assessment of this deal against current local market conditions' },
-          comparables: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                address: { type: 'string' }, price: { type: 'string' }, date: { type: 'string' }, source: { type: 'string' },
-              },
-            },
-            description: 'Comparable sold/listed properties grounded only in the provided search results — never invented. Empty if search results gave nothing usable.',
-          },
-          positioning: { type: 'string', enum: ['underpriced', 'fair', 'overpriced', 'insufficient_data'] },
-          confidence: { type: 'string', enum: ['low', 'medium', 'high'], description: 'How much live search data was actually available to ground this assessment' },
-        },
-      };
-
       try {
-        const { result: analysis, provider } = await generateInsight({
-          system: 'You are a UK property market analyst. Ground every claim in the search results and CRM data provided — never invent comparable prices or addresses. If search results are thin or absent, say so and lower your confidence rather than guessing. ' + AUCTION_ANALYST_FRAMING,
-          prompt: `Assess this deal against current local market conditions.\n\n${context}`,
-          schema,
-          requiredFields: ['marketSummary', 'comparables', 'positioning', 'confidence'],
-          env,
-        });
+        const { result: analysis, provider } = await runMarketComparisonInsight(env, property, { areaStats });
         return corsResponse({ success: true, analysis, provider, generatedAt: new Date().toISOString() });
       } catch (err) {
         console.error('AI deal analysis failed:', err);
         return corsResponse({ success: false, message: 'Could not complete deal analysis' }, 502);
+      }
+    }
+
+    // --------------------------------------------------------
+    // AI — deal pipeline orchestrator (property-view-v2 plan, Step 5.1)
+    // Runs comps resolve -> AI review -> market comparison, logging each AI
+    // step to property_ai_runs and skipping steps whose inputs haven't
+    // changed since the last successful run. Pass force:true to re-run
+    // everything regardless (matches a manual "re-run" click).
+    // --------------------------------------------------------
+    if (url.pathname === '/api/ai/run-pipeline' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      if (!anyAiProviderConfigured(env)) {
+        return corsResponse({ success: false, message: 'AI not configured — set at least one of: ANTHROPIC_API_KEY, GROQ_API_KEY, GOOGLE_AI_API_KEY, OPENROUTER_API_KEY, MISTRAL_API_KEY, QWEN_API_KEY, HUGGINGFACE_API_KEY, ROUTEWAY_API_KEY' }, 400);
+      }
+      const aiRateOk = await checkRateLimit(env, `ai:${session.userId}`, 10);
+      if (!aiRateOk) return corsResponse({ success: false, message: 'Too many AI requests — please wait a minute' }, 429);
+
+      const { property, reason, force } = await request.json();
+      if (!property || !property.address || property.id == null) return corsResponse({ success: false, message: 'Missing property' }, 400);
+
+      try {
+        const result = await runDealPipeline(env, { userId: session.userId, property, reason, force: !!force });
+        return corsResponse({ success: true, ...result });
+      } catch (err) {
+        console.error('Deal pipeline failed:', err);
+        return corsResponse({ success: false, message: 'Pipeline failed' }, 502);
       }
     }
 
