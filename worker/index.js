@@ -3320,6 +3320,97 @@ async function indexDocumentForSearch(env, { key, name, propertyId, userId, blob
 }
 
 // ============================================================
+// LEGAL PACK EXTRACTION (property-view-v2 plan, Phase 4 Step 4.1)
+// env.AI.toMarkdown() + the existing generateInsight() provider chain run
+// natively in the Worker, so this processes inline via ctx.waitUntil() at
+// upload time rather than an externally-polled queue (unlike report_jobs,
+// which needs the analyser's local Puppeteer pipeline). legal_extraction_jobs
+// (migration 0008) still gives a future UI badge something to poll, same
+// shape as the report-job badge.
+// ============================================================
+const LEGAL_FACT_DESCRIPTIONS = {
+  tenure: 'Freehold, Leasehold, or Commonhold — state clearly which. Empty string if not stated.',
+  leaseTermRemaining: 'Years remaining on the lease as of the pack date, if leasehold. Empty string if freehold or not stated.',
+  groundRent: 'Annual ground rent amount and any escalation terms, if leasehold. Empty string if freehold or not stated.',
+  serviceCharge: 'Annual service charge amount and what it covers, if applicable. Empty string if not stated.',
+  restrictiveCovenants: 'Any restrictive covenants on the title, summarised in plain English. Empty string if none found.',
+  easementsRightsOfWay: 'Any easements, rights of way, or third-party access rights over or benefiting the property. Empty string if none found.',
+  arrears: 'Any service charge, ground rent, or council tax arrears mentioned. Empty string if none found.',
+  specialConditions: 'Special conditions of sale (deposit terms, completion penalties, excluded warranties, etc). Empty string if none found.',
+  completionPeriod: "Required completion period after exchange (e.g. '28 days'). Empty string if not stated.",
+  vatPosition: 'Whether VAT applies to the purchase price and on what basis. Empty string if not addressed.',
+  tenanciesInSitu: 'Any existing tenancies the buyer would inherit — tenant type, rent, notice status. Empty string if none found.',
+  accessRightsIssues: 'Any flagged access issues — shared access, missing legal access, disputed boundaries. Empty string if none found.',
+};
+const LEGAL_FACT_KEYS = Object.keys(LEGAL_FACT_DESCRIPTIONS);
+
+// Only run on document types env.AI.toMarkdown can actually read; legal packs
+// are frequently .zip, which toMarkdown does not unpack.
+const LEGAL_EXTRACTABLE_DOC = /\.(pdf|docx?|txt|html?)$/i;
+
+async function extractLegalFacts(env, { userId, propertyId, docKey, docName, blob }) {
+  if (!env.AI) return;
+  const jobId = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  await env.CRM_DB.prepare(
+    `INSERT INTO legal_extraction_jobs (id, user_id, property_id, doc_key, doc_name, status, created_at) VALUES (?, ?, ?, ?, ?, 'processing', ?)`
+  ).bind(jobId, userId, String(propertyId), docKey, docName || null, createdAt).run();
+
+  try {
+    if (!LEGAL_EXTRACTABLE_DOC.test(docName || docKey || '')) throw new Error('Unsupported file type for legal extraction');
+    const md = await env.AI.toMarkdown([{ name: docName || 'legal-pack', blob }]);
+    const text = (Array.isArray(md) ? md[0]?.data : md?.data) || '';
+    if (!text.trim()) throw new Error('Could not extract text from document');
+
+    const factSchema = (key) => ({
+      type: 'object', additionalProperties: false, required: ['value', 'confidence'],
+      description: LEGAL_FACT_DESCRIPTIONS[key],
+      properties: {
+        value: { type: 'string', description: LEGAL_FACT_DESCRIPTIONS[key] },
+        confidence: { type: 'number', description: '0 (not found / inferred) to 1 (explicitly and unambiguously stated in the document)' },
+      },
+    });
+    const schema = {
+      type: 'object', additionalProperties: false, required: LEGAL_FACT_KEYS,
+      properties: Object.fromEntries(LEGAL_FACT_KEYS.map(k => [k, factSchema(k)])),
+    };
+
+    const { result, provider } = await generateInsight({
+      system: 'You are a UK conveyancing paralegal extracting facts from an auction legal pack for a property investor. Only report what the document actually states — never infer, guess, or use outside knowledge. If a fact is not addressed in the document, return an empty string for value and 0 for confidence. Ground every non-empty value in the text; do not invent figures or terms.',
+      prompt: `Extract the following legal facts from this auction legal pack document. Document text:\n\n${text.slice(0, 18000)}`,
+      schema,
+      requiredFields: LEGAL_FACT_KEYS,
+      env,
+    });
+
+    const extractedAt = new Date().toISOString();
+    const stmts = [];
+    let factsExtracted = 0;
+    for (const key of LEGAL_FACT_KEYS) {
+      const fact = result[key];
+      if (!fact || !fact.value) continue; // nothing found — skip, don't create an empty row to review
+      factsExtracted++;
+      // Re-extraction (e.g. a re-uploaded/updated pack) always resets confirmed_by —
+      // a prior human confirmation must never silently carry over onto new text.
+      stmts.push(env.CRM_DB.prepare(
+        `INSERT OR REPLACE INTO property_legal_facts (user_id, property_id, fact_key, fact_value, confidence, source_doc_key, source_page, extracted_at, confirmed_by, data)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`
+      ).bind(userId, String(propertyId), key, String(fact.value), Number(fact.confidence) || 0, docKey, null, extractedAt, JSON.stringify({ ...fact, provider })));
+    }
+    if (stmts.length) await env.CRM_DB.batch(stmts);
+
+    await env.CRM_DB.prepare(
+      `UPDATE legal_extraction_jobs SET status = 'done', facts_extracted = ?, completed_at = ? WHERE id = ?`
+    ).bind(factsExtracted, extractedAt, jobId).run();
+  } catch (err) {
+    console.error('extractLegalFacts failed:', err);
+    await env.CRM_DB.prepare(
+      `UPDATE legal_extraction_jobs SET status = 'failed', error = ?, completed_at = ? WHERE id = ?`
+    ).bind(String(err.message || err).slice(0, 500), new Date().toISOString(), jobId).run();
+  }
+}
+
+// ============================================================
 // AI PROVIDER CHAIN — multi-provider LLM insight generation
 // ============================================================
 // Tries providers in priority order (best-quality/paid first, guaranteed-free
@@ -5216,6 +5307,10 @@ async function handleApiRoutes(request, env, url, ctx) {
       // the upload response returns rather than reconstructing it, so this is safe to add.
       const keyToken = bytesToHex(crypto.getRandomValues(new Uint8Array(8)));
       const key = `${session.userId}/${propertyId}/${fileKey}/${keyToken}/${file.name}`;
+      // legalPack = single-slot upload (FILE_KEYS); legal_* = the multi-file legal
+      // pack picker (handleLegalPackUpload in App.jsx generates a random fileKey
+      // per file prefixed this way).
+      const isLegalPack = fileKey === 'legalPack' || /^legal_/.test(fileKey);
 
       // When semantic search is configured, buffer the file once so it can be both
       // stored in R2 and passed to the indexer. Cap the in-memory buffer to keep the
@@ -5226,12 +5321,63 @@ async function handleApiRoutes(request, env, url, ctx) {
         await env.CRM_DOCS.put(key, buf, { httpMetadata: { contentType: file.type || 'application/octet-stream' } });
         const blob = new Blob([buf], { type: file.type || 'application/octet-stream' });
         ctx.waitUntil(indexDocumentForSearch(env, { key, name: file.name, propertyId, userId: session.userId, blob }));
+        if (isLegalPack && LEGAL_EXTRACTABLE_DOC.test(file.name)) {
+          ctx.waitUntil(extractLegalFacts(env, { userId: session.userId, propertyId, docKey: key, docName: file.name, blob }));
+        }
       } else {
         await env.CRM_DOCS.put(key, file.stream(), {
           httpMetadata: { contentType: file.type || 'application/octet-stream' },
         });
       }
       return corsResponse({ success: true, key, name: file.name });
+    }
+
+    // GET /api/legal-facts?propertyId=X — extracted legal facts for a property.
+    // Never auto-trusted: confirmed_by stays null until a human confirms.
+    if (url.pathname === '/api/legal-facts' && request.method === 'GET') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const propertyId = url.searchParams.get('propertyId');
+      if (!propertyId) return corsResponse({ success: false, message: 'propertyId is required' }, 400);
+      const { results } = await env.CRM_DB.prepare(
+        'SELECT fact_key, fact_value, confidence, source_doc_key, extracted_at, confirmed_by FROM property_legal_facts WHERE user_id = ? AND property_id = ?'
+      ).bind(session.userId, propertyId).all();
+      return corsResponse({ success: true, facts: results || [] });
+    }
+
+    // POST /api/legal-facts/confirm — the Confirm / Correct control (fixes F12's
+    // "never auto-trust" requirement). Omit `value` to confirm as-extracted;
+    // supply it to correct the value — a human correction is itself confirmed
+    // (confidence 1) since it's no longer an AI guess.
+    if (url.pathname === '/api/legal-facts/confirm' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const { propertyId, factKey, value } = await request.json();
+      if (propertyId == null || !factKey) return corsResponse({ success: false, message: 'propertyId and factKey are required' }, 400);
+      const confirmedBy = session.email || session.userId;
+      if (value != null) {
+        await env.CRM_DB.prepare(
+          'UPDATE property_legal_facts SET fact_value = ?, confidence = 1, confirmed_by = ? WHERE user_id = ? AND property_id = ? AND fact_key = ?'
+        ).bind(String(value), confirmedBy, session.userId, String(propertyId), factKey).run();
+      } else {
+        await env.CRM_DB.prepare(
+          'UPDATE property_legal_facts SET confirmed_by = ? WHERE user_id = ? AND property_id = ? AND fact_key = ?'
+        ).bind(confirmedBy, session.userId, String(propertyId), factKey).run();
+      }
+      return corsResponse({ success: true });
+    }
+
+    // GET /api/legal-jobs?propertyId=X — extraction job status, same shape as
+    // the report-job status badge, for a future UI to poll.
+    if (url.pathname === '/api/legal-jobs' && request.method === 'GET') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const propertyId = url.searchParams.get('propertyId');
+      if (!propertyId) return corsResponse({ success: false, message: 'propertyId is required' }, 400);
+      const { results } = await env.CRM_DB.prepare(
+        'SELECT id, doc_key, doc_name, status, facts_extracted, message, error, created_at, completed_at FROM legal_extraction_jobs WHERE user_id = ? AND property_id = ? ORDER BY created_at DESC LIMIT 10'
+      ).bind(session.userId, propertyId).all();
+      return corsResponse({ success: true, jobs: results || [] });
     }
 
     // GET /api/documents/* — serve a file from R2 (auth required)
