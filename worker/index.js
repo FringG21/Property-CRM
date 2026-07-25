@@ -3860,8 +3860,29 @@ async function webSearch(query, env, maxResults = 5) {
 // themselves now just build the request/response around these — same
 // schema, same prompts, same behaviour as before this refactor.
 // ============================================================
-async function runDealReviewInsight(env, property, { areaStats }) {
+// Step 5.5: only human-confirmed facts are ever returned — Decision 4 says
+// extracted facts must not feed the model until a human has confirmed them.
+async function getConfirmedLegalFacts(env, userId, propertyId) {
+  if (propertyId == null) return [];
+  try {
+    const { results } = await env.CRM_DB.prepare(
+      'SELECT fact_key, fact_value, confidence FROM property_legal_facts WHERE user_id = ? AND property_id = ? AND confirmed_by IS NOT NULL'
+    ).bind(userId, String(propertyId)).all();
+    return (results || []).map(r => ({ fact: r.fact_key, value: r.fact_value }));
+  } catch (err) {
+    console.error('getConfirmedLegalFacts failed:', err.message);
+    return [];
+  }
+}
+
+async function runDealReviewInsight(env, property, { areaStats, legalFacts = [] }) {
   const clip = (obj) => JSON.stringify(obj ?? null).slice(0, 6000);
+  // Step 5.5: prefer the Phase 2.3 resolved comp set — same four sources, but
+  // deduped with per-field provenance and a confidence score — falling back to
+  // the raw list for properties saved before compsResolved existed.
+  const comps = Array.isArray(property.compsResolved) && property.compsResolved.length
+    ? { source: 'resolved (deduped, multi-source, with confidence)', rows: property.compsResolved }
+    : { source: 'raw', rows: property.comparables };
   const context = [
     `Address: ${property.address}${property.dealName ? ` (${property.dealName})` : ''}`,
     `Status: ${property.status || 'Sourced'} · Guide price: £${Number(property.guidePrice || 0).toLocaleString()} · Auction: ${property.auctionDate || 'unknown'}`,
@@ -3870,7 +3891,12 @@ async function runDealReviewInsight(env, property, { areaStats }) {
     `Report analytics: ${clip(property.analytics)}`,
     `Area intelligence highlights: ${clip(property.intelligenceSummary)}`,
     `Refurb position: ${clip(property.refurbSummary)}`,
-    `Comparables: ${clip(property.comparables)}`,
+    `Comparables (${comps.source}): ${clip(comps.rows)}`,
+    // Only human-confirmed facts are supplied (Decision 4: extracted facts never
+    // feed the model before confirmation), so the AI can treat these as given.
+    legalFacts.length
+      ? `Confirmed legal pack facts (human-verified from the legal pack — treat as established fact): ${clip(legalFacts)}`
+      : 'Confirmed legal pack facts: none confirmed yet — treat tenure, lease term, covenants and arrears as UNVERIFIED and say so in blindSpots.',
     property.marketComparison ? `Live market comparison (web-search grounded, run ${property.marketComparison.generatedAt || 'recently'}): ${clip(property.marketComparison)}` : 'Live market comparison: not run',
   ].join('\n');
 
@@ -4023,14 +4049,20 @@ async function runDealPipeline(env, { userId, property, reason, force = false })
   }
 
   const areaStats = await getAreaMarketStats(env, property.postcode || property.address);
+  const legalFacts = await getConfirmedLegalFacts(env, userId, propertyId);
 
   steps.review = await runOnePipelineStep(env, {
     userId, propertyId, kind: 'review', force,
+    // legalFacts and compsResolved are part of the hash because they are now
+    // real inputs (5.5) — so confirming a legal fact or a comp set changing
+    // correctly invalidates the last review and lets the next run redo it,
+    // without needing a separate bespoke trigger for either.
     inputHash: hashInput({
       analytics: property.analytics, intelligenceSummary: property.intelligenceSummary,
       refurbSummary: property.refurbSummary, comparables: property.comparables, marketComparison: property.marketComparison,
+      compsResolved: property.compsResolved, legalFacts,
     }),
-    run: () => runDealReviewInsight(env, property, { areaStats }),
+    run: () => runDealReviewInsight(env, property, { areaStats, legalFacts }),
   });
 
   steps.market = await runOnePipelineStep(env, {
@@ -5604,7 +5636,38 @@ async function handleApiRoutes(request, env, url, ctx) {
           'UPDATE property_legal_facts SET confirmed_by = ? WHERE user_id = ? AND property_id = ? AND fact_key = ?'
         ).bind(confirmedBy, session.userId, String(propertyId), factKey).run();
       }
-      return corsResponse({ success: true });
+
+      // Auto-trigger (5.2 trigger table, legal-pack row): confirmation — not
+      // extraction — is the moment a legal fact starts feeding the AI review
+      // (Decision 4), so that's when a re-review is worth spending on.
+      // Debounced with a short KV lock so confirming a dozen facts in a row is
+      // one run, not a dozen. Facts confirmed after the run starts are not in
+      // that run, but they do change the review's input_hash (see
+      // runDealPipeline), so the next run picks them up rather than silently
+      // keeping a stale review.
+      let reviewQueued = false;
+      if (anyAiProviderConfigured(env)) {
+        const lockKey = `legal-rereview-lock:${session.userId}:${propertyId}`;
+        const locked = await env.SCRAPER_KV.get(lockKey);
+        if (!locked) {
+          await env.SCRAPER_KV.put(lockKey, '1', { expirationTtl: 120 });
+          reviewQueued = true;
+          const row = await env.CRM_DB.prepare('SELECT data FROM properties WHERE user_id = ? AND id = ?')
+            .bind(session.userId, String(propertyId)).first();
+          if (row) {
+            try {
+              const property = JSON.parse(row.data);
+              ctx.waitUntil(
+                runDealPipeline(env, { userId: session.userId, property, reason: 'legal-facts-confirmed' })
+                  .catch(err => console.error('Legal-confirm pipeline failed for property', propertyId, err))
+              );
+            } catch (err) {
+              console.error('Could not parse property for legal-confirm re-review:', err.message);
+            }
+          }
+        }
+      }
+      return corsResponse({ success: true, reviewQueued });
     }
 
     // GET /api/legal-jobs?propertyId=X — extraction job status, same shape as
@@ -6393,9 +6456,10 @@ async function handleApiRoutes(request, env, url, ctx) {
 
       // Compact, bounded context — never ship whole blobs to the model
       const areaStats = await getAreaMarketStats(env, property.postcode || property.address);
+      const legalFacts = await getConfirmedLegalFacts(env, session.userId, property.id);
 
       try {
-        const { result: review, provider } = await runDealReviewInsight(env, property, { areaStats });
+        const { result: review, provider } = await runDealReviewInsight(env, property, { areaStats, legalFacts });
         return corsResponse({ success: true, review, provider, reviewedAt: new Date().toISOString() });
       } catch (err) {
         console.error('AI deal review failed:', err);
