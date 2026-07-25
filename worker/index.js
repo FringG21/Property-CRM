@@ -710,6 +710,98 @@ async function syncUserBlobToD1(env, userId, blob, savedAt) {
   if (stmts.length) await env.CRM_DB.batch(stmts);
 }
 
+// Phase 2 (property-view-v2 plan): write-through into the new structured
+// tables (migration 0007), alongside the existing KV/D1 blob which stays the
+// source of truth for render. Bids and BRR scenarios are fully re-derivable
+// from the property object on every save, so this does a delete+reinsert per
+// property (same pattern as syncUserBlobToD1). Comps (resolveComps) and
+// valuation snapshots are written separately — see resolveComps() and
+// maybeSnapshotValuation() — since neither is a straight derive-from-current-
+// state sync.
+async function syncPropertyBidsAndScenarios(env, userId, property, savedAt) {
+  if (!property || property.id == null) return;
+  const propertyId = String(property.id);
+  const stmts = [
+    env.CRM_DB.prepare('DELETE FROM property_bids WHERE user_id = ? AND property_id = ?').bind(userId, propertyId),
+    env.CRM_DB.prepare('DELETE FROM property_scenarios WHERE user_id = ? AND property_id = ?').bind(userId, propertyId),
+  ];
+  for (const b of (property.bidLog || [])) {
+    if (b == null || b.id == null) continue;
+    stmts.push(env.CRM_DB.prepare(
+      `INSERT OR REPLACE INTO property_bids (user_id, property_id, bid_id, amount, at, note, kind, over_max, override_reason, actor, data)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(userId, propertyId, String(b.id), b.amount ?? null, b.at ?? null, b.note ?? null, b.kind || 'bid', b.overMax ? 1 : 0, b.overrideReason ?? null, b.actor ?? null, JSON.stringify(b)));
+  }
+  for (const s of (property.brr?.scenarios || [])) {
+    if (s == null || s.id == null) continue;
+    stmts.push(env.CRM_DB.prepare(
+      `INSERT OR REPLACE INTO property_scenarios (user_id, property_id, scenario_id, strategy, name, active, locked, data)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(userId, propertyId, String(s.id), s.strategy || 'brr', s.name ?? null, s.archived ? 0 : 1, s.locked ? 1 : 0, JSON.stringify(s)));
+  }
+  await env.CRM_DB.batch(stmts);
+}
+
+// Phase 2, Step 2.3: run resolveComps(), persist it to property_comps, and
+// return the resolved array so the caller can stamp it onto the property
+// object as `compsResolved` before it's saved. The Comparables tab render
+// block does not read `compsResolved` yet (deferred — see resolveComps()
+// comment), so this is additive: it changes nothing visible today.
+async function syncPropertyComps(env, userId, property, savedAt) {
+  if (!property || property.id == null) return [];
+  const propertyId = String(property.id);
+  const compsResolved = resolveComps(property);
+  const stmts = [env.CRM_DB.prepare('DELETE FROM property_comps WHERE user_id = ? AND property_id = ?').bind(userId, propertyId)];
+  compsResolved.forEach((row, i) => {
+    stmts.push(env.CRM_DB.prepare(
+      `INSERT OR REPLACE INTO property_comps (user_id, property_id, comp_id, address, postcode, beds, prop_type, tenure, floor_area, price, price_type, price_date, distance_m, source, source_priority, field_sources, confidence, excluded, exclude_reason, data)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      userId, propertyId, String(row._key || `comp-${i}`), row.address ?? null, null, row.bedrooms ?? null, row.propertyType ?? null,
+      row.tenure ?? null, row.floorArea ?? null, row.price ?? null, row.price != null ? 'sold' : null, row.date || null,
+      null, (row.tags || []).map(t => t.label).join(', ') || null, i, JSON.stringify(row._mergedFrom || {}), row.confidence ?? null,
+      0, null, JSON.stringify(row)
+    ));
+  });
+  await env.CRM_DB.batch(stmts);
+  return compsResolved;
+}
+
+// Phase 2, Step 2.4 (fixes F9): append a property_valuations row when the
+// numbers a report/AI review/market comparison would actually move have
+// changed since the last save, so "how the numbers moved" can be
+// reconstructed later. Report parsing, the AI review and market comparison
+// all run client-side (App.jsx) and land here via the normal property save —
+// diffing old vs. new analytics at the one write choke-point avoids hooking
+// three separate frontend call sites individually. Source is a best-effort
+// tag: today only report-owned fields (CLAUDE.md's disjoint report/AI-key
+// contract) actually populate these numeric columns, so 'report' covers the
+// common case; 'manual' is the fallback for anything else.
+const VALUATION_NUMERIC_FIELDS = ['gdvConservative', 'gdvBase', 'gdvOptimistic', 'maxBid', 'totalInvestment', 'netProfit', 'roi'];
+async function maybeSnapshotValuation(env, userId, oldProperty, newProperty, savedAt) {
+  if (!newProperty || newProperty.id == null) return;
+  const oldAn = oldProperty?.analytics || {};
+  const newAn = newProperty?.analytics || {};
+  const num = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
+  const changed = VALUATION_NUMERIC_FIELDS.some(k => num(oldAn[k]) !== num(newAn[k])) || (oldAn.verdict || null) !== (newAn.verdict || null);
+  if (!changed) return;
+  const margin = newAn.profitMargin ?? newAn.margin ?? null;
+  const source = (oldAn.reportSummary !== newAn.reportSummary || JSON.stringify(oldAn.redFlags || []) !== JSON.stringify(newAn.redFlags || [])) ? 'report' : 'manual';
+  const snapshot = {
+    gdvConservative: num(newAn.gdvConservative), gdvBase: num(newAn.gdvBase), gdvOptimistic: num(newAn.gdvOptimistic),
+    maxBid: num(newAn.maxBid), totalInvestment: num(newAn.totalInvestment), netProfit: num(newAn.netProfit),
+    margin: num(margin), roi: num(newAn.roi), verdict: newAn.verdict ?? null,
+  };
+  await env.CRM_DB.prepare(
+    `INSERT INTO property_valuations (user_id, property_id, at, source, gdv_conservative, gdv_base, gdv_optimistic, max_bid, total_investment, net_profit, margin, roi, verdict, run_id, data)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    userId, String(newProperty.id), savedAt, source,
+    snapshot.gdvConservative, snapshot.gdvBase, snapshot.gdvOptimistic, snapshot.maxBid, snapshot.totalInvestment,
+    snapshot.netProfit, snapshot.margin, snapshot.roi, snapshot.verdict, null, JSON.stringify(snapshot)
+  ).run();
+}
+
 // Rebuild the merged dataset the frontend expects, from D1.
 // Mirrors mergeUserData(): newest updated_at wins per id — including a
 // deleted verdict, which must not fall through to an older live copy.
@@ -2779,6 +2871,98 @@ function addressSimilarity(a, b) {
   const wa = new Set(na.split(' ')), wb = new Set(nb.split(' '));
   const inter = [...wa].filter(w => wb.has(w)).length;
   return inter / new Set([...wa, ...wb]).size;
+}
+
+// Tavily comps carry a free-text price ("£250,000" / "£450k") — parse to a
+// number so they sort/merge alongside the numeric LR/report/manual prices.
+// Mirrors the identically-named inline helper in the App.jsx Comparables tab.
+function parseWebCompPrice(s) {
+  if (typeof s === 'number') return s;
+  const m = String(s || '').replace(/,/g, '').match(/[\d.]+/);
+  if (!m) return null;
+  let n = parseFloat(m[0]);
+  if (!n) return null;
+  if (/k\b/i.test(s)) n *= 1000;
+  else if (/m\b/i.test(s) && !/\bkm\b/i.test(s)) n *= 1000000;
+  return n;
+}
+
+function normCompKey(addr) {
+  return String(addr || '').split(',')[0].toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+// Phase 2 (property-view-v2 plan), Step 2.3: the four-source comp
+// reconciliation (report + Land Registry + manual/RM Plus + AI web search),
+// moved here from the Comparables tab's render block so it can be persisted.
+// Merge key = normalised first-comma address segment; first writer wins per
+// field, later sources only fill blanks — this must stay byte-for-byte
+// identical to the App.jsx merge logic (upsert/order/tags) since the render
+// block is not yet switched over to read this output (deferred pending
+// render verification).
+function resolveComps(property) {
+  const an = property?.analytics || {};
+  const intel = property?.intelligence || {};
+  const reportComps = an.compsList || [];
+  const lrItems = intel.connectors?.landRegistry?.data?.items || [];
+  const otherComps = (property?.comparables || []).filter(c => !c.fromIntelligence);
+  const webComps = an.dealAnalysisComparables || [];
+
+  const merged = {};
+  const order = [];
+  let anon = 0;
+  // _mergedFrom tracks provenance per merged field for the persisted confidence
+  // score (2.3). Deliberately separate from the `fieldSources` field itself,
+  // which is pass-through input data from otherComps (RM Plus / LR backfill
+  // provenance) that drives the existing "Enriched" badge tooltip — merging
+  // provenance into that same key would silently overwrite it.
+  const upsert = (addr, source, kind, fields) => {
+    const key = normCompKey(addr) || `anon-${anon++}`;
+    const ex = merged[key];
+    if (ex) {
+      if (!ex.tags.some(t => t.label === source)) ex.tags.push({ label: source, kind });
+      for (const [k, v] of Object.entries(fields)) {
+        if ((ex[k] == null || ex[k] === '') && v != null && v !== '') { ex[k] = v; ex._mergedFrom[k] = source; }
+      }
+    } else {
+      const mergedFrom = {};
+      for (const [k, v] of Object.entries(fields)) { if (v != null && v !== '') mergedFrom[k] = source; }
+      merged[key] = { ...fields, tags: [{ label: source, kind }], _key: key, _mergedFrom: mergedFrom };
+      order.push(key);
+    }
+  };
+  reportComps.forEach(c => upsert(c.address, 'Report', 'report', {
+    address: c.address, price: c.soldPrice, date: c.soldDate, propertyType: c.propertyType,
+    bedrooms: c.bedrooms, floorArea: c.floorArea, tier: c.tier,
+  }));
+  lrItems.forEach(item => upsert([item.address, item.town].filter(Boolean).join(', '), 'Land Reg', 'lr', {
+    address: [item.address, item.town].filter(Boolean).join(', '), price: item.price,
+    date: item.date || '', propertyType: item.propertyType, newBuild: item.newBuild,
+    epcRating: item.epcRating, floorArea: item.floorArea, habitableRooms: item.habitableRooms,
+    epcPotential: item.epcPotential, heatingType: item.heatingType,
+  }));
+  otherComps.forEach(c => {
+    const isReport = /report/i.test(c.source || ''); const isLr = /land\s*reg/i.test(c.source || ''); const isRm = /rightmove/i.test(c.source || '');
+    upsert(c.address, isReport ? 'Report' : isLr ? 'Land Reg' : isRm ? 'RM Plus' : 'Manual', isReport ? 'report' : isLr ? 'lr' : isRm ? 'rm' : 'manual', {
+      address: c.address, price: c.soldPrice ?? c.price,
+      date: (c.soldDate || c.date) || '', bedrooms: c.bedrooms, notes: c.notes,
+      propertyType: c.propertyType, tenure: c.tenure, floorArea: c.floorArea,
+      enriched: c.enriched, fieldSources: c.fieldSources,
+    });
+  });
+  webComps.forEach(c => upsert(c.address, 'Web', 'web', {
+    address: c.address, price: parseWebCompPrice(c.price), date: c.date || '',
+  }));
+
+  // Confidence: base trust per originating source, +0.15 per corroborating
+  // source, capped at 1. A simple, defensible heuristic — not yet
+  // display-critical since the render block hasn't switched to read it.
+  const SOURCE_BASE_CONFIDENCE = { report: 0.75, lr: 0.75, rm: 0.6, web: 0.4, manual: 0.5 };
+  return order.map(k => {
+    const row = merged[k];
+    const primaryKind = row.tags[0]?.kind || 'manual';
+    const confidence = Math.min(1, (SOURCE_BASE_CONFIDENCE[primaryKind] ?? 0.5) + 0.15 * Math.max(0, row.tags.length - 1));
+    return { ...row, confidence };
+  });
 }
 
 // Cross-reference Land Registry comps with EPC records from the same postcode.
@@ -6335,6 +6519,27 @@ async function handleApiRoutes(request, env, url, ctx) {
       const body = await request.json();
       const userId = session.userId;
       const savedAt = new Date().toISOString();
+
+      // Phase 2, Step 2.4: fetch pre-write state so each property's analytics
+      // can be diffed against what's about to overwrite it (valuation
+      // snapshot below) before anything is mutated.
+      const oldPropertiesById = {};
+      if (Array.isArray(body.properties) && body.properties.length) {
+        try {
+          const { results: oldRows } = await env.CRM_DB.prepare('SELECT id, data FROM properties WHERE user_id = ?').bind(userId).all();
+          for (const row of (oldRows || [])) { try { oldPropertiesById[row.id] = JSON.parse(row.data); } catch {} }
+        } catch (err) {
+          console.error('Could not read prior property state for valuation snapshotting:', err);
+        }
+      }
+
+      // Phase 2, Step 2.3: stamp compsResolved onto each property before it's
+      // saved anywhere. Purely additive — nothing reads this field yet, so it
+      // cannot change what renders today.
+      if (Array.isArray(body.properties)) {
+        body.properties = body.properties.map(p => (p && p.id != null) ? { ...p, compsResolved: resolveComps(p) } : p);
+      }
+
       await env.SCRAPER_KV.put(`crm:user:${userId}`, JSON.stringify({ ...body, savedAt }));
 
       const userIds = (await env.SCRAPER_KV.get('crm:user-ids', 'json')) || [];
@@ -6349,6 +6554,17 @@ async function handleApiRoutes(request, env, url, ctx) {
       } catch (err) {
         d1Synced = false;
         console.error('D1 dual-write failed (KV save succeeded):', err);
+      }
+      if (Array.isArray(body.properties)) {
+        for (const property of body.properties) {
+          try {
+            await syncPropertyBidsAndScenarios(env, userId, property, savedAt);
+            await syncPropertyComps(env, userId, property, savedAt);
+            await maybeSnapshotValuation(env, userId, property?.id != null ? oldPropertiesById[String(property.id)] : null, property, savedAt);
+          } catch (err) {
+            console.error('Structured-table sync failed for property', property?.id, err);
+          }
+        }
       }
       return corsResponse({ success: true, d1Synced });
     }
@@ -6365,11 +6581,24 @@ async function handleApiRoutes(request, env, url, ctx) {
       const allowed = await checkRateLimit(env, `ingest:${session.userId}`, 20);
       if (!allowed) return corsResponse({ success: false, message: 'Too many requests — please slow down' }, 429);
 
-      const property = await request.json();
+      let property = await request.json();
       if (property?.id == null) return corsResponse({ success: false, message: 'property.id is required' }, 400);
 
       const userId = session.userId;
       const savedAt = new Date().toISOString();
+
+      // Phase 2, Step 2.4: read pre-write state before it's overwritten below.
+      let oldProperty = null;
+      try {
+        const oldRow = await env.CRM_DB.prepare('SELECT data FROM properties WHERE user_id = ? AND id = ?').bind(userId, String(property.id)).first();
+        if (oldRow) oldProperty = JSON.parse(oldRow.data);
+      } catch (err) {
+        console.error('Could not read prior property state for valuation snapshotting:', err);
+      }
+
+      // Phase 2, Step 2.3: additive-only — see the matching comment in
+      // POST /api/crm-data above.
+      property = { ...property, compsResolved: resolveComps(property) };
 
       // Single-row D1 upsert, reusing the same per-row shape as syncUserBlobToD1.
       const def = D1_ENTITY_TABLES.properties;
@@ -6379,6 +6608,14 @@ async function handleApiRoutes(request, env, url, ctx) {
         `INSERT OR REPLACE INTO ${def.table} (id, user_id, updated_at, deleted, data${extraNames.map(c => ', ' + c).join('')}) ` +
         `VALUES (?, ?, ?, ?, ?${', ?'.repeat(extraNames.length)})`
       ).bind(String(property.id), userId, savedAt, property.deleted ? 1 : 0, JSON.stringify(property), ...extraNames.map(c => extra[c])).run();
+
+      try {
+        await syncPropertyBidsAndScenarios(env, userId, property, savedAt);
+        await maybeSnapshotValuation(env, userId, oldProperty, property, savedAt);
+        await syncPropertyComps(env, userId, property, savedAt);
+      } catch (err) {
+        console.error('Structured-table sync failed for property', property.id, err);
+      }
 
       // Read-modify-write the KV rollback blob so the D1-read-failure fallback
       // path (mergeUserData) stays consistent, without touching any other
@@ -6398,6 +6635,46 @@ async function handleApiRoutes(request, env, url, ctx) {
       }
 
       return corsResponse({ success: true, property });
+    }
+
+    // POST /api/properties/backfill-structured — one-off backfill of the Phase 2
+    // structured tables (migration 0007) for every property the caller already
+    // has. New pipelines never touch old data (CLAUDE.md), so bids/scenarios/
+    // comps written before this shipped need this explicit pass; safe to
+    // re-run (each call is a delete+reinsert per property, same as the live
+    // write path). Also stamps compsResolved onto each property's stored data
+    // — additive only, does not affect render (see resolveComps() comment).
+    if (url.pathname === '/api/properties/backfill-structured' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+
+      const userId = session.userId;
+      const savedAt = new Date().toISOString();
+      const { results } = await env.CRM_DB.prepare('SELECT id, data FROM properties WHERE user_id = ? AND deleted = 0').bind(userId).all();
+      const { results: valuedRows } = await env.CRM_DB.prepare('SELECT DISTINCT property_id FROM property_valuations WHERE user_id = ?').bind(userId).all();
+      const alreadyValued = new Set((valuedRows || []).map(r => r.property_id));
+      let synced = 0;
+      const errors = [];
+      for (const row of (results || [])) {
+        let property;
+        try { property = JSON.parse(row.data); } catch { continue; }
+        try {
+          await syncPropertyBidsAndScenarios(env, userId, property, savedAt);
+          const compsResolved = await syncPropertyComps(env, userId, property, savedAt);
+          // Seed one baseline valuation snapshot per property so history has a
+          // starting point — only if it doesn't already have one, so re-running
+          // the backfill stays idempotent.
+          if (!alreadyValued.has(String(property.id))) {
+            await maybeSnapshotValuation(env, userId, null, property, savedAt);
+          }
+          await env.CRM_DB.prepare('UPDATE properties SET data = ? WHERE user_id = ? AND id = ?')
+            .bind(JSON.stringify({ ...property, compsResolved }), userId, row.id).run();
+          synced++;
+        } catch (err) {
+          errors.push({ propertyId: property?.id, message: err.message });
+        }
+      }
+      return corsResponse({ success: true, synced, errors });
     }
 
     // POST /api/properties/delete — globally tombstone a property across EVERY
