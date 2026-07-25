@@ -37,6 +37,9 @@ import {
   BID_LADDER_INCREMENTS,
   confirmHammer,
   varianceReport,
+  computeHmoRent,
+  scenarioStrategy,
+  DEFAULT_HMO,
 } from './brrCalc.js';
 
 // Baseline worked example (docs/brr/08-testing.md):
@@ -1398,4 +1401,197 @@ test('varianceReport: null preSnapshot -> every forecast is null, no throw', () 
   const rows = varianceReport(null, { totalCashInvested: 100000, cashLeftIn: 5000 }, { label: 'Viable BRR' });
   assert.ok(rows.every(r => r.forecast == null));
   assert.doesNotThrow(() => varianceReport(null, null, null));
+});
+
+// ============================================================
+// HMO strategy (property-view-v2 plan, Phase 3.1/3.2 — Decision 3)
+// ============================================================
+
+test('scenarioStrategy: defaults undiscriminated + unknown values to brr, honours flip/hmo', () => {
+  assert.equal(scenarioStrategy(undefined), 'brr');
+  assert.equal(scenarioStrategy({}), 'brr');            // pre-existing scenario, no strategy field
+  assert.equal(scenarioStrategy({ strategy: 'brr' }), 'brr');
+  assert.equal(scenarioStrategy({ strategy: 'hmo' }), 'hmo');
+  assert.equal(scenarioStrategy({ strategy: 'flip' }), 'flip');
+  assert.equal(scenarioStrategy({ strategy: 'nonsense' }), 'brr');
+});
+
+test('seedBrr: seeded scenarios are explicitly brr', () => {
+  const brr = seedBrr({ guidePrice: 100000 });
+  assert.ok(brr.scenarios.length > 0);
+  assert.ok(brr.scenarios.every(s => s.strategy === 'brr'));
+});
+
+test('computeHmoRent: weekly rents annualise at 52/12, not x4', () => {
+  const hmo = computeHmoRent({ rooms: [{ weeklyRent: 100 }, { weeklyRent: 120 }] });
+  assert.equal(hmo.weeklyTotal, 220);
+  assert.equal(hmo.grossAnnualRent, 11440);      // 220 x 52
+  assert.equal(hmo.grossMonthlyRent, 953.33);    // NOT 880 (the x4 shortcut understates by ~8%)
+});
+
+test('computeHmoRent: excludes non-lettable rooms, counts ensuites and communal areas', () => {
+  const hmo = computeHmoRent({
+    rooms: [
+      { weeklyRent: 110, ensuite: true },
+      { weeklyRent: 100, ensuite: false },
+      { weeklyRent: 95, lettable: false },   // e.g. converted to communal — must not earn rent
+    ],
+    communalRooms: 2,
+  });
+  assert.equal(hmo.roomCount, 3);
+  assert.equal(hmo.lettableRoomCount, 2);
+  assert.equal(hmo.ensuiteCount, 1);
+  assert.equal(hmo.communalRooms, 2);
+  assert.equal(hmo.weeklyTotal, 210);
+  assert.equal(hmo.avgWeeklyRent, 105);
+});
+
+test('computeHmoRent: empty/missing config is zero, never NaN', () => {
+  for (const cfg of [undefined, {}, { rooms: [] }, { rooms: [null] }]) {
+    const hmo = computeHmoRent(cfg);
+    assert.equal(hmo.grossMonthlyRent, 0);
+    assert.ok(Number.isFinite(hmo.grossMonthlyRent));
+  }
+});
+
+test('HMO scenario: gross rent comes from the room roll, not the rent bands', () => {
+  const property = { guidePrice: 100000, analytics: { gdvBase: 150000 } };
+  const brr = seedBrr(property);
+  brr.defaults.rent = { conservative: 700, expected: 800, optimistic: 900, selected: 'expected' };
+  const hmoScenario = {
+    ...brr.scenarios.find(s => s.type === 'expected'),
+    strategy: 'hmo',
+    overrides: { hmo: { rooms: [{ weeklyRent: 110 }, { weeklyRent: 110 }, { weeklyRent: 120 }] } },
+  };
+  const { inputs, sources } = resolveScenario(property, brr, hmoScenario);
+  assert.equal(inputs.strategy, 'hmo');
+  assert.equal(inputs.grossMonthlyRent, 1473.33); // 340/wk room roll wins over the 800 band
+  assert.equal(sources.rent, 'hmoRooms');
+  assert.equal(inputs.hmo.lettableRoomCount, 3);
+});
+
+test('HMO scenario: an explicit rent override still beats the room roll (precedence preserved)', () => {
+  const property = { guidePrice: 100000, analytics: { gdvBase: 150000 } };
+  const brr = seedBrr(property);
+  const hmoScenario = {
+    ...brr.scenarios.find(s => s.type === 'expected'),
+    strategy: 'hmo',
+    overrides: {
+      hmo: { rooms: [{ weeklyRent: 110 }, { weeklyRent: 110 }] },
+      rent: { expected: 1234, selected: 'expected' },
+    },
+  };
+  const { inputs, sources } = resolveScenario(property, brr, hmoScenario);
+  assert.equal(inputs.grossMonthlyRent, 1234);
+  assert.equal(sources.rent, 'scenario');
+});
+
+test('HMO scenario: compliance works are capex on top of the refurb budget', () => {
+  const property = { guidePrice: 100000, dealCalc: { refurbCost: 20000 }, analytics: { gdvBase: 150000 } };
+  const brr = seedBrr(property);
+  const base = brr.scenarios.find(s => s.type === 'expected');
+
+  const asBrr = resolveScenario(property, brr, base);
+  assert.equal(asBrr.inputs.refurbBudget, 20000);
+
+  const asHmo = resolveScenario(property, brr, {
+    ...base, strategy: 'hmo',
+    overrides: { hmo: { rooms: [{ weeklyRent: 100 }], complianceWorks: 8000 } },
+  });
+  assert.equal(asHmo.inputs.refurbBudget, 28000); // 20k refurb + 8k fire/compliance
+});
+
+test('HMO scenario: licensing/void/management/utilities map onto the existing opex model', () => {
+  const property = { guidePrice: 100000, analytics: { gdvBase: 150000 } };
+  const brr = seedBrr(property);
+  const base = brr.scenarios.find(s => s.type === 'expected');
+  const { inputs } = resolveScenario(property, brr, {
+    ...base, strategy: 'hmo',
+    overrides: { hmo: { rooms: [{ weeklyRent: 100 }], licensingAnnual: 900, complianceAnnual: 400, utilitiesAnnual: 3600 } },
+  });
+  assert.equal(inputs.opex.licensing.value, 900);
+  assert.equal(inputs.opex.compliance.value, 400);
+  assert.equal(inputs.opex.utilities.value, 3600);
+  assert.equal(inputs.opex.voidPct, DEFAULT_HMO.voidPct);             // 12, above single-let 8
+  assert.equal(inputs.opex.managementPct, DEFAULT_HMO.managementPct); // 15, above single-let 10
+});
+
+test('HMO scenario: bills-excluded means the landlord carries no utilities cost', () => {
+  const property = { guidePrice: 100000, analytics: { gdvBase: 150000 } };
+  const brr = seedBrr(property);
+  const base = brr.scenarios.find(s => s.type === 'expected');
+  const { inputs } = resolveScenario(property, brr, {
+    ...base, strategy: 'hmo',
+    overrides: { hmo: { rooms: [{ weeklyRent: 100 }], utilitiesIncluded: false, utilitiesAnnual: 3600 } },
+  });
+  assert.equal(inputs.opex.utilities.value, 0);
+});
+
+test('HMO scenario: an explicit scenario opex override still beats the HMO defaults', () => {
+  const property = { guidePrice: 100000, analytics: { gdvBase: 150000 } };
+  const brr = seedBrr(property);
+  const base = brr.scenarios.find(s => s.type === 'expected');
+  const { inputs } = resolveScenario(property, brr, {
+    ...base, strategy: 'hmo',
+    overrides: { hmo: { rooms: [{ weeklyRent: 100 }] }, opex: { voidPct: 5 } },
+  });
+  assert.equal(inputs.opex.voidPct, 5);
+});
+
+test('Regression: a BRR scenario is untouched by HMO config sitting in brr.defaults', () => {
+  const property = { guidePrice: 100000, dealCalc: { refurbCost: 20000 }, analytics: { gdvBase: 150000 } };
+  const brr = seedBrr(property);
+  brr.defaults.rent = { conservative: 700, expected: 800, optimistic: 900, selected: 'expected' };
+  const base = brr.scenarios.find(s => s.type === 'expected');
+
+  const before = resolveScenario(property, brr, base);
+  const brrWithHmoDefaults = { ...brr, defaults: { ...brr.defaults, hmo: { rooms: [{ weeklyRent: 500 }], complianceWorks: 9999, licensingAnnual: 900 } } };
+  const after = resolveScenario(property, brrWithHmoDefaults, base);
+
+  assert.equal(after.inputs.strategy, 'brr');
+  assert.equal(after.inputs.hmo, null);
+  assert.equal(after.inputs.grossMonthlyRent, before.inputs.grossMonthlyRent); // 800, not the room roll
+  assert.equal(after.inputs.refurbBudget, before.inputs.refurbBudget);         // no compliance capex
+  assert.deepEqual(after.inputs.opex, before.inputs.opex);                     // no licensing cost
+});
+
+test('A 5-room HMO produces yield and ROCE end to end (Phase 3 acceptance)', () => {
+  const property = { guidePrice: 120000, dealCalc: { refurbCost: 30000 }, analytics: { gdvBase: 200000 } };
+  const brr = seedBrr(property);
+  brr.defaults.endValue = { conservative: 190000, expected: 200000, optimistic: 215000, selected: 'expected' };
+  const hmoScenario = {
+    ...brr.scenarios.find(s => s.type === 'expected'),
+    strategy: 'hmo',
+    overrides: {
+      hmo: {
+        rooms: [
+          { name: 'Room 1', weeklyRent: 110, ensuite: true },
+          { name: 'Room 2', weeklyRent: 110, ensuite: true },
+          { name: 'Room 3', weeklyRent: 95 },
+          { name: 'Room 4', weeklyRent: 95 },
+          { name: 'Room 5', weeklyRent: 90 },
+        ],
+        communalRooms: 2, licensingAnnual: 750, complianceWorks: 12000,
+        complianceAnnual: 450, utilitiesIncluded: true, utilitiesAnnual: 4200,
+      },
+    },
+  };
+  const { inputs } = resolveScenario(property, brr, hmoScenario);
+  const out = computeBrr(inputs);
+
+  assert.equal(inputs.hmo.lettableRoomCount, 5);
+  assert.equal(inputs.grossMonthlyRent, 2166.67); // 500/wk across 5 rooms
+  assert.equal(inputs.refurbBudget, 42000);       // 30k + 12k compliance capex
+
+  // The whole point of routing HMO through computeBrr: these come out for free.
+  assert.ok(out.grossYieldOnHammer > 0, 'gross yield on hammer should compute');
+  assert.ok(out.grossYieldOnCash > 0, 'gross yield on cash should compute');
+  assert.ok(out.netYield > 0, 'net yield should compute');
+  assert.ok(Number.isFinite(out.cashOnCash), 'ROCE / cash-on-cash should compute');
+  assert.ok(Number.isFinite(out.totalCashInvested) && out.totalCashInvested > 0);
+  assert.ok(out.netYield < out.grossYieldOnCash, 'net yield must sit below gross-on-cash once HMO opex bites');
+  // Sanity-check the rent actually flowed through, rather than a zero-rent pass.
+  // computeBrr derives annual from the rounded monthly, so allow the few pence
+  // of drift that rounding a monthly money value inevitably introduces.
+  assert.ok(Math.abs(out.grossAnnualRent - 26000) < 1, `expected ~26000, got ${out.grossAnnualRent}`);
 });

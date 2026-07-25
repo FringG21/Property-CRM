@@ -125,6 +125,69 @@ export const DEFAULT_BRR_RULES = [
 
 export const DEFAULT_STRESS = { hammerPct: 5, refurbPct: 15, endValuePct: -10, rentPct: -10, ratePts: 2, ltvPts: -5, serviceChargePct: 25, opexPct: 10, voidPtsExtra: 4 };
 
+// ============================================================
+// HMO (property-view-v2 plan, Phase 3.2 — Decision 3: full room-by-room)
+// An HMO differs from a single let mainly in how gross rent is built (sum of
+// per-room rents, quoted weekly by convention) and in carrying costs that the
+// existing opex model ALREADY supports — licensing, compliance, utilities,
+// cleaning, gardening. So rather than duplicate the cash-flow engine, an HMO
+// scenario derives grossMonthlyRent + opex overrides here and then flows
+// through the same tested computeBrr pipeline, which yields gross/net yield,
+// ROCE, cash-in-cash-out and payback for free.
+// ============================================================
+export const DEFAULT_HMO = {
+  rooms: [],                 // [{ id, name, weeklyRent, ensuite, lettable }]
+  communalRooms: 0,          // kitchen/lounge etc — recorded for licensing/planning context, not a rent source
+  article4: false,           // Article 4 direction removes permitted development for C3->C4
+  licensingAnnual: 0,        // mandatory/additional/selective licence, amortised per year
+  complianceWorks: 0,        // one-off fire/compliance capex — added to the refurb budget
+  complianceAnnual: 0,       // recurring compliance (alarm servicing, gas/electrical certs)
+  utilitiesIncluded: true,   // bills-inclusive is the norm for HMO rooms
+  utilitiesAnnual: 0,
+  voidPct: 12,               // room-level voids run higher than a single let
+  managementPct: 15,         // HMO management is more hands-on than single-let
+};
+
+/**
+ * Gross rent roll from per-room config. Rooms are quoted weekly by UK HMO
+ * convention; monthly is weekly x 52/12, never weekly x 4 (which understates
+ * annual rent by ~8%).
+ * @param {object} hmo
+ */
+export function computeHmoRent(hmo) {
+  const cfg = { ...DEFAULT_HMO, ...(hmo || {}) };
+  const rooms = Array.isArray(cfg.rooms) ? cfg.rooms.filter(Boolean) : [];
+  const lettable = rooms.filter(r => r.lettable !== false);
+  const weeklyTotal = round2(lettable.reduce((sum, r) => sum + pf(r.weeklyRent), 0));
+  const grossMonthlyRent = round2(weeklyTotal * 52 / 12);
+  const rents = lettable.map(r => pf(r.weeklyRent)).filter(v => v > 0);
+  return {
+    roomCount: rooms.length,
+    lettableRoomCount: lettable.length,
+    ensuiteCount: lettable.filter(r => !!r.ensuite).length,
+    communalRooms: pf(cfg.communalRooms),
+    weeklyTotal,
+    grossMonthlyRent,
+    grossAnnualRent: round2(weeklyTotal * 52),
+    avgWeeklyRent: rents.length ? round2(rents.reduce((a, b) => a + b, 0) / rents.length) : 0,
+  };
+}
+
+/** Opex overrides an HMO scenario contributes, mapped onto the existing opex keys. */
+function hmoOpexOverrides(hmo) {
+  const cfg = { ...DEFAULT_HMO, ...(hmo || {}) };
+  const out = {
+    voidPct: pf(cfg.voidPct),
+    managementPct: pf(cfg.managementPct),
+    licensing: { mode: 'annual', value: pf(cfg.licensingAnnual) },
+    compliance: { mode: 'annual', value: pf(cfg.complianceAnnual) },
+  };
+  // Bills-inclusive is the HMO norm; when it isn't, tenants pay directly and
+  // the landlord carries no utilities cost.
+  out.utilities = { mode: 'annual', value: cfg.utilitiesIncluded ? pf(cfg.utilitiesAnnual) : 0 };
+  return out;
+}
+
 function uuid() {
   return (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
@@ -155,6 +218,10 @@ function buildScenario(seed, mortgageDefaults, now) {
     id: `bsc_${uuid()}`,
     name: seed.name,
     type: seed.type,
+    // Phase 3.1 strategy discriminator. Seeded scenarios are BRR, and any
+    // scenario saved before this field existed is read as 'brr' too
+    // (scenarioStrategy below), so existing scenarios calculate identically.
+    strategy: 'brr',
     priceBasis: 'guide',
     assumedHammerPrice: null,
     locked: false,
@@ -164,6 +231,12 @@ function buildScenario(seed, mortgageDefaults, now) {
     updatedAt: now,
     overrides: buildSeedOverrides(seed, mortgageDefaults),
   };
+}
+
+/** Strategy of a scenario, defaulting pre-existing (undiscriminated) scenarios to BRR. */
+export function scenarioStrategy(scenario) {
+  const s = scenario && scenario.strategy;
+  return (s === 'flip' || s === 'hmo') ? s : 'brr';
 }
 
 /**
@@ -566,9 +639,21 @@ export function resolveScenario(property, brr, scenario) {
   const otherBuyingCosts = ov.otherBuyingCosts != null ? pf(ov.otherBuyingCosts) : 0;
   sources.otherBuyingCosts = ov.otherBuyingCosts != null ? 'scenario' : 'manual';
 
+  // Strategy (Phase 3.1/3.2), resolved early because HMO fire/compliance works
+  // are capex that belongs in the refurb budget below. Only an explicitly-HMO
+  // scenario diverges anywhere — 'brr' and undiscriminated scenarios take
+  // exactly the path they always did.
+  const strategy = scenarioStrategy(scenario);
+  const hmoConfig = strategy === 'hmo' ? { ...DEFAULT_HMO, ...(defaults.hmo || {}), ...(ov.hmo || {}) } : null;
+  const hmo = strategy === 'hmo' ? computeHmoRent(hmoConfig) : null;
+
   const refurbLevel = (property && property.refurbLevel) || 'medium';
   const refurbFromAnalytics = pf(refurbLevel === 'light' ? an.refurbLight : refurbLevel === 'heavy' ? an.refurbHeavy : an.refurbMedium) || pf(an.worksTotal);
-  const refurbBudget = ov.refurbBudget != null ? pf(ov.refurbBudget) : (dc.refurbCost != null ? pf(dc.refurbCost) : refurbFromAnalytics);
+  const refurbBase = ov.refurbBudget != null ? pf(ov.refurbBudget) : (dc.refurbCost != null ? pf(dc.refurbCost) : refurbFromAnalytics);
+  // One-off fire/compliance works to reach HMO standard sit on top of the
+  // ordinary refurb budget rather than replacing it.
+  const hmoComplianceWorks = strategy === 'hmo' ? pf(hmoConfig.complianceWorks) : 0;
+  const refurbBudget = round2(refurbBase + hmoComplianceWorks);
   sources.refurbBudget = ov.refurbBudget != null ? 'scenario' : (dc.refurbCost != null ? 'manual' : 'report');
 
   const contingencyPct = ov.contingencyPct != null ? pf(ov.contingencyPct) : (dc.contingencyPct != null ? pf(dc.contingencyPct) : 10);
@@ -608,19 +693,34 @@ export function resolveScenario(property, brr, scenario) {
     selected: rentOv.selected || rentDefaults.selected || 'expected',
   };
   sources.rent = Object.keys(rentOv).length ? 'scenario' : 'brrDefault';
-  const grossMonthlyRent = pf(rent[rent.selected]);
+  let grossMonthlyRent = pf(rent[rent.selected]);
+
+  if (strategy === 'hmo') {
+    // Room roll is the rent source for an HMO, but an explicit per-band rent
+    // override still wins — preserving the documented precedence
+    // (scenario override -> brr default -> ...).
+    const explicitRentOverride = rentOv[rent.selected] != null;
+    if (!explicitRentOverride) {
+      grossMonthlyRent = hmo.grossMonthlyRent;
+      sources.rent = 'hmoRooms';
+    }
+  }
 
   // Opex
   const opexDefaults = defaults.opex || DEFAULT_OPEX;
   const opexOv = ov.opex || {};
-  const opex = { ...opexDefaults, ...opexOv };
+  // HMO carrying costs sit between the defaults and the scenario overrides, so
+  // an explicit scenario opex override still takes precedence over them.
+  const opex = strategy === 'hmo'
+    ? { ...opexDefaults, ...hmoOpexOverrides(hmoConfig), ...opexOv }
+    : { ...opexDefaults, ...opexOv };
   if (opex.serviceCharge && opex.serviceCharge.value === 0 && property && property.serviceCharge) {
     opex.serviceCharge = { mode: 'annual', value: pf(property.serviceCharge) };
   }
   if (opex.groundRent && opex.groundRent.value === 0 && property && property.groundRent) {
     opex.groundRent = { mode: 'annual', value: pf(property.groundRent) };
   }
-  sources.opex = Object.keys(opexOv).length ? 'scenario' : 'brrDefault';
+  sources.opex = strategy === 'hmo' && !Object.keys(opexOv).length ? 'hmo' : (Object.keys(opexOv).length ? 'scenario' : 'brrDefault');
 
   const currentValue = pf(property && property.currentValue) || pf(an.gdvBase) || null;
 
@@ -630,6 +730,8 @@ export function resolveScenario(property, brr, scenario) {
       refurbBudget, contingencyPct, holdingCost,
       endValue, selectedEndValue, currentValue,
       mortgage, rent, grossMonthlyRent, opex,
+      // Additive: 'brr' for every pre-existing scenario, so nothing downstream changes.
+      strategy, hmo,
     },
     sources,
   };
