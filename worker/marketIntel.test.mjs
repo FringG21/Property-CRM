@@ -32,6 +32,9 @@ import {
   growthResilienceScore,
   normalizeWeights,
   DEFAULT_MARKET_SETTINGS,
+  scoreSaleMatch,
+  findConfirmedSaleMatches,
+  CONFIRMED_STATUSES,
 } from './marketIntel.js';
 
 // A synthetic LR PPD comp set (dates relative to now so the 24m window holds).
@@ -437,4 +440,134 @@ test('area-score factors: monotonic + null-safe', () => {
   assert.ok(growthResilienceScore(5, 2) > growthResilienceScore(-5, 2));    // growth beats decline
   assert.ok(growthResilienceScore(5, 0) > growthResilienceScore(5, 12));    // volatility penalised
   assert.equal(growthResilienceScore(null, 1), null);
+});
+
+// ============================================================
+// Post-auction confirmed-sale matching (Phase 6.2 — Decision 5)
+// The two contracts under test: a sale is a PRINTED price with a confirmed
+// status (last_bid is never a sale), and the address matcher is injected
+// rather than duplicated.
+// ============================================================
+
+// Stand-in for index.js's addressSimilarity — same shape (0..1 token overlap),
+// kept local so these tests don't drag the worker entry point in.
+const sim = (a, b) => {
+  if (!a || !b) return 0;
+  const norm = s => String(s).toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+  const na = norm(a), nb = norm(b);
+  if (na === nb) return 1;
+  const wa = new Set(na.split(' ')), wb = new Set(nb.split(' '));
+  const inter = [...wa].filter(w => wb.has(w)).length;
+  return inter / new Set([...wa, ...wb]).size;
+};
+
+const soldLot = (over = {}) => ({
+  id: 'mi-sy-1', address: '12 Pot House Lane, Stocksbridge', result_status: 'sold_for',
+  sold_price: 152000, auction_end_at: '2026-06-20', ...over,
+});
+
+test('scoreSaleMatch: a printed confirmed sale on a matching address is offered', () => {
+  const m = scoreSaleMatch({ lot: soldLot(), address: '12 Pot House Lane, Stocksbridge', similarity: sim });
+  assert.ok(m, 'expected a match');
+  assert.equal(m.soldPrice, 152000);
+  assert.equal(m.resultStatus, 'sold_for');
+  assert.equal(m.confidence, 1);
+});
+
+test('scoreSaleMatch: every confirmed status is accepted', () => {
+  for (const status of CONFIRMED_STATUSES) {
+    const m = scoreSaleMatch({ lot: soldLot({ result_status: status }), address: '12 Pot House Lane, Stocksbridge', similarity: sim });
+    assert.ok(m, `expected ${status} to be accepted`);
+  }
+});
+
+test('scoreSaleMatch: last_bid is NEVER a sale, even with a price and exact address', () => {
+  const m = scoreSaleMatch({ lot: soldLot({ result_status: 'last_bid' }), address: '12 Pot House Lane, Stocksbridge', similarity: sim });
+  assert.equal(m, null);
+});
+
+test('scoreSaleMatch: unconfirmed sold statuses are not sales', () => {
+  for (const status of ['sold', 'sold_prior', 'sold_after', 'unsold', 'withdrawn', 'postponed']) {
+    const m = scoreSaleMatch({ lot: soldLot({ result_status: status }), address: '12 Pot House Lane, Stocksbridge', similarity: sim });
+    assert.equal(m, null, `${status} must not be treated as a confirmed sale`);
+  }
+});
+
+test('scoreSaleMatch: a confirmed status with no printed price is not a sale', () => {
+  for (const price of [null, undefined, 0, '']) {
+    const m = scoreSaleMatch({ lot: soldLot({ sold_price: price }), address: '12 Pot House Lane, Stocksbridge', similarity: sim });
+    assert.equal(m, null, `sold_price ${JSON.stringify(price)} must not produce a match`);
+  }
+});
+
+test('scoreSaleMatch: a different property in the same outcode is rejected', () => {
+  const m = scoreSaleMatch({ lot: soldLot(), address: '9 Completely Different Avenue, Sheffield', similarity: sim });
+  assert.equal(m, null);
+});
+
+test('scoreSaleMatch: null/garbage lot never throws', () => {
+  assert.equal(scoreSaleMatch({ lot: null, address: 'x', similarity: sim }), null);
+  assert.equal(scoreSaleMatch({ lot: {}, address: 'x', similarity: sim }), null);
+});
+
+// --- findConfirmedSaleMatches: query shell, with a stubbed D1 ---------------
+
+const stubEnv = (rows) => ({
+  CRM_DB: {
+    prepare() {
+      return { bind: () => ({ all: async () => ({ results: rows }) }) };
+    },
+  },
+});
+
+test('findConfirmedSaleMatches: returns nothing until the auction date has passed', async () => {
+  const future = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+  const matches = await findConfirmedSaleMatches(stubEnv([soldLot()]), {
+    address: '12 Pot House Lane, Stocksbridge S36 1AA', postcode: 'S36 1AA',
+    auctionDate: future, similarity: sim,
+  });
+  assert.deepEqual(matches, []);
+});
+
+test('findConfirmedSaleMatches: offers the match once the auction has passed', async () => {
+  const matches = await findConfirmedSaleMatches(stubEnv([soldLot()]), {
+    address: '12 Pot House Lane, Stocksbridge S36 1AA', postcode: 'S36 1AA',
+    auctionDate: '2026-06-20', similarity: sim, now: new Date('2026-07-25'),
+  });
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].soldPrice, 152000);
+});
+
+test('findConfirmedSaleMatches: no outcode or no auction date -> no match, no throw', async () => {
+  const env = stubEnv([soldLot()]);
+  assert.deepEqual(await findConfirmedSaleMatches(env, { address: 'no postcode here', auctionDate: '2026-06-20', similarity: sim }), []);
+  assert.deepEqual(await findConfirmedSaleMatches(env, { address: '12 Pot House Lane S36 1AA', auctionDate: null, similarity: sim }), []);
+});
+
+test('findConfirmedSaleMatches: ranks by confidence and caps at 3', async () => {
+  const rows = [
+    soldLot({ id: 'a', address: 'Some Other Road, Sheffield', sold_price: 90000 }),
+    soldLot({ id: 'b', address: '12 Pot House Lane, Stocksbridge', sold_price: 152000 }),
+    soldLot({ id: 'c', address: '12 Pot House Lane', sold_price: 151000 }),
+    soldLot({ id: 'd', address: '12 Pot House Lane, Stocksbridge, Sheffield', sold_price: 153000 }),
+    soldLot({ id: 'e', address: '12 Pot House Lane, Stocksbridge, Sheffield, South Yorkshire', sold_price: 154000 }),
+  ];
+  const matches = await findConfirmedSaleMatches(stubEnv(rows), {
+    address: '12 Pot House Lane, Stocksbridge S36 1AA', postcode: 'S36 1AA',
+    auctionDate: '2026-06-20', similarity: sim, now: new Date('2026-07-25'),
+  });
+  assert.ok(matches.length <= 3, 'should cap at 3 candidates');
+  assert.equal(matches[0].lotId, 'b', 'the exact address should rank first');
+  for (let i = 1; i < matches.length; i++) {
+    assert.ok(matches[i - 1].confidence >= matches[i].confidence, 'must be sorted by confidence desc');
+  }
+});
+
+test('findConfirmedSaleMatches: a D1 failure degrades to no match rather than throwing', async () => {
+  const brokenEnv = { CRM_DB: { prepare() { throw new Error('D1 down'); } } };
+  const matches = await findConfirmedSaleMatches(brokenEnv, {
+    address: '12 Pot House Lane S36 1AA', postcode: 'S36 1AA',
+    auctionDate: '2026-06-20', similarity: sim, now: new Date('2026-07-25'),
+  });
+  assert.deepEqual(matches, []);
 });

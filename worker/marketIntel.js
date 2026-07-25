@@ -1247,10 +1247,84 @@ export function growthResilienceScore(covidAdjustedAnnual, volatility) {
   return Math.max(0, Math.min(100, Math.round(s)));
 }
 
-const CONFIRMED_STATUSES = ['sold_for', 'sold_prior_for', 'sold_after_for'];
+export const CONFIRMED_STATUSES = ['sold_for', 'sold_prior_for', 'sold_after_for'];
 const UNCONFIRMED_SOLD_STATUSES = ['sold', 'sold_prior', 'sold_after'];
 const MI_WINDOW = '24m';
 const SUB100K = 100000;
+
+// ============================================================
+// Post-auction sale matching (property-view-v2 plan, Phase 6.2 — Decision 5)
+// After a property's auction date passes, try to find the lot in our own
+// Market Intel results so the confirmed hammer price can be filled in with
+// one click. Two hard contracts, both from CLAUDE.md:
+//   1. A confirmed sale is a PRINTED price only — sold_for / sold_prior_for /
+//      sold_after_for. `last_bid` is never a sale, and an unconfirmed 'sold'
+//      with no printed figure is never a sale either.
+//   2. Reuse the existing address matcher rather than writing a second one —
+//      so `similarity` is injected by the caller (index.js passes
+//      addressSimilarity), which also keeps this module free of the circular
+//      import with index.js that the header comment warns about.
+// The match is only ever *offered*; AJ confirms before anything is written.
+// ============================================================
+
+// Pure scorer, separated from the query so it can be unit-tested directly.
+export function scoreSaleMatch({ lot, address, similarity }) {
+  if (!lot) return null;
+  const isConfirmedStatus = CONFIRMED_STATUSES.includes(lot.result_status);
+  const soldPrice = Number(lot.sold_price);
+  const hasPrintedPrice = Number.isFinite(soldPrice) && soldPrice > 0;
+  // Contract 1: no printed price, or a non-confirmed status, is not a sale.
+  if (!isConfirmedStatus || !hasPrintedPrice) return null;
+
+  const addressScore = typeof similarity === 'function' ? similarity(address, lot.address) : 0;
+  // Outcode already matched at the query level, so address similarity is the
+  // discriminator. 0.55 is deliberately conservative: a wrong auto-filled
+  // hammer price is far worse than showing no match at all.
+  if (!(addressScore >= 0.55)) return null;
+
+  return {
+    lotId: lot.id,
+    address: lot.address || null,
+    soldPrice: Math.round(soldPrice),
+    resultStatus: lot.result_status,
+    auctionEndAt: lot.auction_end_at || null,
+    confidence: Math.round(addressScore * 100) / 100,
+  };
+}
+
+/**
+ * Confirmed-sale candidates for a property whose auction has passed.
+ * Returns [] (never throws) when there is no outcode, no auction date, the
+ * auction has not happened yet, or nothing matches.
+ * @param {object} env
+ * @param {{address?: string, postcode?: string, auctionDate?: string, similarity: Function, now?: Date}} opts
+ */
+export async function findConfirmedSaleMatches(env, { address, postcode, auctionDate, similarity, now = new Date() }) {
+  const outcode = extractPostcodeParts(postcode || '').outcode || extractPostcodeParts(address || '').outcode;
+  if (!outcode || !auctionDate) return [];
+  // Only look once the auction has actually happened — before that, any
+  // "match" would be a different lot entirely.
+  const auctionTime = new Date(auctionDate).getTime();
+  if (!Number.isFinite(auctionTime) || auctionTime > now.getTime()) return [];
+
+  try {
+    const placeholders = CONFIRMED_STATUSES.map(() => '?').join(',');
+    const { results } = await env.CRM_DB.prepare(
+      `SELECT id, address, result_status, sold_price, auction_end_at
+         FROM mi_lots
+        WHERE outcode = ? AND result_status IN (${placeholders}) AND sold_price IS NOT NULL AND sold_price > 0`
+    ).bind(outcode, ...CONFIRMED_STATUSES).all();
+
+    return (results || [])
+      .map(lot => scoreSaleMatch({ lot, address, similarity }))
+      .filter(Boolean)
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, 3);
+  } catch (err) {
+    console.error('findConfirmedSaleMatches failed:', err.message);
+    return [];
+  }
+}
 
 function windowCutoffs() {
   const now = new Date();

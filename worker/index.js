@@ -1,5 +1,5 @@
 import puppeteer from '@cloudflare/puppeteer';
-import { handleMarketIntelRoutes, runMarketIntelTick, maybeSeedWeeklyRefresh, extractPostcodeParts } from './marketIntel.js';
+import { handleMarketIntelRoutes, runMarketIntelTick, maybeSeedWeeklyRefresh, extractPostcodeParts, findConfirmedSaleMatches } from './marketIntel.js';
 
 // ============================================================
 // Property CRM — Cloudflare Worker
@@ -5681,6 +5681,34 @@ async function handleApiRoutes(request, env, url, ctx) {
         'SELECT id, doc_key, doc_name, status, facts_extracted, message, error, created_at, completed_at FROM legal_extraction_jobs WHERE user_id = ? AND property_id = ? ORDER BY created_at DESC LIMIT 10'
       ).bind(session.userId, propertyId).all();
       return corsResponse({ success: true, jobs: results || [] });
+    }
+
+    // GET /api/properties/sale-match?propertyId=X — post-auction confirmed-sale
+    // candidates from our own Market Intel results (Phase 6.2, Decision 5).
+    // Read-only: this only ever *offers* a price for AJ to confirm; nothing is
+    // written to the property here. addressSimilarity is injected so the
+    // matcher is reused rather than duplicated (and marketIntel.js stays free
+    // of a circular import back into this module).
+    if (url.pathname === '/api/properties/sale-match' && request.method === 'GET') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const propertyId = url.searchParams.get('propertyId');
+      if (!propertyId) return corsResponse({ success: false, message: 'propertyId is required' }, 400);
+
+      const row = await env.CRM_DB.prepare('SELECT data FROM properties WHERE user_id = ? AND id = ?')
+        .bind(session.userId, String(propertyId)).first();
+      if (!row) return corsResponse({ success: false, message: 'Property not found' }, 404);
+
+      let property;
+      try { property = JSON.parse(row.data); } catch { return corsResponse({ success: false, message: 'Property data unreadable' }, 500); }
+
+      const matches = await findConfirmedSaleMatches(env, {
+        address: property.address,
+        postcode: property.postcode,
+        auctionDate: property.auctionDate,
+        similarity: addressSimilarity,
+      });
+      return corsResponse({ success: true, matches });
     }
 
     // GET /api/documents/* — serve a file from R2 (auth required)
