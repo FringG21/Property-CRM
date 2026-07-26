@@ -7407,6 +7407,66 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                   );
                 };
 
+                // Phase 7.1: portfolio insights — computed client-side from the
+                // structured data Phase 6 captures (bid outcomes, ourMax vs report,
+                // margins, refurb actuals, structured post-mortems). Everything is
+                // guarded so cards hide rather than print a misleading 0% when there
+                // isn't enough settled history yet.
+                const insights = (() => {
+                  const inum = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
+                  const reportMaxOf = p => inum(p.analytics?.maxBid);
+                  const ourMaxOf = p => inum(p.ourMaxBid);
+                  const houseOf = p => (p.auctionHouse || p.analytics?.auctionHouseFromReport || '').trim();
+                  const typeOf = p => (p.analytics?.propertyTypeFromReport || p.propertyType || '').trim();
+                  const outcodeOf = p => ((p.postcode || '').trim().split(/\s+/)[0] || '').toUpperCase();
+                  const marginOf = p => inum(p.analytics?.profitMargin ?? p.analytics?.margin);
+
+                  const bidSettled = properties.filter(p => ['won', 'outbid'].includes(getBidResult(p)));
+                  const wonCount = bidSettled.filter(p => getBidResult(p) === 'won').length;
+                  const winRate = bidSettled.length ? Math.round(wonCount / bidSettled.length * 100) : null;
+
+                  const margins = properties.map(marginOf).filter(m => m != null);
+                  const avgMargin = margins.length ? Math.round(margins.reduce((a, b) => a + b, 0) / margins.length) : null;
+
+                  const drifts = properties.map(p => { const r = reportMaxOf(p), o = ourMaxOf(p); return (r > 0 && o > 0) ? (o - r) / r * 100 : null; }).filter(v => v != null);
+                  const bidVsReport = drifts.length ? Math.round(drifts.reduce((a, b) => a + b, 0) / drifts.length) : null;
+
+                  const byHouse = {};
+                  bidSettled.forEach(p => { const h = houseOf(p) || 'Unknown'; (byHouse[h] = byHouse[h] || { won: 0, n: 0 }); byHouse[h].n++; if (getBidResult(p) === 'won') byHouse[h].won++; });
+                  const winByHouse = Object.entries(byHouse).map(([name, v]) => ({ name, pct: Math.round(v.won / v.n * 100), n: v.n })).sort((a, b) => b.n - a.n || b.pct - a.pct).slice(0, 4);
+
+                  const typeAgg = {};
+                  properties.forEach(p => { const r = reportMaxOf(p), o = ourMaxOf(p); if (!(r > 0 && o > 0)) return; const t = typeOf(p) || 'Unknown'; (typeAgg[t] = typeAgg[t] || { sum: 0, n: 0 }); typeAgg[t].sum += (o - r) / r * 100; typeAgg[t].n++; });
+                  const bidByType = Object.entries(typeAgg).map(([name, v]) => ({ name, pct: Math.round(v.sum / v.n), n: v.n })).sort((a, b) => b.n - a.n).slice(0, 4);
+
+                  const ocAgg = {};
+                  properties.forEach(p => { const m = marginOf(p), oc = outcodeOf(p); if (m == null || !oc) return; (ocAgg[oc] = ocAgg[oc] || { sum: 0, n: 0 }); ocAgg[oc].sum += m; ocAgg[oc].n++; });
+                  const marginByOutcode = Object.entries(ocAgg).map(([name, v]) => ({ name, pct: Math.round(v.sum / v.n), n: v.n })).sort((a, b) => b.pct - a.pct);
+
+                  const refurbDiffs = properties.map(p => {
+                    const act = inum(p.actualRefurbCost); if (!act) return null;
+                    const lvl = p.refurbLevel || 'medium';
+                    const est = inum(lvl === 'light' ? p.analytics?.refurbLight : lvl === 'heavy' ? p.analytics?.refurbHeavy : p.analytics?.refurbMedium);
+                    return (est > 0) ? (act - est) / est * 100 : null;
+                  }).filter(v => v != null);
+                  const refurbAccuracy = refurbDiffs.length ? Math.round(refurbDiffs.reduce((a, b) => a + b, 0) / refurbDiffs.length) : null;
+
+                  const REASON_LABELS = { outbid_over_max: 'Hammer over our max', too_cautious: 'Stopped too low', gdv_wrong: 'GDV was off', refurb_wrong: 'Refurb estimate off', costs_missed: 'Missed costs', strategic: 'Chose to walk', timing_finance: 'Timing / financing', other: 'Other' };
+                  const reasonCounts = {};
+                  properties.forEach(p => { const r = p.postMortemStructured?.primaryReason; if (r) reasonCounts[r] = (reasonCounts[r] || 0) + 1; });
+                  const declineReasons = Object.entries(reasonCounts).map(([k, n]) => ({ label: REASON_LABELS[k] || k, n })).sort((a, b) => b.n - a.n).slice(0, 4);
+
+                  const findings = [];
+                  const worstType = bidByType.filter(t => t.n >= 2 && Math.abs(t.pct) >= 4).sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct))[0];
+                  if (worstType) findings.push({ sev: worstType.pct > 0 ? 'danger' : 'good', text: <>You {worstType.pct > 0 ? 'over-bid' : 'come in under on'} <b>{worstType.name.toLowerCase()} by {Math.abs(worstType.pct)}%</b> vs report max.</>, sub: `across ${worstType.n} lots` });
+                  if (refurbAccuracy != null && Math.abs(refurbAccuracy) >= 5 && refurbDiffs.length >= 2) findings.push({ sev: refurbAccuracy > 0 ? 'warn' : 'good', text: <>Refurb actuals run <b>{refurbAccuracy > 0 ? '+' : ''}{refurbAccuracy}% {refurbAccuracy > 0 ? 'over' : 'under'} estimate</b>.</>, sub: `${refurbDiffs.length} completed deals` });
+                  if (marginByOutcode[0] && marginByOutcode[0].n >= 1) findings.push({ sev: 'good', text: <>Best hunting ground: <b>{marginByOutcode[0].name} at {marginByOutcode[0].pct}% margin</b>.</>, sub: marginByOutcode.length > 1 ? `vs ${marginByOutcode[marginByOutcode.length - 1].name} at ${marginByOutcode[marginByOutcode.length - 1].pct}%` : 'across your deals' });
+                  if (winRate != null && declineReasons[0]) findings.push({ sev: 'dim', text: <>Win rate <b>{winRate}%</b> · most common loss reason <b>{declineReasons[0].label.toLowerCase()} ({declineReasons[0].n}×)</b>.</>, sub: `${bidSettled.length} settled deals` });
+
+                  const hasAny = winRate != null || avgMargin != null || bidVsReport != null || winByHouse.length > 0 || bidByType.length > 0;
+                  return { winRate, avgMargin, bidVsReport, winByHouse, bidByType, findings: findings.slice(0, 3), hasAny, settledN: bidSettled.length };
+                })();
+
                 return (
                   <div style={pageWrapStyle}>
 
@@ -7456,6 +7516,74 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     <div style={{ ...glass, display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : isTablet ? 'repeat(3, 1fr)' : 'repeat(5, 1fr)', gap: '16px', padding: isMobile ? '18px 12px' : '22px 12px' }}>
                       {kpiDefs.map(k => <Ring key={k.key} pct={k.pct} color={k.color} value={k.val} label={k.label} sub={k.sub} size={isMobile ? 82 : 100} onClick={k.onClick} />)}
                     </div>
+
+                    {/* Phase 7.1: Portfolio insights — ranked findings + analytics rail */}
+                    {insights.hasAny && (
+                      <div style={{ ...glass, padding: isMobile ? '16px' : '18px 22px' }}>
+                        <div style={panelHead}><span>Portfolio insights</span><span style={{ fontSize: '10px', color: T.textDim, fontWeight: '600' }}>{insights.settledN} settled deal{insights.settledN !== 1 ? 's' : ''}</span></div>
+
+                        {insights.findings.length > 0 && (
+                          <div style={{ display: 'flex', flexDirection: 'column', marginBottom: '14px' }}>
+                            {insights.findings.map((f, i) => {
+                              const fc = f.sev === 'danger' ? T.danger : f.sev === 'warn' ? T.warn : f.sev === 'good' ? T.good : T.textDim;
+                              return (
+                                <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: '9px', padding: '8px 2px', borderBottom: i < insights.findings.length - 1 ? `1px solid ${T.divider}` : 'none' }}>
+                                  <span style={{ fontSize: '12px', color: fc, marginTop: '2px', flexShrink: 0 }}>{f.sev === 'danger' ? '▲' : f.sev === 'warn' ? '◆' : '●'}</span>
+                                  <div><div style={{ fontSize: '12.5px', color: T.text, lineHeight: 1.4 }}>{f.text}</div><div style={{ fontSize: '10px', color: T.textDim, marginTop: '1px' }}>{f.sub}</div></div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: '10px', marginBottom: (insights.winByHouse.length || insights.bidByType.length) ? '16px' : 0 }}>
+                          {[
+                            { l: 'Win rate', v: insights.winRate != null ? `${insights.winRate}%` : '—', c: T.text },
+                            { l: 'Avg margin', v: insights.avgMargin != null ? `${insights.avgMargin}%` : '—', c: T.good },
+                            { l: 'Bid vs report', v: insights.bidVsReport != null ? `${Math.abs(insights.bidVsReport)}% ${insights.bidVsReport <= 0 ? 'under' : 'over'}` : '—', c: insights.bidVsReport > 0 ? T.danger : T.warn },
+                          ].map(k => (
+                            <div key={k.l} style={{ background: T.chip, borderRadius: '10px', padding: '11px 13px' }}>
+                              <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.05em', color: T.textDim }}>{k.l}</div>
+                              <div style={{ fontSize: '20px', fontWeight: '700', color: k.c, marginTop: '2px' }}>{k.v}</div>
+                            </div>
+                          ))}
+                        </div>
+
+                        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '18px' }}>
+                          {insights.winByHouse.length > 0 && (
+                            <div>
+                              <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.05em', color: T.textDim, marginBottom: '8px' }}>Win rate by auction house</div>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
+                                {insights.winByHouse.map(h => (
+                                  <div key={h.name} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: T.text }}>
+                                    <span style={{ width: '84px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={h.name}>{h.name}</span>
+                                    <div style={{ flex: 1, height: '7px', background: T.ringTrack, borderRadius: '4px' }}><div style={{ width: `${Math.max(3, h.pct)}%`, height: '100%', background: T.accent, borderRadius: '4px' }} /></div>
+                                    <span style={{ width: '46px', textAlign: 'right', color: T.textDim }}>{h.pct}% · {h.n}</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {insights.bidByType.length > 0 && (
+                            <div>
+                              <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.05em', color: T.textDim, marginBottom: '8px' }}>Bid vs report by type</div>
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
+                                {insights.bidByType.map(t => (
+                                  <div key={t.name} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: T.text }}>
+                                    <span style={{ width: '84px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={t.name}>{t.name}</span>
+                                    <div style={{ flex: 1, height: '7px', background: T.ringTrack, borderRadius: '4px', position: 'relative' }}>
+                                      <div style={{ position: 'absolute', left: '50%', top: 0, width: '1px', height: '100%', background: T.divider }} />
+                                      <div style={{ position: 'absolute', ...(t.pct >= 0 ? { left: '50%' } : { right: '50%' }), width: `${Math.min(50, Math.abs(t.pct))}%`, height: '100%', background: t.pct > 0 ? T.danger : T.good, borderRadius: '4px' }} />
+                                    </div>
+                                    <span style={{ width: '46px', textAlign: 'right', color: t.pct > 0 ? T.danger : T.good }}>{t.pct > 0 ? '+' : ''}{t.pct}%</span>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
 
                     {/* Auctions this week — hero timeline (the "line" showing upcoming bids) */}
                     <div style={{ ...glass, padding: isMobile ? '16px' : '20px 24px 26px' }}>
