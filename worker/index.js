@@ -783,6 +783,26 @@ async function maybeSnapshotValuation(env, userId, oldProperty, newProperty, sav
   const oldAn = oldProperty?.analytics || {};
   const newAn = newProperty?.analytics || {};
   const num = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
+
+  // Phase 6.3: append a result snapshot when a post-auction hammer/winning price
+  // is recorded on a settled deal, so result-vs-prediction trends. Independent of
+  // the analytics diff below (which never fires on a bare lotSalePrice edit).
+  // property_valuations has no hammer column, so hammer/ourMax/reportMax live in
+  // the data blob; source is 'manual' since it's a hand-recorded outcome.
+  const oldHammer = num(oldProperty?.lotSalePrice);
+  const newHammer = num(newProperty?.lotSalePrice);
+  const settled = ['Won', 'Lost'].includes(String(newProperty?.status || ''));
+  if (settled && newHammer != null && newHammer !== oldHammer) {
+    const resultData = { kind: 'result', hammer: newHammer, ourMax: num(newProperty.ourMaxBid), reportMax: num(newAn.maxBid), result: newProperty.bidOutcome?.result || null, hammerSource: newProperty.hammerSource || null };
+    await env.CRM_DB.prepare(
+      `INSERT INTO property_valuations (user_id, property_id, at, source, gdv_conservative, gdv_base, gdv_optimistic, max_bid, total_investment, net_profit, margin, roi, verdict, run_id, data)
+       VALUES (?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      userId, String(newProperty.id), savedAt,
+      null, null, null, num(newProperty.ourMaxBid), null, null, null, null, null, null, JSON.stringify(resultData)
+    ).run();
+  }
+
   const changed = VALUATION_NUMERIC_FIELDS.some(k => num(oldAn[k]) !== num(newAn[k])) || (oldAn.verdict || null) !== (newAn.verdict || null);
   if (!changed) return { changed: false };
   const margin = newAn.profitMargin ?? newAn.margin ?? null;

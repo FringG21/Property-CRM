@@ -639,6 +639,8 @@ export default function App({ user = {}, onLogout }) {
   const [bidNoteInput, setBidNoteInput] = useState('');
   const [bidKindInput, setBidKindInput] = useState('bid');
   const [bidOverrideInput, setBidOverrideInput] = useState('');
+  // Phase 6.3: post-auction confirmed-sale suggestions from Market Intel (6.2 endpoint)
+  const [saleMatch, setSaleMatch] = useState({ propId: null, loading: false, matches: [], fetched: false, error: null });
   const [propSidebarCollapsed, setPropSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem('propSidebarCollapsed') === '1'; } catch (e) { return false; }
   });
@@ -1207,6 +1209,36 @@ export default function App({ user = {}, onLogout }) {
     let updated = { ...currentViewProperty, bidLog: [...(currentViewProperty.bidLog || []), entry] };
     const kindLabel = { bid: 'Bid placed', outbid: 'Outbid', walk: 'Walked away', hammer: 'Hammer price' }[kind] || 'Bid placed';
     updated = withActivity(updated, 'bid', `${kindLabel}: £${entry.amount.toLocaleString()}${overMax ? ' (over max)' : ''}${entry.note ? ` — ${entry.note}` : ''}`);
+    setCurrentViewProperty(updated);
+    setProperties(properties.map(p => p.id === currentViewProperty.id ? updated : p));
+  };
+
+  // Phase 6.3: ask the 6.2 sale-match endpoint for confirmed-sale candidates from
+  // our own Market Intel results. Read-only on the server — it only offers prices;
+  // recording one just fills lotSalePrice (the existing hammer field) below.
+  const fetchSaleMatch = async (prop) => {
+    const p = prop || currentViewProperty;
+    if (!p) return;
+    setSaleMatch({ propId: p.id, loading: true, matches: [], fetched: false, error: null });
+    try {
+      const token = localStorage.getItem('crm_session');
+      const res = await fetch(`/api/properties/sale-match?propertyId=${encodeURIComponent(p.id)}`, { headers: { 'Authorization': `Bearer ${token}` } });
+      const data = await res.json();
+      if (!data || data.success === false) throw new Error(data?.message || 'lookup failed');
+      setSaleMatch({ propId: p.id, loading: false, matches: data.matches || [], fetched: true, error: null });
+    } catch (e) {
+      setSaleMatch({ propId: p.id, loading: false, matches: [], fetched: true, error: String(e?.message || e) });
+    }
+  };
+
+  // Record a confirmed hammer/winning price onto the property (fills lotSalePrice,
+  // the existing field the outcome cards already read). source tags where it came
+  // from — a Market Intel match, a bid-log hammer entry, or manual entry.
+  const recordHammerPrice = (amount, source) => {
+    if (!currentViewProperty || !(amount > 0)) return;
+    let updated = { ...currentViewProperty, lotSalePrice: Math.round(amount) };
+    if (source) updated.hammerSource = source;
+    updated = withActivity(updated, 'bid', `Confirmed sale recorded: £${Math.round(amount).toLocaleString()}${source ? ` (${source})` : ''}`);
     setCurrentViewProperty(updated);
     setProperties(properties.map(p => p.id === currentViewProperty.id ? updated : p));
   };
@@ -4184,6 +4216,87 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
             const floorArea = parseFloat(an.floorArea) || parseFloat(currentViewProperty.floorArea) || 0;
             const buyInPsm = (floorArea && ourMaxBid) ? Math.round(ourMaxBid / floorArea) : 0;
             const gdvPsm = (floorArea && baseGDV) ? Math.round(baseGDV / floorArea) : 0;
+
+            // Phase 6.3: result-vs-prediction variance ladder. Plots report max,
+            // our max and the confirmed hammer (lotSalePrice) on one scale so the
+            // gap is visible at a glance. Returns null until we have ≥2 of the three.
+            const renderResultLadder = () => {
+              const hammer = parseFloat(currentViewProperty.lotSalePrice) || 0;
+              const won = getBidResult(currentViewProperty) === 'won';
+              const pts = [
+                reportMax > 0 && { key: 'report', label: 'Report max', v: reportMax, color: '#94a3b8' },
+                ourMaxBid > 0 && { key: 'ourmax', label: 'Our max', v: ourMaxBid, color: '#7C3AED' },
+                hammer > 0 && { key: 'hammer', label: won ? 'We paid' : 'Hammer', v: hammer, color: won ? '#059669' : '#dc2626' },
+              ].filter(Boolean).sort((a, b) => a.v - b.v);
+              if (pts.length < 2) return null;
+              const lo = pts[0].v, hi = pts[pts.length - 1].v;
+              const pad = (hi - lo || hi || 1) * 0.14;
+              const min = lo - pad, max = hi + pad;
+              const pos = v => Math.max(2, Math.min(98, Math.round((v - min) / (max - min) * 100)));
+              const shortBy = (hammer > 0 && ourMaxBid > 0) ? hammer - ourMaxBid : null;
+              const shortPct = (shortBy != null && ourMaxBid > 0) ? Math.round(Math.abs(shortBy) / ourMaxBid * 100) : null;
+              const repVsMax = (ourMaxBid > 0 && reportMax > 0) ? ourMaxBid - reportMax : null;
+              let takeaway = null;
+              if (hammer > 0 && ourMaxBid > 0) {
+                if (won) takeaway = <>We won at <b>£{hammer.toLocaleString()}</b>{shortBy < 0 ? <> — <span style={{ color: '#059669', fontWeight: 600 }}>£{Math.abs(shortBy).toLocaleString()} ({shortPct}%) under our max</span></> : shortBy > 0 ? <> — <span style={{ color: '#dc2626', fontWeight: 600 }}>£{shortBy.toLocaleString()} over our stated max</span></> : ' — exactly at our max'}.</>;
+                else takeaway = <>We were <span style={{ color: '#dc2626', fontWeight: 600 }}>£{Math.abs(shortBy).toLocaleString()} ({shortPct}%) short</span> of the hammer.</>;
+              }
+              return (
+                <div style={{ border: '1px solid #e2e8f0', borderRadius: '10px', background: '#fff', padding: '12px 14px', marginBottom: '12px' }}>
+                  <div style={{ fontSize: '10px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.06em', color: '#94a3b8', marginBottom: '10px' }}>Result vs prediction</div>
+                  <div style={{ position: 'relative', height: '66px', margin: '0 10px' }}>
+                    <div style={{ position: 'absolute', top: '38px', left: 0, right: 0, height: '2px', background: '#e2e8f0' }} />
+                    {pts.map((p, i) => {
+                      const below = i % 2 === 0;
+                      return (
+                        <div key={p.key} style={{ position: 'absolute', top: below ? '34px' : '2px', left: `${pos(p.v)}%`, transform: 'translateX(-50%)', display: 'flex', flexDirection: below ? 'column' : 'column-reverse', alignItems: 'center' }}>
+                          <div style={{ width: '11px', height: '11px', borderRadius: '50%', background: p.color, flexShrink: 0 }} />
+                          <span style={{ fontSize: '10px', color: p.color, fontWeight: '600', whiteSpace: 'nowrap', margin: below ? '5px 0 0' : '0 0 5px' }}>{p.label} £{Math.round(p.v / 1000)}k</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {takeaway && (
+                    <div style={{ borderTop: '0.5px solid #e2e8f0', marginTop: '8px', paddingTop: '9px', fontSize: '12px', color: '#334155', lineHeight: 1.45 }}>
+                      {takeaway}{repVsMax != null && reportMax > 0 ? <span style={{ color: '#64748b' }}> Our max was {repVsMax >= 0 ? `£${repVsMax.toLocaleString()} above` : `£${Math.abs(repVsMax).toLocaleString()} below`} the report ceiling.</span> : null}
+                    </div>
+                  )}
+                </div>
+              );
+            };
+
+            // Phase 6.3: auto-suggest strip — pulls confirmed-sale candidates from
+            // Market Intel (6.2 endpoint) and offers a one-click fill of lotSalePrice.
+            const renderSaleMatchSuggest = () => {
+              const mine = saleMatch.propId === currentViewProperty.id;
+              const matches = mine ? saleMatch.matches : [];
+              const top = matches[0];
+              return (
+                <div style={{ border: '1px dashed #ddd6fe', borderRadius: '8px', background: '#faf5ff', padding: '9px 12px', marginBottom: '12px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: '11px', fontWeight: '600', color: '#6d28d9' }}>Confirmed sale (Market Intel)</span>
+                    <button onClick={() => fetchSaleMatch(currentViewProperty)} disabled={mine && saleMatch.loading} style={{ marginLeft: 'auto', fontSize: '11px', fontWeight: '600', padding: '4px 10px', borderRadius: '6px', border: '1px solid #ddd6fe', background: '#fff', color: '#7C3AED', cursor: (mine && saleMatch.loading) ? 'wait' : 'pointer', fontFamily: 'inherit' }}>{mine && saleMatch.loading ? '⏳ Searching…' : mine && saleMatch.fetched ? '↻ Search again' : '⌕ Find sale price'}</button>
+                  </div>
+                  {mine && saleMatch.fetched && !saleMatch.loading && (
+                    matches.length === 0 ? (
+                      <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '6px' }}>No confirmed match in our Market Intel results — enter the price manually below.</div>
+                    ) : (
+                      <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                        {matches.map(m => (
+                          <div key={m.lotId} style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px' }}>
+                            <span style={{ fontWeight: '600', color: '#0f172a', whiteSpace: 'nowrap' }}>£{(m.soldPrice || 0).toLocaleString()}</span>
+                            <span style={{ color: '#64748b', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{m.address || '—'}</span>
+                            <span style={{ color: '#94a3b8', whiteSpace: 'nowrap' }}>{Math.round((m.confidence || 0) * 100)}% match</span>
+                            <button onClick={() => recordHammerPrice(m.soldPrice, 'market')} style={{ fontSize: '10px', fontWeight: '600', padding: '3px 9px', borderRadius: '5px', border: 'none', background: '#7C3AED', color: '#fff', cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}>Use this</button>
+                          </div>
+                        ))}
+                        <div style={{ fontSize: '10px', color: '#94a3b8' }}>Confirmed printed prices only — review before recording.</div>
+                      </div>
+                    )
+                  )}
+                </div>
+              );
+            };
             const MAIN_STAGES = ['Sourced', 'Under Review', 'Bidding'];
             const stIdx = MAIN_STAGES.indexOf(st);
             const fmtNum = v => v ? `£${Number(Math.round(v)).toLocaleString()}` : '—';
@@ -5481,6 +5594,8 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         <button onClick={handleFetchLotResult} disabled={fetchingLotResult} title="Scrape the lot/listing page for sold status, price and bid count" style={{ marginLeft: 'auto', fontSize: '11px', fontWeight: '600', padding: '5px 11px', borderRadius: '6px', border: '1px solid #ddd6fe', background: '#f5f3ff', color: '#7C3AED', cursor: fetchingLotResult ? 'wait' : 'pointer', fontFamily: 'inherit' }}>{fetchingLotResult ? '⏳ Fetching…' : '⤓ Fetch result'}</button>
                       </div>
                       <div style={{ padding: '12px 14px' }}>
+                        {(st === 'Won' || getBidResult(currentViewProperty) === 'no_bid') && renderResultLadder()}
+                        {renderSaleMatchSuggest()}
                         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4,1fr)', gap: '8px' }}>
                           <div>
                             <div style={lbl2}>Lot outcome</div>
@@ -5535,6 +5650,8 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         <button onClick={handleFetchLotResult} disabled={fetchingLotResult} title="Scrape the lot/listing page for sold status, price and bid count" style={{ marginLeft: 'auto', fontSize: '11px', fontWeight: '600', padding: '5px 11px', borderRadius: '6px', border: '1px solid #ddd6fe', background: '#f5f3ff', color: '#7C3AED', cursor: fetchingLotResult ? 'wait' : 'pointer', fontFamily: 'inherit' }}>{fetchingLotResult ? '⏳ Fetching…' : '⤓ Fetch result'}</button>
                       </div>
                       <div style={{ padding: '12px 14px' }}>
+                        {renderResultLadder()}
+                        {renderSaleMatchSuggest()}
                         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(4,1fr)', gap: '8px' }}>
                           <div>
                             <div style={lbl3}>Winning bid</div>
