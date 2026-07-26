@@ -5641,6 +5641,11 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     const winning = parseFloat(currentViewProperty.lotSalePrice) || parseFloat(currentViewProperty.outbidPrice) || 0;
                     const delta = winning && ourMaxBid ? winning - ourMaxBid : null;
                     const maxPct = (ourMaxBid && reportMax) ? Math.round(ourMaxBid / reportMax * 100) : null;
+                    // Phase 6.4: structured post-mortem layer alongside the free-text
+                    // note, so Phase 7 can detect patterns (systematic under-bidding,
+                    // recurring GDV/refurb misses). Stored as one object on the property.
+                    const pm = currentViewProperty.postMortemStructured || {};
+                    const setPm = (k, v) => updateFieldInView('postMortemStructured', { ...pm, [k]: v });
                     return (
                     <div style={{ margin: '14px 20px', border: '1px solid #e2e8f0', borderRadius: '10px', overflow: 'hidden', background: '#fff' }}>
                       <div style={{ padding: '10px 14px', borderBottom: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
@@ -5705,6 +5710,53 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                           </div>
                         )}
                         <div style={{ marginTop: '10px', paddingTop: '8px', borderTop: '1px solid #f1f5f9' }}>
+                          <div style={{ ...lbl3, marginBottom: '8px' }}>Post-mortem — quick structured read</div>
+                          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(2,1fr)', gap: '8px', marginBottom: '10px' }}>
+                            <div>
+                              <div style={{ ...lbl3, textTransform: 'none', letterSpacing: 0, color: '#94a3b8' }}>Primary reason</div>
+                              <select value={pm.primaryReason || ''} onChange={e => setPm('primaryReason', e.target.value)} style={inpStyle3}>
+                                <option value="">—</option>
+                                <option value="outbid_over_max">Outbid — hammer over our max</option>
+                                <option value="too_cautious">Outbid — we stopped too low</option>
+                                <option value="gdv_wrong">Our GDV was off</option>
+                                <option value="refurb_wrong">Refurb estimate was off</option>
+                                <option value="costs_missed">Missed costs (legal/holding)</option>
+                                <option value="strategic">Chose to walk — deal changed</option>
+                                <option value="timing_finance">Timing / financing</option>
+                                <option value="other">Other</option>
+                              </select>
+                            </div>
+                            <div>
+                              <div style={{ ...lbl3, textTransform: 'none', letterSpacing: 0, color: '#94a3b8' }}>Would we bid the same again?</div>
+                              <select value={pm.bidAgain || ''} onChange={e => setPm('bidAgain', e.target.value)} style={inpStyle3}>
+                                <option value="">—</option>
+                                <option value="same">Yes — same max</option>
+                                <option value="higher">Yes — but higher</option>
+                                <option value="lower">Yes — but lower</option>
+                                <option value="no">No — wouldn't chase it</option>
+                              </select>
+                            </div>
+                            <div>
+                              <div style={{ ...lbl3, textTransform: 'none', letterSpacing: 0, color: '#94a3b8' }}>Was our GDV right?</div>
+                              <select value={pm.gdvAccuracy || ''} onChange={e => setPm('gdvAccuracy', e.target.value)} style={inpStyle3}>
+                                <option value="">—</option>
+                                <option value="right">About right</option>
+                                <option value="too_high">Too high</option>
+                                <option value="too_low">Too low</option>
+                                <option value="unsure">Not sure yet</option>
+                              </select>
+                            </div>
+                            <div>
+                              <div style={{ ...lbl3, textTransform: 'none', letterSpacing: 0, color: '#94a3b8' }}>Was our refurb estimate right?</div>
+                              <select value={pm.refurbAccuracy || ''} onChange={e => setPm('refurbAccuracy', e.target.value)} style={inpStyle3}>
+                                <option value="">—</option>
+                                <option value="right">About right</option>
+                                <option value="too_high">Too high</option>
+                                <option value="too_low">Too low</option>
+                                <option value="unsure">Not sure yet</option>
+                              </select>
+                            </div>
+                          </div>
                           <div style={lbl3}>Post-mortem — what happened & what we'd change</div>
                           <textarea value={currentViewProperty.postMortem || ''} onChange={e => updateFieldInView('postMortem', e.target.value)} placeholder="e.g. Outbid by £12k — our GDV was right but we were slow to walk; this street keeps going 15% over report max…" style={{ ...inpStyle3, minHeight: '64px', resize: 'vertical', lineHeight: '1.5' }} />
                         </div>
