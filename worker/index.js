@@ -757,9 +757,11 @@ async function syncPropertyComps(env, userId, property, savedAt) {
       `INSERT OR REPLACE INTO property_comps (user_id, property_id, comp_id, address, postcode, beds, prop_type, tenure, floor_area, price, price_type, price_date, distance_m, source, source_priority, field_sources, confidence, excluded, exclude_reason, data)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
-      userId, propertyId, String(row._key || `comp-${i}`), row.address ?? null, null, row.bedrooms ?? null, row.propertyType ?? null,
-      row.tenure ?? null, row.floorArea ?? null, row.price ?? null, row.price != null ? 'sold' : null, row.date || null,
-      null, (row.tags || []).map(t => t.label).join(', ') || null, i, JSON.stringify(row._mergedFrom || {}), row.confidence ?? null,
+      userId, propertyId, String(row._key || `comp-${i}`), row.address ?? null, row.postcode ?? null, row.bedrooms ?? null, row.propertyType ?? null,
+      row.tenure ?? null, row.floorArea ?? null, row.price ?? null,
+      row.price != null ? (row.status === 'sold' ? 'sold' : 'asking') : null, row.date || null,
+      row.distanceMiles != null ? Math.round(row.distanceMiles * 1609.34) : null,
+      (row.tags || []).map(t => t.label).join(', ') || null, i, JSON.stringify(row._mergedFrom || {}), row.confidence ?? null,
       0, null, JSON.stringify(row)
     ));
   });
@@ -2912,6 +2914,34 @@ function normCompKey(addr) {
   return String(addr || '').split(',')[0].toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
+// ── Comp geo helpers (Phase 1 comps overhaul) ───────────────────────────────
+// These MUST mirror the copies in src/App.jsx (extractCompPostcode / pcKey /
+// haversineMiles / compDistanceMiles) so server-persisted distances match what
+// the tab renders. Distance is read from property.compGeo — a postcode→{lat,lng}
+// cache the client fills client-side via postcodes.io (CORS-enabled). resolveComps
+// only consumes the cache; it never geocodes.
+function extractCompPostcode(str) {
+  const m = String(str || '').toUpperCase().match(/[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}/);
+  return m ? m[0] : '';
+}
+function pcKey(pc) {
+  return String(pc || '').toUpperCase().replace(/\s+/g, '');
+}
+function haversineMiles(lat1, lng1, lat2, lng2) {
+  if ([lat1, lng1, lat2, lng2].some(v => v == null || !Number.isFinite(Number(v)))) return null;
+  const R = 3958.8, toRad = d => Number(d) * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1), dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 100) / 100;
+}
+function compDistanceMiles(comp, compGeo) {
+  if (!compGeo || !compGeo._subject) return null;
+  const key = pcKey(comp.postcode || extractCompPostcode(comp.address));
+  const g = key && compGeo[key];
+  if (!g) return null;
+  return haversineMiles(compGeo._subject.lat, compGeo._subject.lng, g.lat, g.lng);
+}
+
 // Phase 2 (property-view-v2 plan), Step 2.3: the four-source comp
 // reconciliation (report + Land Registry + manual/RM Plus + AI web search),
 // moved here from the Comparables tab's render block so it can be persisted.
@@ -2951,15 +2981,18 @@ function resolveComps(property) {
       order.push(key);
     }
   };
+  const marketComps = (property?.marketComps || []);
   reportComps.forEach(c => upsert(c.address, 'Report', 'report', {
     address: c.address, price: c.soldPrice, date: c.soldDate, propertyType: c.propertyType,
     bedrooms: c.bedrooms, floorArea: c.floorArea, tier: c.tier,
+    status: 'sold', postcode: extractCompPostcode(c.address) || null,
   }));
   lrItems.forEach(item => upsert([item.address, item.town].filter(Boolean).join(', '), 'Land Reg', 'lr', {
     address: [item.address, item.town].filter(Boolean).join(', '), price: item.price,
     date: item.date || '', propertyType: item.propertyType, newBuild: item.newBuild,
     epcRating: item.epcRating, floorArea: item.floorArea, habitableRooms: item.habitableRooms,
     epcPotential: item.epcPotential, heatingType: item.heatingType,
+    status: 'sold', postcode: item.postcode || null,
   }));
   otherComps.forEach(c => {
     const isReport = /report/i.test(c.source || ''); const isLr = /land\s*reg/i.test(c.source || ''); const isRm = /rightmove/i.test(c.source || '');
@@ -2968,21 +3001,35 @@ function resolveComps(property) {
       date: (c.soldDate || c.date) || '', bedrooms: c.bedrooms, notes: c.notes,
       propertyType: c.propertyType, tenure: c.tenure, floorArea: c.floorArea,
       enriched: c.enriched, fieldSources: c.fieldSources,
+      status: c.status || 'sold', postcode: c.postcode || extractCompPostcode(c.address) || null,
+    });
+  });
+  // Phase 2 (comps overhaul): scraped current-market + SSTC + sold comps from the
+  // analyser. Carries its own listing status ('on_market'|'stc'|'sold').
+  marketComps.forEach(c => {
+    const kind = /zoopla/i.test(c.source || '') ? 'web' : 'rm';
+    upsert(c.address, c.source || 'Rightmove', kind, {
+      address: c.address, price: c.price ?? c.soldPrice, date: c.date || '',
+      bedrooms: c.beds ?? c.bedrooms, propertyType: c.propertyType, floorArea: c.floorArea,
+      status: c.status || (c.priceType === 'asking' ? 'on_market' : 'sold'),
+      postcode: c.postcode || extractCompPostcode(c.address) || null, url: c.url,
     });
   });
   webComps.forEach(c => upsert(c.address, 'Web', 'web', {
     address: c.address, price: parseWebCompPrice(c.price), date: c.date || '',
+    status: c.status || 'sold', postcode: extractCompPostcode(c.address) || null,
   }));
 
   // Confidence: base trust per originating source, +0.15 per corroborating
   // source, capped at 1. A simple, defensible heuristic — not yet
   // display-critical since the render block hasn't switched to read it.
   const SOURCE_BASE_CONFIDENCE = { report: 0.75, lr: 0.75, rm: 0.6, web: 0.4, manual: 0.5 };
+  const compGeo = property?.compGeo || null;
   return order.map(k => {
     const row = merged[k];
     const primaryKind = row.tags[0]?.kind || 'manual';
     const confidence = Math.min(1, (SOURCE_BASE_CONFIDENCE[primaryKind] ?? 0.5) + 0.15 * Math.max(0, row.tags.length - 1));
-    return { ...row, confidence };
+    return { ...row, confidence, distanceMiles: compDistanceMiles(row, compGeo) };
   });
 }
 

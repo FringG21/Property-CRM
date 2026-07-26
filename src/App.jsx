@@ -634,6 +634,12 @@ export default function App({ user = {}, onLogout }) {
   const [propCanvasTab, setPropCanvasTab] = useState('overview');
   const [docsHighlightKey, setDocsHighlightKey] = useState(null);
   const [compSort, setCompSort] = useState('default'); // 'default' | 'asc' | 'desc'
+  const [compRadius, setCompRadius] = useState('all'); // 'street' | '0.25' | '0.5' | 'all'
+  const [compStatusFilter, setCompStatusFilter] = useState('all'); // 'all' | 'on_market' | 'stc' | 'sold'
+  const [compSourceFilter, setCompSourceFilter] = useState('all');
+  const [compBedsFilter, setCompBedsFilter] = useState('all');
+  const [compTableOpen, setCompTableOpen] = useState(true);
+  const [compGeoBusy, setCompGeoBusy] = useState(false);
   const [narrativeTab, setNarrativeTab] = useState(null); // null = auto (AI review when scored, else report)
   const [bidAmountInput, setBidAmountInput] = useState('');
   const [bidNoteInput, setBidNoteInput] = useState('');
@@ -1167,6 +1173,80 @@ export default function App({ user = {}, onLogout }) {
     setCurrentViewProperty(updated);
     setProperties(properties.map(p => p.id === currentViewProperty.id ? updated : p));
   };
+
+  // ── Comp distance (comps overhaul, Phase 1a) ──────────────────────────────
+  // Radius filtering needs a lat/lng per comparable. postcodes.io is CORS-enabled
+  // and takes ≤100 postcodes per bulk POST, so the lookup runs client-side here and
+  // caches onto property.compGeo — { [postcodeNoSpace]: {lat,lng} | null, _subject }.
+  // The worker's resolveComps() reads that same cache to persist distance_m, so
+  // these three helpers MUST stay identical to their copies in worker/index.js.
+  const pcKey = (pc) => String(pc || '').toUpperCase().replace(/\s+/g, '');
+  const haversineMiles = (lat1, lng1, lat2, lng2) => {
+    if ([lat1, lng1, lat2, lng2].some(v => v == null || !Number.isFinite(Number(v)))) return null;
+    const R = 3958.8, toRad = d => Number(d) * Math.PI / 180;
+    const dLat = toRad(lat2 - lat1), dLng = toRad(lng2 - lng1);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+    return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 100) / 100;
+  };
+  const compDistanceMiles = (comp, compGeo) => {
+    if (!compGeo || !compGeo._subject) return null;
+    const key = pcKey(comp.postcode || extractPostcode(comp.address || ''));
+    const g = key && compGeo[key];
+    if (!g) return null;
+    return haversineMiles(compGeo._subject.lat, compGeo._subject.lng, g.lat, g.lng);
+  };
+
+  useEffect(() => {
+    const prop = currentViewProperty;
+    if (!prop || propCanvasTab !== 'comparables') return;
+    const an = prop.analytics || {};
+    const wanted = new Set();
+    const add = (s) => { const pc = pcKey(extractPostcode(s || '')); if (pc) wanted.add(pc); };
+    (an.compsList || []).forEach(c => add(c.address));
+    (an.dealAnalysisComparables || []).forEach(c => add(c.address));
+    (prop.intelligence?.connectors?.landRegistry?.data?.items || []).forEach(it => add(it.postcode || it.address));
+    (prop.comparables || []).forEach(c => add(c.postcode || c.address));
+    (prop.marketComps || []).forEach(c => add(c.postcode || c.address));
+    const subjectPc = pcKey(prop.postcode || extractPostcode(prop.address || '') || extractPostcode(prop.dealName || ''));
+    if (subjectPc) wanted.add(subjectPc);
+
+    const geo = prop.compGeo || {};
+    const missing = [...wanted].filter(pc => !(pc in geo));
+    if (!missing.length) return;
+
+    let cancelled = false;
+    setCompGeoBusy(true);
+    (async () => {
+      const found = {};
+      for (let i = 0; i < missing.length; i += 100) {
+        try {
+          const res = await fetch('https://api.postcodes.io/postcodes', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ postcodes: missing.slice(i, i + 100) }),
+          });
+          const json = await res.json();
+          // Cache misses as null too, so an unresolvable postcode isn't re-requested
+          // on every visit to the tab.
+          (json.result || []).forEach(r => {
+            found[pcKey(r.query)] = r.result ? { lat: r.result.latitude, lng: r.result.longitude } : null;
+          });
+        } catch { /* offline or rate-limited — leave uncached and retry next open */ }
+      }
+      if (cancelled) { setCompGeoBusy(false); return; }
+      if (Object.keys(found).length) {
+        const patch = (p) => {
+          const next = { ...(p.compGeo || {}), ...found };
+          const subj = subjectPc ? (next[subjectPc] || next._subject || null) : next._subject || null;
+          if (subj) next._subject = subj;
+          return { ...p, compGeo: next };
+        };
+        setCurrentViewProperty(p => (p && p.id === prop.id) ? patch(p) : p);
+        setProperties(ps => ps.map(p => p.id === prop.id ? patch(p) : p));
+      }
+      setCompGeoBusy(false);
+    })();
+    return () => { cancelled = true; };
+  }, [currentViewProperty?.id, propCanvasTab]);
 
   // Record an auction result: sets the Won/Lost stage and the bidOutcome detail
   // (outbid vs no-bid vs withdrawn) in one update
@@ -4887,7 +4967,8 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                     const reportCount = an.comps || 0;
                     const otherComps = (currentViewProperty.comparables || []).filter(c => !c.fromIntelligence);
                     const webComps = an.dealAnalysisComparables || [];
-                    const rawTotal = reportComps.length + lrItems.length + otherComps.length + webComps.length;
+                    const scrapedComps = currentViewProperty.marketComps || [];
+                    const rawTotal = reportComps.length + lrItems.length + otherComps.length + webComps.length + scrapedComps.length;
                     const EPC_COL = { A:'#00a550',B:'#50b848',C:'#b3ce3e',D:'#fff200',E:'#f8b832',F:'#f07f30',G:'#ed1c24' };
                     const tag = (label, kind) => {
                       const c = kind === 'report' ? { bg:'#ede9fe', fg:'#5b21b6' } : kind === 'manual' ? { bg:'#f1f5f9', fg:'#475569' } : kind === 'rm' ? { bg:'#ccfbf1', fg:'#0f766e' } : kind === 'web' ? { bg:'#fef9c3', fg:'#854d0e' } : { bg:'#dbeafe', fg:'#1e40af' };
@@ -4934,15 +5015,19 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         order.push(key);
                       }
                     };
+                    // Status/postcode/distance mirror resolveComps() in worker/index.js —
+                    // keep the two merges in lockstep when adding any comp field.
                     reportComps.forEach(c => upsert(c.address, 'Report', 'report', {
                       address: c.address, price: c.soldPrice, date: c.soldDate, propertyType: c.propertyType,
                       bedrooms: c.bedrooms, floorArea: c.floorArea, tier: c.tier,
+                      status: 'sold', postcode: extractPostcode(c.address) || null,
                     }));
                     lrItems.forEach(item => upsert([item.address, item.town].filter(Boolean).join(', '), 'Land Reg', 'lr', {
                       address: [item.address, item.town].filter(Boolean).join(', '), price: item.price,
                       date: item.date || '', propertyType: item.propertyType, newBuild: item.newBuild,
                       epcRating: item.epcRating, floorArea: item.floorArea, habitableRooms: item.habitableRooms,
                       epcPotential: item.epcPotential, heatingType: item.heatingType,
+                      status: 'sold', postcode: item.postcode || null,
                     }));
                     otherComps.forEach(c => {
                       const isReport = /report/i.test(c.source || ''); const isLr = /land\s*reg/i.test(c.source || ''); const isRm = /rightmove/i.test(c.source || '');
@@ -4951,22 +5036,120 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         date: (c.soldDate || c.date) || '', bedrooms: c.bedrooms, notes: c.notes,
                         propertyType: c.propertyType, tenure: c.tenure, floorArea: c.floorArea,
                         enriched: c.enriched, fieldSources: c.fieldSources,
+                        status: c.status || 'sold', postcode: c.postcode || extractPostcode(c.address) || null,
+                      });
+                    });
+                    (currentViewProperty.marketComps || []).forEach(c => {
+                      const kind = /zoopla/i.test(c.source || '') ? 'web' : 'rm';
+                      upsert(c.address, c.source || 'Rightmove', kind, {
+                        address: c.address, price: c.price ?? c.soldPrice, date: c.date || '',
+                        bedrooms: c.beds ?? c.bedrooms, propertyType: c.propertyType, floorArea: c.floorArea,
+                        status: c.status || (c.priceType === 'asking' ? 'on_market' : 'sold'),
+                        postcode: c.postcode || extractPostcode(c.address) || null, url: c.url,
                       });
                     });
                     webComps.forEach(c => upsert(c.address, 'Web', 'web', {
                       address: c.address, price: parseWebPrice(c.price), date: c.date || '',
+                      status: c.status || 'sold', postcode: extractPostcode(c.address) || null,
                     }));
                     const fmtCompDate = (d) => {
                       if (!d) return '—';
                       const dt = new Date(d);
                       return isNaN(dt) ? String(d) : dt.toLocaleDateString('en-GB');
                     };
-                    let rows = order.map(k => merged[k]);
+                    const compGeo = currentViewProperty.compGeo || null;
+                    // Street name = first comma segment minus the leading house/flat number,
+                    // so "12 Oak Rise, Sheffield" and "44 Oak Rise" land on the same street.
+                    const streetOf = (addr) => String(addr || '').split(',')[0].toLowerCase()
+                      .replace(/^(flat|apt|apartment|unit)?\s*[\d\w]*[\d]\w*\s*[a-z]?\s*/i, '').replace(/[^a-z ]/g, ' ').replace(/\s+/g, ' ').trim();
+                    const subjectStreet = streetOf(currentViewProperty.address || currentViewProperty.dealName || '');
+
+                    let rows = order.map(k => {
+                      const r = merged[k];
+                      return { ...r, distanceMiles: compDistanceMiles(r, compGeo), street: streetOf(r.address) };
+                    });
                     if (compSort === 'asc') rows = rows.sort((a, b) => (a.price || 0) - (b.price || 0));
                     else if (compSort === 'desc') rows = rows.sort((a, b) => (b.price || 0) - (a.price || 0));
+                    else if (compSort === 'dist') rows = rows.sort((a, b) => (a.distanceMiles ?? 9e9) - (b.distanceMiles ?? 9e9));
+
+                    const inRadius = (r, radius) => {
+                      if (radius === 'all') return true;
+                      if (radius === 'street') return !!subjectStreet && r.street === subjectStreet;
+                      // Comps we couldn't geocode stay visible under "All" only — they're
+                      // never silently dropped, but they can't claim to be inside a radius.
+                      return r.distanceMiles != null && r.distanceMiles <= parseFloat(radius);
+                    };
+                    const RADII = [
+                      { key: 'street', label: 'Same street' },
+                      { key: '0.25', label: '¼ mile' },
+                      { key: '0.5', label: '½ mile' },
+                      { key: 'all', label: 'All' },
+                    ];
+                    const radiusRows = rows.filter(r => inRadius(r, compRadius));
+                    const ungeocoded = rows.filter(r => r.distanceMiles == null).length;
+
+                    const num = v => { const n = parseFloat(v); return Number.isFinite(n) ? n : null; };
+                    const median = (arr) => {
+                      const a = arr.filter(n => Number.isFinite(n)).sort((x, y) => x - y);
+                      if (!a.length) return null;
+                      const m = Math.floor(a.length / 2);
+                      return a.length % 2 ? a[m] : Math.round((a[m - 1] + a[m]) / 2);
+                    };
+                    const ppsmOf = (r) => { const fa = num(r.floorArea); const p = num(r.price); return (fa > 0 && p) ? Math.round(p / fa) : null; };
+                    const fmtGbp = (n) => n == null ? '—' : `£${Math.round(n).toLocaleString()}`;
+                    const fmtShort = (n) => n == null ? '—' : n >= 1000 ? `£${Math.round(n / 1000)}k` : `£${Math.round(n)}`;
+
+                    const BANDS = [
+                      { key: 'on_market', label: 'On market', fg: '#1d4ed8', bg: '#eff6ff', br: '#bfdbfe' },
+                      { key: 'stc', label: 'Sold STC', fg: '#b45309', bg: '#fffbeb', br: '#fde68a' },
+                      { key: 'sold', label: 'Sold', fg: '#166534', bg: '#f0fdf4', br: '#bbf7d0' },
+                    ];
+                    const bandOf = (r) => BANDS.some(b => b.key === r.status) ? r.status : 'sold';
+                    const bandStats = BANDS.map(b => {
+                      const items = radiusRows.filter(r => bandOf(r) === b.key);
+                      return { ...b, count: items.length, medPrice: median(items.map(r => num(r.price))), medPpsm: median(items.map(ppsmOf)) };
+                    });
+
+                    // Triangulation: where our GDV sits between the sold floor and the
+                    // top of what's currently being asked locally.
+                    const gdv = num(an.gdvBase) ?? num(an.gdvConservative) ?? num(an.gdvOptimistic);
+                    const soldPrices = radiusRows.filter(r => bandOf(r) === 'sold').map(r => num(r.price)).filter(Boolean);
+                    const askPrices = radiusRows.filter(r => bandOf(r) !== 'sold').map(r => num(r.price)).filter(Boolean);
+                    const minSold = soldPrices.length ? Math.min(...soldPrices) : null;
+                    const medSold = median(soldPrices);
+                    const maxAsk = askPrices.length ? Math.max(...askPrices) : null;
+                    const maxSold = soldPrices.length ? Math.max(...soldPrices) : null;
+                    const scaleVals = [minSold, medSold, maxSold, maxAsk, gdv].filter(v => v != null);
+                    const lo = scaleVals.length ? Math.min(...scaleVals) : null;
+                    const hi = scaleVals.length ? Math.max(...scaleVals) : null;
+                    const pctOf = (v) => (lo == null || hi == null || hi === lo || v == null) ? null : ((v - lo) / (hi - lo)) * 100;
+                    const gdvVerdict = (gdv == null || medSold == null) ? null
+                      : gdv > (maxSold ?? medSold) ? { text: 'GDV is above every sold comp in range', fg: '#b91c1c', bg: '#fef2f2', br: '#fecaca' }
+                      : gdv > medSold ? { text: `GDV is ${Math.round(((gdv / medSold) - 1) * 100)}% above the median sold`, fg: '#b45309', bg: '#fffbeb', br: '#fde68a' }
+                      : { text: `GDV is ${Math.round((1 - (gdv / medSold)) * 100)}% below the median sold`, fg: '#166534', bg: '#f0fdf4', br: '#bbf7d0' };
+
+                    const bedsOf = (r) => { const b = compOverrides[r._key]?.bedrooms ?? r.bedrooms; return (b == null || b === '') ? null : Number(b); };
+                    const allSources = [...new Set(rows.flatMap(r => r.tags.map(t => t.label)))];
+                    const allBeds = [...new Set(rows.map(bedsOf).filter(b => b != null))].sort((a, b) => a - b);
+                    const tableRows = radiusRows.filter(r =>
+                      (compStatusFilter === 'all' || bandOf(r) === compStatusFilter) &&
+                      (compSourceFilter === 'all' || r.tags.some(t => t.label === compSourceFilter)) &&
+                      (compBedsFilter === 'all' || String(bedsOf(r)) === compBedsFilter)
+                    );
+
                     const sortBtn = (label, val) => (
                       <button onClick={() => setCompSort(s => s === val ? 'default' : val)} style={{ padding: '3px 9px', borderRadius: '6px', border: '0.5px solid', fontSize: '11px', cursor: 'pointer', fontFamily: 'inherit', background: compSort === val ? '#ede9fe' : '#fff', borderColor: compSort === val ? '#c4b5fd' : '#e2e8f0', color: compSort === val ? '#5b21b6' : '#64748b' }}>{label}</button>
                     );
+                    const chip = (label, active, onClick, count) => (
+                      <button key={label} onClick={onClick} style={{ padding: isMobile ? '9px 12px' : '4px 10px', minHeight: isMobile ? '44px' : 'auto', borderRadius: '999px', border: '0.5px solid', fontSize: isMobile ? '13px' : '11px', cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap', background: active ? '#0f172a' : '#fff', borderColor: active ? '#0f172a' : '#e2e8f0', color: active ? '#fff' : '#64748b' }}>
+                        {label}{count != null ? <span style={{ opacity: .6, marginLeft: '5px' }}>{count}</span> : null}
+                      </button>
+                    );
+                    const selectStyle = { padding: isMobile ? '10px' : '4px 8px', minHeight: isMobile ? '44px' : 'auto', borderRadius: '6px', border: '0.5px solid #e2e8f0', background: '#fff', fontSize: isMobile ? '13px' : '11px', color: '#475569', fontFamily: 'inherit', cursor: 'pointer' };
+                    const STATUS_PILL = { on_market: { t: 'On market', fg: '#1d4ed8', bg: '#eff6ff' }, stc: { t: 'Sold STC', fg: '#b45309', bg: '#fffbeb' }, sold: { t: 'Sold', fg: '#166534', bg: '#f0fdf4' } };
+                    // Mobile drops the Source/Dist/Status/Date columns into the meta line
+                    // so the table never forces a horizontal scroll at 375px.
+                    const COMP_COLS = isMobile ? '1fr auto' : '1fr auto auto auto auto auto';
                     return (
                       <div style={{ padding: '14px 20px 20px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px', flexWrap: 'wrap', gap: '8px' }}>
@@ -4983,7 +5166,8 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                               }
                               return <span style={{ fontSize: '10px', padding: '2px 8px', borderRadius: '10px', background: '#fef3c7', color: '#92400e', whiteSpace: 'nowrap' }}>Re-run intelligence to enrich with EPC</span>;
                             })()}
-                            {rows.length > 1 && <div style={{ display: 'flex', gap: '4px' }}>{sortBtn('Price ↑', 'asc')}{sortBtn('Price ↓', 'desc')}</div>}
+                            {compGeoBusy && <span style={{ fontSize: '10px', padding: '2px 8px', borderRadius: '10px', background: '#eff6ff', color: '#1d4ed8', whiteSpace: 'nowrap' }}>Locating comps…</span>}
+                            {rows.length > 1 && <div style={{ display: 'flex', gap: '4px' }}>{sortBtn('Price ↑', 'asc')}{sortBtn('Price ↓', 'desc')}{sortBtn('Nearest', 'dist')}</div>}
                             {rows.length > 0 && (() => {
                               const hasBeds = r => { const b = compOverrides[r._key]?.bedrooms ?? r.bedrooms; return b != null && b !== ''; };
                               const fullCount = rows.filter(r => r.address && r.price && r.date && hasBeds(r)).length;
@@ -5002,6 +5186,93 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                             The report references {reportCount} comparables but this deal's report predates comp parsing — re-upload the report to pull in its own picks. Sales below come from Land Registry{otherComps.length ? ' plus your manual adds' : ''}.
                           </div>
                         )}
+                        {rows.length > 0 && (
+                          <>
+                            {/* Radius — filters every band and the table below it. */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', marginBottom: '12px' }}>
+                              <span style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.06em', color: '#94a3b8', marginRight: '2px' }}>Radius</span>
+                              {RADII.map(r => chip(r.label, compRadius === r.key, () => setCompRadius(r.key), rows.filter(x => inRadius(x, r.key)).length))}
+                              {ungeocoded > 0 && compRadius !== 'all' && (
+                                <span title="These comps have no resolvable postcode, so their distance is unknown. Switch to All to see them." style={{ fontSize: '10px', color: '#94a3b8', cursor: 'help' }}>
+                                  {ungeocoded} hidden · distance unknown
+                                </span>
+                              )}
+                            </div>
+
+                            {/* GDV triangulation — sold floor → our GDV → top asking price. */}
+                            {lo != null && hi != null && hi !== lo && (
+                              <div style={{ border: '0.5px solid #e2e8f0', borderRadius: '10px', background: '#fff', padding: isMobile ? '14px 14px 10px' : '16px 18px 12px', marginBottom: '12px' }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', flexWrap: 'wrap', gap: '8px', marginBottom: '18px' }}>
+                                  <div style={{ fontSize: '10px', fontWeight: '500', textTransform: 'uppercase', letterSpacing: '.07em', color: '#94a3b8' }}>GDV vs the local market</div>
+                                  {gdvVerdict && (
+                                    <span style={{ fontSize: '11px', padding: '2px 9px', borderRadius: '10px', background: gdvVerdict.bg, border: `0.5px solid ${gdvVerdict.br}`, color: gdvVerdict.fg, fontWeight: '600' }}>{gdvVerdict.text}</span>
+                                  )}
+                                </div>
+                                <div style={{ position: 'relative', height: '8px', borderRadius: '4px', background: 'linear-gradient(90deg,#dcfce7,#fef3c7,#dbeafe)', margin: '0 4px 6px' }}>
+                                  {[
+                                    { v: minSold, label: 'Min sold', fg: '#166534', above: true },
+                                    { v: medSold, label: 'Median sold', fg: '#0f766e', above: false },
+                                    { v: gdv, label: 'Our GDV', fg: '#6d28d9', above: true, big: true },
+                                    { v: maxAsk, label: 'Max asking', fg: '#1d4ed8', above: false },
+                                  ].filter(m => m.v != null && pctOf(m.v) != null).map((m, mi) => (
+                                    <div key={mi} style={{ position: 'absolute', left: `${pctOf(m.v)}%`, top: m.big ? '-5px' : '-2px', transform: 'translateX(-50%)' }}>
+                                      <div style={{ width: m.big ? '4px' : '2px', height: m.big ? '18px' : '12px', borderRadius: '2px', background: m.fg, margin: '0 auto' }} />
+                                      <div style={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)', [m.above ? 'bottom' : 'top']: m.big ? '20px' : '15px', whiteSpace: 'nowrap', textAlign: 'center' }}>
+                                        <div style={{ fontSize: '10px', color: '#94a3b8' }}>{m.label}</div>
+                                        <div style={{ fontSize: m.big ? '12px' : '11px', fontWeight: m.big ? '700' : '600', color: m.fg }}>{fmtShort(m.v)}</div>
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                                <div style={{ height: '34px' }} />
+                                {gdv == null && <div style={{ fontSize: '11px', color: '#94a3b8', textAlign: 'center' }}>No GDV on this deal yet — upload a report to place it on the scale.</div>}
+                              </div>
+                            )}
+
+                            {/* Bands — the three market states, each with its own stats. */}
+                            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(3, 1fr)', gap: '10px', marginBottom: '14px' }}>
+                              {bandStats.map(b => (
+                                <button key={b.key} onClick={() => setCompStatusFilter(s => s === b.key ? 'all' : b.key)}
+                                  style={{ textAlign: 'left', border: `0.5px solid ${compStatusFilter === b.key ? b.fg : b.br}`, background: b.bg, borderRadius: '10px', padding: '11px 13px', cursor: 'pointer', fontFamily: 'inherit', boxShadow: compStatusFilter === b.key ? `inset 0 0 0 1px ${b.fg}` : 'none' }}>
+                                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                                    <span style={{ fontSize: '11px', fontWeight: '700', color: b.fg }}>{b.label}</span>
+                                    <span style={{ fontSize: '11px', color: b.fg, opacity: .75 }}>{b.count}</span>
+                                  </div>
+                                  <div style={{ fontSize: '17px', fontWeight: '700', color: '#0f172a', letterSpacing: '-.02em' }}>{fmtGbp(b.medPrice)}</div>
+                                  <div style={{ fontSize: '10px', color: '#64748b', marginTop: '2px' }}>
+                                    median{b.medPpsm != null ? ` · £${b.medPpsm.toLocaleString()}/m²` : ''}
+                                  </div>
+                                </button>
+                              ))}
+                            </div>
+
+                            {/* Table filters */}
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '8px' }}>
+                              <button onClick={() => setCompTableOpen(o => !o)} style={{ padding: isMobile ? '9px 12px' : '4px 10px', minHeight: isMobile ? '44px' : 'auto', borderRadius: '6px', border: '0.5px solid #e2e8f0', background: '#fff', fontSize: isMobile ? '13px' : '11px', color: '#475569', cursor: 'pointer', fontFamily: 'inherit', fontWeight: '600' }}>
+                                {compTableOpen ? '▾' : '▸'} All comparables ({tableRows.length})
+                              </button>
+                              {compTableOpen && (
+                                <>
+                                  <select value={compStatusFilter} onChange={e => setCompStatusFilter(e.target.value)} style={selectStyle}>
+                                    <option value="all">All statuses</option>
+                                    {BANDS.map(b => <option key={b.key} value={b.key}>{b.label}</option>)}
+                                  </select>
+                                  <select value={compSourceFilter} onChange={e => setCompSourceFilter(e.target.value)} style={selectStyle}>
+                                    <option value="all">All sources</option>
+                                    {allSources.map(s => <option key={s} value={s}>{s}</option>)}
+                                  </select>
+                                  <select value={compBedsFilter} onChange={e => setCompBedsFilter(e.target.value)} style={selectStyle}>
+                                    <option value="all">Any beds</option>
+                                    {allBeds.map(b => <option key={b} value={String(b)}>{b} bed</option>)}
+                                  </select>
+                                  {(compStatusFilter !== 'all' || compSourceFilter !== 'all' || compBedsFilter !== 'all') && (
+                                    <button onClick={() => { setCompStatusFilter('all'); setCompSourceFilter('all'); setCompBedsFilter('all'); }} style={{ background: 'none', border: 'none', color: '#6d28d9', fontSize: isMobile ? '13px' : '11px', cursor: 'pointer', fontFamily: 'inherit', padding: isMobile ? '10px 4px' : '0' }}>Clear</button>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          </>
+                        )}
                         {rows.length === 0 ? (
                           <div style={{ textAlign: 'center', padding: '30px', border: '1px dashed #e2e8f0', borderRadius: '10px', color: '#94a3b8', fontSize: '12px' }}>
                             <div>No comparables yet — run intelligence to fetch Land Registry sales for {propPostcode || 'this postcode'}.</div>
@@ -5013,12 +5284,17 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                               {aiAnalysisLoadingId === currentViewProperty.id ? 'Searching…' : '🌐 Run market comparison (live web search)'}
                             </button>
                           </div>
-                        ) : (
-                          <div style={{ border: '0.5px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden', background: '#fff' }}>
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr auto auto auto', gap: '8px', padding: '6px 12px', background: '#f8fafc', borderBottom: '0.5px solid #e2e8f0', fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em' }}>
-                              <span>Address</span><span>Source</span><span>Date</span><span style={{ textAlign: 'right' }}>Sold</span>
-                            </div>
-                            {rows.map((r, i) => {
+                        ) : compTableOpen && (
+                          <div className="crm-table-wrap" style={{ border: '0.5px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden', background: '#fff' }}>
+                            {tableRows.length === 0 && (
+                              <div style={{ padding: '22px', textAlign: 'center', fontSize: '11px', color: '#94a3b8' }}>No comparables match these filters.</div>
+                            )}
+                            {tableRows.length > 0 && (
+                              <div style={{ display: 'grid', gridTemplateColumns: COMP_COLS, gap: '8px', padding: '6px 12px', background: '#f8fafc', borderBottom: '0.5px solid #e2e8f0', fontSize: '10px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '.05em' }}>
+                                <span>Address</span>{!isMobile && <><span>Source</span><span>Dist</span><span>Status</span><span>Date</span></>}<span style={{ textAlign: 'right' }}>Price</span>
+                              </div>
+                            )}
+                            {tableRows.map((r, i) => {
                               const epcBg = EPC_COL[r.epcRating] || null;
                               const epcTxt = r.epcRating ? (['A','B','C'].includes(r.epcRating) ? '#fff' : '#000') : '#000';
                               const compFa = parseFloat(r.floorArea) || 0;
@@ -5033,11 +5309,24 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                   {beds != null && beds !== '' ? 'bed' : ''}
                                 </span>
                               );
+                              const st = STATUS_PILL[bandOf(r)];
+                              const distTxt = r.distanceMiles == null ? '—' : r.distanceMiles < 0.1 ? '<0.1 mi' : `${r.distanceMiles.toFixed(2)} mi`;
+                              const statusPill = (
+                                <span key="status" style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '8px', background: st.bg, color: st.fg, fontWeight: '600', whiteSpace: 'nowrap' }}>{st.t}</span>
+                              );
                               return (
-                                <div key={i} style={{ display: 'grid', gridTemplateColumns: '1fr auto auto auto', gap: '8px', padding: '7px 12px', borderBottom: '0.5px solid #f1f5f9', fontSize: '11px', alignItems: 'center' }}>
+                                <div key={i} style={{ display: 'grid', gridTemplateColumns: COMP_COLS, gap: '8px', padding: '7px 12px', borderBottom: '0.5px solid #f1f5f9', fontSize: '11px', alignItems: 'center' }}>
                                   <div style={{ minWidth: 0 }}>
-                                    <div style={{ color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.address || '—'}</div>
+                                    <div style={{ color: '#0f172a', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                      {r.url ? <a href={r.url} target="_blank" rel="noopener noreferrer" style={{ color: '#1d4ed8', textDecoration: 'none' }}>{r.address || '—'}</a> : (r.address || '—')}
+                                    </div>
                                     {metaLine([
+                                      // On mobile the dedicated columns collapse away, so status,
+                                      // distance, date and source ride along in the meta line.
+                                      isMobile ? statusPill : null,
+                                      isMobile && r.distanceMiles != null ? <span style={{ color: '#64748b' }}>{distTxt}</span> : null,
+                                      isMobile ? <span key="date" style={{ color: '#64748b' }}>{fmtCompDate(r.date)}</span> : null,
+                                      isMobile ? <span key="src" style={{ display: 'inline-flex', gap: '3px' }}>{r.tags.map(t => tag(t.label, t.kind))}</span> : null,
                                       r.propertyType && <span style={{ color: '#64748b' }}>{abbrType(r.propertyType)}{r.newBuild ? ' · New build' : ''}</span>,
                                       bedsCtl,
                                       r.epcRating ? <span title={r.heatingType ? `Potential ${r.epcPotential || '—'} · ${r.heatingType}` : undefined} style={{ padding: '0 4px', borderRadius: '3px', background: epcBg, color: epcTxt, fontWeight: '700', lineHeight: '14px', cursor: r.heatingType ? 'help' : 'default' }}>EPC {r.epcRating}{r.epcPotential && r.epcPotential !== r.epcRating ? ` → ${r.epcPotential}` : ''}</span> : null,
@@ -5050,12 +5339,18 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                                       r.notes || null,
                                     ])}
                                   </div>
-                                  <div style={{ display: 'flex', gap: '4px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: '120px' }}>
-                                    {r.tags.length > 1 && <span title={`Confirmed by ${r.tags.length} sources: ${r.tags.map(t => t.label).join(', ')}`} style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '8px', background: '#dcfce7', color: '#166534', whiteSpace: 'nowrap' }}>✓ {r.tags.length} sources</span>}
-                                    {r.tags.map(t => tag(t.label, t.kind))}
-                                  </div>
-                                  <div style={{ color: '#64748b', whiteSpace: 'nowrap' }}>{fmtCompDate(r.date)}</div>
-                                  <div style={{ textAlign: 'right', color: '#0f172a', fontWeight: '600' }}>{r.price ? `£${Number(r.price).toLocaleString()}` : '—'}</div>
+                                  {!isMobile && (
+                                    <>
+                                      <div style={{ display: 'flex', gap: '4px', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end', maxWidth: '120px' }}>
+                                        {r.tags.length > 1 && <span title={`Confirmed by ${r.tags.length} sources: ${r.tags.map(t => t.label).join(', ')}`} style={{ fontSize: '10px', padding: '1px 6px', borderRadius: '8px', background: '#dcfce7', color: '#166534', whiteSpace: 'nowrap' }}>✓ {r.tags.length} sources</span>}
+                                        {r.tags.map(t => tag(t.label, t.kind))}
+                                      </div>
+                                      <div title={r.distanceMiles == null ? 'No resolvable postcode for this comp' : undefined} style={{ color: r.distanceMiles == null ? '#cbd5e1' : '#64748b', whiteSpace: 'nowrap' }}>{distTxt}</div>
+                                      <div>{statusPill}</div>
+                                      <div style={{ color: '#64748b', whiteSpace: 'nowrap' }}>{fmtCompDate(r.date)}</div>
+                                    </>
+                                  )}
+                                  <div style={{ textAlign: 'right', color: '#0f172a', fontWeight: '600', whiteSpace: 'nowrap' }}>{r.price ? `£${Number(r.price).toLocaleString()}` : '—'}</div>
                                 </div>
                               );
                             })}
