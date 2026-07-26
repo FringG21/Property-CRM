@@ -2385,7 +2385,98 @@ export default function App({ user = {}, onLogout }) {
       intel.hpi?.data?.avgPrice && ['Area avg price', `£${Number(intel.hpi.data.avgPrice).toLocaleString()} · ${intel.hpi.data.growth1yr != null ? `${intel.hpi.data.growth1yr}% 1yr growth` : ''}`],
       intel.schools?.data?.bestRating && ['Schools', `Best nearby: ${intel.schools.data.bestRating}`],
     ].filter(Boolean);
-    const comps = (an.compsList || prop.comparables || []).slice(0, 8);
+    // Comps are merged across all four sources by normalised address so the pack
+    // shows one row per property carrying every source that evidences it. Mirrors
+    // the Comparables tab's merge; kept local so the export doesn't depend on
+    // render-scope state.
+    const normKey = (addr) => String(addr || '').split(',')[0].toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    const parseWebPrice = (s) => {
+      if (typeof s === 'number') return s;
+      const m = String(s || '').replace(/,/g, '').match(/[\d.]+/);
+      if (!m) return null;
+      let n = parseFloat(m[0]);
+      if (!n) return null;
+      if (/k\b/i.test(s)) n *= 1000;
+      else if (/m\b/i.test(s) && !/\bkm\b/i.test(s)) n *= 1000000;
+      return n;
+    };
+    const mergedComps = {};
+    const compOrder = [];
+    let anonComp = 0;
+    const upsertComp = (addr, source, fields) => {
+      const key = normKey(addr) || `anon-${anonComp++}`;
+      const ex = mergedComps[key];
+      if (ex) {
+        if (!ex.sources.includes(source)) ex.sources.push(source);
+        for (const [k, v] of Object.entries(fields)) {
+          if ((ex[k] == null || ex[k] === '') && v != null && v !== '') {
+            ex[k] = v;
+            // The asking/sold marker must follow whichever source supplied the
+            // price, not merely appear on the row — a sold comp that later
+            // merges with an on-market listing is still a sold comp.
+            if (k === 'price') ex._priceStatus = fields.status || 'sold';
+          }
+        }
+      } else {
+        mergedComps[key] = { ...fields, sources: [source], _priceStatus: fields.price != null ? (fields.status || 'sold') : null };
+        compOrder.push(key);
+      }
+    };
+    (an.compsList || []).forEach(c => upsertComp(c.address, 'Report', {
+      address: c.address, price: c.soldPrice, date: c.soldDate, propertyType: c.propertyType,
+      bedrooms: c.bedrooms, floorArea: c.floorArea,
+    }));
+    (intel.landRegistry?.data?.items || []).forEach(item => upsertComp([item.address, item.town].filter(Boolean).join(', '), 'Land Registry', {
+      address: [item.address, item.town].filter(Boolean).join(', '), price: item.price,
+      date: item.date || '', propertyType: item.propertyType, epcRating: item.epcRating, floorArea: item.floorArea,
+    }));
+    (prop.comparables || []).filter(c => !c.fromIntelligence).forEach(c => {
+      const src = /report/i.test(c.source || '') ? 'Report' : /land\s*reg/i.test(c.source || '') ? 'Land Registry' : /rightmove/i.test(c.source || '') ? 'Rightmove' : 'Manual';
+      upsertComp(c.address, src, {
+        address: c.address, price: c.soldPrice ?? c.price, date: (c.soldDate || c.date) || '',
+        bedrooms: c.bedrooms, notes: c.notes, propertyType: c.propertyType, floorArea: c.floorArea,
+      });
+    });
+    (prop.marketComps || []).forEach(c => upsertComp(c.address, c.source || 'Rightmove', {
+      address: c.address, price: c.price ?? c.soldPrice, date: c.date || '',
+      bedrooms: c.beds ?? c.bedrooms, propertyType: c.propertyType, floorArea: c.floorArea,
+      status: c.status || (c.priceType === 'asking' ? 'on_market' : 'sold'),
+    }));
+    (an.dealAnalysisComparables || []).forEach(c => upsertComp(c.address, 'Web search', {
+      address: c.address, price: parseWebPrice(c.price), date: c.date || '',
+    }));
+    const comps = compOrder.map(k => mergedComps[k]).slice(0, 12);
+    const sourceCounts = {};
+    compOrder.forEach(k => mergedComps[k].sources.forEach(s => { sourceCounts[s] = (sourceCounts[s] || 0) + 1; }));
+
+    // Evidence status. There are no parsed legal facts anywhere in the app — only
+    // whether a legal pack was uploaded and ticked as reviewed — so the pack
+    // reports document status, never lease terms it cannot actually know.
+    const pf = prop.files || {};
+    const legalCount = (prop.legalPackFiles || []).length + (pf.legalPack ? 1 : 0);
+    const gbDate = (d) => { const dt = new Date(d); return isNaN(dt) ? String(d) : dt.toLocaleDateString('en-GB'); };
+    const evidenceRows = [
+      ['Assessment report', pf.mainReport ? 'On file' : 'Not on file'],
+      ['Legal pack', legalCount ? `${legalCount} document${legalCount === 1 ? '' : 's'} on file · ${prop.checklist?.legalReviewed ? 'reviewed' : 'not yet reviewed'}` : 'Not on file'],
+      ['Survey', (pf.surveyReport || (prop.surveyJobs || []).length > 0) ? 'On file' : 'Not on file'],
+      ['Public-records intelligence', prop.intelligence?.lastRun ? `Run ${gbDate(prop.intelligence.lastRun)}` : 'Not run'],
+      ['Comparable evidence', Object.keys(sourceCounts).length ? Object.entries(sourceCounts).map(([s, n]) => `${n} ${s}`).join(' · ') : 'None recorded'],
+    ];
+
+    const readiness = getDealReadiness(prop);
+    const missingChecks = readiness.checks.filter(c => !c.done);
+    const bids = prop.bidLog || [];
+    const ourHighestBid = bids.reduce((m, b) => Math.max(m, b.amount || 0), 0);
+    const ourMax = parseFloat(prop.ourMaxBid) || 0;
+    const reportMaxBid = parseFloat(an.maxBid) || 0;
+    const winningBid = parseFloat(prop.lotSalePrice) || parseFloat(prop.hammerPrice) || parseFloat(prop.outbidPrice) || 0;
+    const bidDelta = (winningBid && ourMax) ? winningBid - ourMax : null;
+    const pm = prop.postMortemStructured || {};
+    const PM_REASON = { outbid_over_max: 'Outbid — hammer over our max', too_cautious: 'Outbid — we stopped too low', gdv_wrong: 'Our GDV was off', refurb_wrong: 'Refurb estimate was off', costs_missed: 'Missed costs (legal/holding)', strategic: 'Chose to walk — deal changed', timing_finance: 'Timing / financing', other: 'Other' };
+    const PM_AGAIN = { same: 'Yes — same max', higher: 'Yes — but higher', lower: 'Yes — but lower', no: "No — wouldn't chase it" };
+    const PM_ACC = { right: 'About right', too_high: 'Too high', too_low: 'Too low', unsure: 'Not sure yet' };
+    const hasOutcome = !!(prop.lotOutcome || winningBid || bids.length || prop.postMortem || Object.keys(pm).length);
+
     const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const row = (l, v) => `<tr><td class="l">${esc(l)}</td><td class="v">${esc(v)}</td></tr>`;
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Deal Pack — ${esc(prop.dealName || prop.address)}</title>
@@ -2400,10 +2491,16 @@ export default function App({ user = {}, onLogout }) {
   .kpi .n { font-size: 18px; font-weight: bold; } .kpi .t { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: #4a5568; }
   .verdict { padding: 10px 14px; border: 2px solid #1a202c; font-weight: bold; margin: 10px 0; }
   .disclaimer { margin-top: 32px; padding-top: 10px; border-top: 1px solid #cbd5e0; font-size: 10px; color: #718096; }
-  .noprint { position: fixed; top: 12px; right: 12px; } .noprint button { padding: 10px 18px; font-size: 14px; cursor: pointer; }
+  .noprint { position: fixed; top: 12px; right: 12px; display: flex; gap: 8px; } .noprint button { padding: 10px 18px; font-size: 14px; cursor: pointer; }
+  .flags { margin: 10px 0; padding-left: 20px; } .flags li { margin-bottom: 3px; }
+  .src { font-size: 10px; color: #4a5568; text-transform: uppercase; letter-spacing: .04em; }
+  .internal { display: none; }
+  body.io .internal { display: block; }
+  .ribbon { background: #1a202c; color: #fff; padding: 6px 12px; font-size: 10px; text-transform: uppercase; letter-spacing: .1em; margin-bottom: 16px; }
   @media print { .noprint { display: none; } body { padding: 0; } }
 </style></head><body>
-<div class="noprint"><button onclick="window.print()">🖨 Print / Save as PDF</button></div>
+<div class="noprint"><button onclick="window.print()">🖨 Print / Save as PDF</button><button id="modebtn" onclick="document.body.classList.toggle('io');this.textContent=document.body.classList.contains('io')?'👁 Internal view — click for lender view':'🏦 Lender view — click for internal view'">🏦 Lender view — click for internal view</button></div>
+<div class="internal ribbon">Internal working copy — not for circulation</div>
 <div class="brand"><div><h1>Investment Deal Pack</h1><div class="sub">${esc(prop.dealName || prop.address)}</div></div>
 <div style="text-align:right"><div style="font-weight:bold">A&amp;A Investment Partners</div><div class="sub">Prepared ${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}</div></div></div>
 
@@ -2425,7 +2522,7 @@ ${an.verdict ? `<div class="verdict">Assessment verdict: ${esc(an.verdict)}${an.
 </div>
 <table>
 ${row('GDV — conservative', f(an.gdvConservative ?? an.conservativeGDV))}${row('GDV — base case', f(an.gdvBase))}${row('GDV — optimistic', f(an.gdvOptimistic ?? an.maxGDV))}
-${row('Target bid', f(an.targetBid))}${row('Stretch bid', f(an.stretchBid))}${row('Walk-away price', f(an.walkAway))}${row('Break-even bid', f(an.breakEvenBid))}
+${row('Break-even bid', f(an.breakEvenBid))}
 ${row('Total investment', f(an.totalInvestment))}${row("Buyer's premium", f(an.buyersPremium))}${row('SDLT', f(an.sdlt))}
 ${an.acquisitionFeesTotal ? row('Acquisition fees', f(an.acquisitionFeesTotal)) : ''}${an.holdingTotal ? row('Holding costs', f(an.holdingTotal)) : ''}${an.exitTotal ? row('Exit costs', f(an.exitTotal)) : ''}
 </table>
@@ -2439,13 +2536,39 @@ ${acceptedQuotes.length ? `<table style="margin-top:8px"><tr><th>Trade</th><th>V
 
 ${intelRows.length ? `<h2>Area intelligence</h2><table>${intelRows.map(([l, v]) => row(l, v)).join('')}</table>` : ''}
 
-${comps.length ? `<h2>Comparable sales</h2><table><tr><th>Address</th><th>Sold</th><th>Price</th><th>Notes</th></tr>${comps.map(c => `<tr><td>${esc(c.address)}</td><td>${esc(c.soldDate || c.date || '—')}</td><td>${f(c.soldPrice ?? c.price)}</td><td>${esc(c.notes || c.propertyType || '')}</td></tr>`).join('')}</table>` : ''}
+${comps.length ? `<h2>Comparable sales</h2><table><tr><th>Address</th><th>Sold</th><th>Price</th><th>Notes</th><th>Source</th></tr>${comps.map(c => `<tr><td>${esc(c.address)}</td><td>${esc(c.date ? gbDate(c.date) : '—')}</td><td>${f(c.price)}${c._priceStatus === 'on_market' ? ' <span class="src">asking</span>' : ''}</td><td>${esc(c.notes || [c.propertyType, c.bedrooms ? `${c.bedrooms} bed` : ''].filter(Boolean).join(' · '))}</td><td class="src">${esc(c.sources.join(', '))}</td></tr>`).join('')}</table>${compOrder.length > comps.length ? `<p class="sub">Showing 12 of ${compOrder.length} comparables held.</p>` : ''}` : ''}
+
+${(an.redFlags || []).length ? `<h2>Risk flags from assessment</h2><ul class="flags">${an.redFlags.map(r => `<li>${esc(typeof r === 'string' ? r : (r.title || r.text || JSON.stringify(r)))}</li>`).join('')}</ul>` : ''}
+
+<h2>Evidence and sources</h2><table>${evidenceRows.map(([l, v]) => row(l, v)).join('')}</table>
 
 ${(an.reportSummary || (an.aiSummary && an.aiDealScore == null)) ? `<h2>Report summary</h2><p>${esc(an.reportSummary || an.aiSummary)}</p>` : ''}
 
 ${an.aiSummary && an.aiDealScore != null ? `<h2>AI review (second opinion)</h2><p>${esc(an.aiSummary)}</p>${an.aiReportCrossCheck ? `<p class="sub"><strong>vs report:</strong> ${esc(an.aiReportCrossCheck)}</p>` : ''}${(an.aiRiskFlags || []).length ? `<div class="sub" style="font-weight:bold;margin-top:6px">Risk flags</div><ul>${an.aiRiskFlags.map(r => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}` : ''}
 
 ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSummary)}</p><p class="sub">Positioning: ${esc((an.dealAnalysisPositioning || '').replace('_', ' '))} · Confidence: ${esc(an.dealAnalysisConfidence || '—')}</p>${(an.dealAnalysisComparables || []).length ? `<table><tr><th>Address</th><th>Price</th><th>Date</th><th>Source</th></tr>${an.dealAnalysisComparables.map(c => `<tr><td>${esc(c.address || '')}</td><td>${esc(c.price || '')}</td><td>${esc(c.date || '')}</td><td>${esc(c.source || '')}</td></tr>`).join('')}</table>` : ''}` : ''}
+
+<div class="internal">
+<h2>Bid strategy (internal)</h2><table>
+${row('Target bid', f(an.targetBid))}${row('Stretch bid', f(an.stretchBid))}${row('Walk-away price', f(an.walkAway))}
+${row('Our max bid', ourMax ? f(ourMax) : 'Not set')}
+${(ourMax && reportMaxBid) ? row('Our max vs report max', `${Math.round(ourMax / reportMaxBid * 100)}% of report max`) : ''}
+</table>
+
+${missingChecks.length ? `<h2>Readiness gaps (internal)</h2><p class="sub">${readiness.doneCount} of ${readiness.checks.length} checks complete. Outstanding:</p><ul class="flags">${missingChecks.map(c => `<li>${esc(c.label)}</li>`).join('')}</ul>` : `<h2>Readiness (internal)</h2><p>All ${readiness.checks.length} readiness checks complete.</p>`}
+
+${hasOutcome ? `<h2>Auction outcome (internal)</h2><table>
+${prop.lotOutcome ? row('Lot outcome', prop.lotOutcome) : ''}
+${winningBid ? row('Winning bid', f(winningBid)) : ''}
+${bids.length ? row('Bids we placed', `${bids.length}${ourHighestBid ? ` · our highest ${f(ourHighestBid)}` : ''}`) : ''}
+${prop.lotBidCount ? row('Total bids at auction', prop.lotBidCount) : ''}
+${bidDelta != null ? row('Delta vs our max', bidDelta > 0 ? `Lost by ${f(bidDelta)}` : `Winner ${f(Math.abs(bidDelta))} under our max`) : ''}
+${pm.primaryReason ? row('Primary reason', PM_REASON[pm.primaryReason] || pm.primaryReason) : ''}
+${pm.bidAgain ? row('Would we bid the same again?', PM_AGAIN[pm.bidAgain] || pm.bidAgain) : ''}
+${pm.gdvAccuracy ? row('Was our GDV right?', PM_ACC[pm.gdvAccuracy] || pm.gdvAccuracy) : ''}
+${pm.refurbAccuracy ? row('Was our refurb estimate right?', PM_ACC[pm.refurbAccuracy] || pm.refurbAccuracy) : ''}
+</table>${prop.postMortem ? `<p class="sub" style="margin-top:8px"><strong>Post-mortem:</strong> ${esc(prop.postMortem)}</p>` : ''}` : ''}
+</div>
 
 <div class="disclaimer">Prepared by A&amp;A Investment Partners for lending assessment purposes. Figures are estimates derived from the assessment report, public records (HM Land Registry, EPC register, Environment Agency, Police.uk) and quotes received; they do not constitute a formal valuation. E&amp;OE.</div>
 </body></html>`;
@@ -4500,6 +4623,13 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                         style={{ display: 'flex', alignItems: 'center', fontSize: '11px', padding: '4px 8px', borderRadius: '6px', border: '1px solid', cursor: aiAnalysisLoadingId === currentViewProperty.id ? 'wait' : 'pointer', whiteSpace: 'nowrap', background: an.dealAnalysisSummary ? '#172554' : 'transparent', borderColor: an.dealAnalysisSummary ? '#1d4ed8' : '#334155', color: an.dealAnalysisSummary ? '#93c5fd' : '#94a3b8', fontFamily: 'inherit' }}
                       >
                         {aiAnalysisLoadingId === currentViewProperty.id ? '⏳' : '🌐'}
+                      </button>
+                      <button
+                        onClick={() => exportDealPack(currentViewProperty)}
+                        title="Export deal sheet — opens a printable pack with a lender / internal toggle"
+                        style={{ display: 'flex', alignItems: 'center', fontSize: '11px', padding: '4px 8px', borderRadius: '6px', border: '1px solid #334155', background: 'transparent', color: '#94a3b8', cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap' }}
+                      >
+                        📄
                       </button>
                       {propLotLink && (
                         <a href={propLotLink} target="_blank" rel="noreferrer" title="Open listing" style={{ display: 'flex', alignItems: 'center', fontSize: '11px', color: '#38bdf8', padding: '4px 8px', border: '1px solid #0c4a6e', borderRadius: '6px', background: '#0c2a3d', textDecoration: 'none', whiteSpace: 'nowrap' }}>
