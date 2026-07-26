@@ -637,6 +637,8 @@ export default function App({ user = {}, onLogout }) {
   const [narrativeTab, setNarrativeTab] = useState(null); // null = auto (AI review when scored, else report)
   const [bidAmountInput, setBidAmountInput] = useState('');
   const [bidNoteInput, setBidNoteInput] = useState('');
+  const [bidKindInput, setBidKindInput] = useState('bid');
+  const [bidOverrideInput, setBidOverrideInput] = useState('');
   const [propSidebarCollapsed, setPropSidebarCollapsed] = useState(() => {
     try { return localStorage.getItem('propSidebarCollapsed') === '1'; } catch (e) { return false; }
   });
@@ -1181,11 +1183,30 @@ export default function App({ user = {}, onLogout }) {
     setProperties(properties.map(p => p.id === currentViewProperty.id ? updated : p));
   };
 
-  const addBid = (amount, note) => {
+  // Phase 6.1: structured bid entry — kind (bid/outbid/walk/hammer), a bidder
+  // (actor), and a REQUIRED override reason whenever the amount exceeds our max
+  // bid. overMax is computed by the caller (which has ourMaxBid in scope) and
+  // passed in; the guard here is a backstop so an over-max entry can never be
+  // written without a reason regardless of which form called it.
+  const addBid = (amount, note, opts = {}) => {
     if (!currentViewProperty || !(amount > 0)) return;
-    const entry = { id: Date.now() + Math.random(), amount: Math.round(amount), at: new Date().toISOString(), note: (note || '').trim() };
+    const kind = opts.kind || 'bid';
+    const overMax = !!opts.overMax;
+    const overrideReason = (opts.overrideReason || '').trim();
+    if (overMax && !overrideReason) return;
+    const entry = {
+      id: Date.now() + Math.random(),
+      amount: Math.round(amount),
+      at: new Date().toISOString(),
+      note: (note || '').trim(),
+      kind,
+      overMax,
+      overrideReason: overrideReason || undefined,
+      actor: user?.name || 'You',
+    };
     let updated = { ...currentViewProperty, bidLog: [...(currentViewProperty.bidLog || []), entry] };
-    updated = withActivity(updated, 'bid', `Bid placed: £${entry.amount.toLocaleString()}${entry.note ? ` — ${entry.note}` : ''}`);
+    const kindLabel = { bid: 'Bid placed', outbid: 'Outbid', walk: 'Walked away', hammer: 'Hammer price' }[kind] || 'Bid placed';
+    updated = withActivity(updated, 'bid', `${kindLabel}: £${entry.amount.toLocaleString()}${overMax ? ' (over max)' : ''}${entry.note ? ` — ${entry.note}` : ''}`);
     setCurrentViewProperty(updated);
     setProperties(properties.map(p => p.id === currentViewProperty.id ? updated : p));
   };
@@ -4940,6 +4961,9 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                   {propCanvasTab === 'overview' && bidDay && (() => {
                     const bids = currentViewProperty.bidLog || [];
                     const lastBid = bids[bids.length - 1];
+                    const bidAmt = parseFloat(bidAmountInput);
+                    const bidOverMax = bidAmt > 0 && ourMaxBid > 0 && bidAmt > ourMaxBid;
+                    const bidCanSubmit = bidAmt > 0 && (!bidOverMax || bidOverrideInput.trim());
                     return (
                       <div style={{ margin: '14px 20px 0', borderRadius: '10px', border: '1px solid #fca5a5', background: '#fef2f2', padding: '12px 14px' }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '10px', flexWrap: 'wrap' }}>
@@ -4961,12 +4985,23 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                           ))}
                         </div>
                         <form
-                          onSubmit={e => { e.preventDefault(); addBid(parseFloat(bidAmountInput), bidNoteInput); setBidAmountInput(''); setBidNoteInput(''); }}
-                          style={{ display: 'flex', gap: '8px', flexDirection: isMobile ? 'column' : 'row' }}
+                          onSubmit={e => { e.preventDefault(); if (!bidCanSubmit) return; addBid(bidAmt, bidNoteInput, { kind: bidKindInput, overMax: bidOverMax, overrideReason: bidOverrideInput }); setBidAmountInput(''); setBidNoteInput(''); setBidKindInput('bid'); setBidOverrideInput(''); }}
+                          style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}
                         >
-                          <input type="number" min="1" placeholder="Bid amount £" value={bidAmountInput} onChange={e => setBidAmountInput(e.target.value)} style={{ width: isMobile ? '100%' : '150px', padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box', background: '#fff' }} />
-                          <input placeholder="Note (optional)" value={bidNoteInput} onChange={e => setBidNoteInput(e.target.value)} style={{ flex: 1, padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box', background: '#fff' }} />
-                          <button type="submit" disabled={!(parseFloat(bidAmountInput) > 0)} style={{ padding: isMobile ? '12px' : '7px 16px', borderRadius: '6px', border: 'none', background: parseFloat(bidAmountInput) > 0 ? '#059669' : '#e2e8f0', color: parseFloat(bidAmountInput) > 0 ? '#fff' : '#94a3b8', fontSize: '12px', fontWeight: '600', cursor: parseFloat(bidAmountInput) > 0 ? 'pointer' : 'default', fontFamily: 'inherit' }}>Log bid</button>
+                          <div style={{ display: 'flex', gap: '8px', flexDirection: isMobile ? 'column' : 'row' }}>
+                            <input type="number" min="1" placeholder="Bid amount £" value={bidAmountInput} onChange={e => setBidAmountInput(e.target.value)} style={{ width: isMobile ? '100%' : '150px', padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box', background: '#fff' }} />
+                            <select value={bidKindInput} onChange={e => setBidKindInput(e.target.value)} style={{ padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box', background: '#fff', color: '#0f172a' }}>
+                              <option value="bid">Our bid</option>
+                              <option value="outbid">Outbid by other</option>
+                              <option value="walk">Walk-away</option>
+                              <option value="hammer">Hammer price</option>
+                            </select>
+                            <input placeholder="Note (optional)" value={bidNoteInput} onChange={e => setBidNoteInput(e.target.value)} style={{ flex: 1, padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box', background: '#fff' }} />
+                            <button type="submit" disabled={!bidCanSubmit} style={{ padding: isMobile ? '12px' : '7px 16px', borderRadius: '6px', border: 'none', background: bidCanSubmit ? '#059669' : '#e2e8f0', color: bidCanSubmit ? '#fff' : '#94a3b8', fontSize: '12px', fontWeight: '600', cursor: bidCanSubmit ? 'pointer' : 'default', fontFamily: 'inherit' }}>Log bid</button>
+                          </div>
+                          {bidOverMax && (
+                            <input placeholder="Reason for bidding over our max (required)" value={bidOverrideInput} onChange={e => setBidOverrideInput(e.target.value)} style={{ width: '100%', padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #f59e0b', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box', background: '#fffbeb', color: '#92400e' }} />
+                          )}
                         </form>
                         <div style={{ marginTop: '8px', display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: '#991b1b', flexWrap: 'wrap' }}>
                           <span>{bids.length} bid{bids.length === 1 ? '' : 's'} logged{lastBid ? ` · last ${fmtNum(lastBid.amount)}` : ''}</span>
@@ -6288,27 +6323,53 @@ ${an.dealAnalysisSummary ? `<h2>Market comparison</h2><p>${esc(an.dealAnalysisSu
                       {overLimit && (
                         <div style={{ background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '8px', padding: '8px 12px', fontSize: '12px', color: '#92400e', marginBottom: '12px' }}>⚠️ Highest logged bid exceeds our max bid limit</div>
                       )}
+                      {(() => {
+                        const bidAmt = parseFloat(bidAmountInput);
+                        const bidOverMax = bidAmt > 0 && ourMaxBid > 0 && bidAmt > ourMaxBid;
+                        const bidCanSubmit = bidAmt > 0 && (!bidOverMax || bidOverrideInput.trim());
+                        return (
                       <form
-                        onSubmit={e => { e.preventDefault(); addBid(parseFloat(bidAmountInput), bidNoteInput); setBidAmountInput(''); setBidNoteInput(''); }}
-                        style={{ display: 'flex', gap: '8px', flexDirection: isMobile ? 'column' : 'row', marginBottom: '14px' }}
+                        onSubmit={e => { e.preventDefault(); if (!bidCanSubmit) return; addBid(bidAmt, bidNoteInput, { kind: bidKindInput, overMax: bidOverMax, overrideReason: bidOverrideInput }); setBidAmountInput(''); setBidNoteInput(''); setBidKindInput('bid'); setBidOverrideInput(''); }}
+                        style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '14px' }}
                       >
-                        <input type="number" min="1" placeholder="Bid amount £" value={bidAmountInput} onChange={e => setBidAmountInput(e.target.value)} style={{ width: isMobile ? '100%' : '150px', padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' }} />
-                        <input placeholder="Note (optional)" value={bidNoteInput} onChange={e => setBidNoteInput(e.target.value)} style={{ flex: 1, padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' }} />
-                        <button type="submit" disabled={!(parseFloat(bidAmountInput) > 0)} style={{ padding: isMobile ? '12px' : '7px 16px', borderRadius: '6px', border: 'none', background: parseFloat(bidAmountInput) > 0 ? '#059669' : '#e2e8f0', color: parseFloat(bidAmountInput) > 0 ? '#fff' : '#94a3b8', fontSize: '12px', fontWeight: '600', cursor: parseFloat(bidAmountInput) > 0 ? 'pointer' : 'default', fontFamily: 'inherit' }}>Log bid</button>
+                        <div style={{ display: 'flex', gap: '8px', flexDirection: isMobile ? 'column' : 'row' }}>
+                          <input type="number" min="1" placeholder="Bid amount £" value={bidAmountInput} onChange={e => setBidAmountInput(e.target.value)} style={{ width: isMobile ? '100%' : '150px', padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' }} />
+                          <select value={bidKindInput} onChange={e => setBidKindInput(e.target.value)} style={{ padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box', background: '#fff', color: '#0f172a' }}>
+                            <option value="bid">Our bid</option>
+                            <option value="outbid">Outbid by other</option>
+                            <option value="walk">Walk-away</option>
+                            <option value="hammer">Hammer price</option>
+                          </select>
+                          <input placeholder="Note (optional)" value={bidNoteInput} onChange={e => setBidNoteInput(e.target.value)} style={{ flex: 1, padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' }} />
+                          <button type="submit" disabled={!bidCanSubmit} style={{ padding: isMobile ? '12px' : '7px 16px', borderRadius: '6px', border: 'none', background: bidCanSubmit ? '#059669' : '#e2e8f0', color: bidCanSubmit ? '#fff' : '#94a3b8', fontSize: '12px', fontWeight: '600', cursor: bidCanSubmit ? 'pointer' : 'default', fontFamily: 'inherit' }}>Log bid</button>
+                        </div>
+                        {bidOverMax && (
+                          <input placeholder="Reason for bidding over our max (required)" value={bidOverrideInput} onChange={e => setBidOverrideInput(e.target.value)} style={{ width: '100%', padding: isMobile ? '12px 10px' : '7px 10px', border: '1px solid #f59e0b', borderRadius: '6px', fontSize: '13px', fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box', background: '#fffbeb', color: '#92400e' }} />
+                        )}
                       </form>
+                        );
+                      })()}
                       {bids.length === 0 ? (
                         <div style={{ textAlign: 'center', padding: '24px 0', color: '#94a3b8', fontSize: '12px', border: '1px dashed #e2e8f0', borderRadius: '8px' }}>No bids logged yet.<br /><span style={{ fontSize: '11px' }}>Log each bid as you place it during the auction.</span></div>
                       ) : (
                         <div style={{ border: '1px solid #e2e8f0', borderRadius: '8px', overflow: 'hidden' }}>
-                          {bids.map((b, idx) => (
-                            <div key={b.id} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 12px', borderTop: idx > 0 ? '1px solid #f1f5f9' : 'none', background: b.amount === highest ? '#f0fdf4' : '#fff' }}>
-                              <span style={{ fontSize: '13px', fontWeight: '600', color: b.amount === highest ? '#059669' : '#0f172a', whiteSpace: 'nowrap' }}>£{(b.amount || 0).toLocaleString()}</span>
-                              {b.amount === highest && <span style={{ fontSize: '10px', fontWeight: '600', background: '#059669', color: '#fff', padding: '1px 6px', borderRadius: '3px', flexShrink: 0 }}>HIGH</span>}
-                              <span style={{ fontSize: '12px', color: '#64748b', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.note}</span>
-                              <span style={{ fontSize: '11px', color: '#94a3b8', whiteSpace: 'nowrap', flexShrink: 0 }}>{fmtAt(b.at)}</span>
-                              <button onClick={() => updateFieldInView('bidLog', (currentViewProperty.bidLog || []).filter(x => x.id !== b.id))} title="Delete bid" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '12px', padding: isMobile ? '10px' : '2px 6px', lineHeight: 1, fontFamily: 'inherit' }}>✕</button>
+                          {bids.map((b, idx) => {
+                            const kindMeta = { bid: null, outbid: { l: 'Outbid', c: '#64748b', bg: '#f1f5f9' }, walk: { l: 'Walk-away', c: '#92400e', bg: '#fef3c7' }, hammer: { l: 'Hammer', c: '#5b21b6', bg: '#ede9fe' } }[b.kind || 'bid'];
+                            return (
+                            <div key={b.id} style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '9px 12px', borderTop: idx > 0 ? '1px solid #f1f5f9' : 'none', background: b.amount === highest ? '#f0fdf4' : '#fff' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                <span style={{ fontSize: '13px', fontWeight: '600', color: b.amount === highest ? '#059669' : '#0f172a', whiteSpace: 'nowrap' }}>£{(b.amount || 0).toLocaleString()}</span>
+                                {kindMeta && <span style={{ fontSize: '10px', fontWeight: '600', background: kindMeta.bg, color: kindMeta.c, padding: '1px 6px', borderRadius: '3px', flexShrink: 0 }}>{kindMeta.l}</span>}
+                                {b.overMax && <span style={{ fontSize: '10px', fontWeight: '700', background: '#fee2e2', color: '#b91c1c', padding: '1px 6px', borderRadius: '3px', flexShrink: 0 }}>OVER MAX</span>}
+                                {b.amount === highest && <span style={{ fontSize: '10px', fontWeight: '600', background: '#059669', color: '#fff', padding: '1px 6px', borderRadius: '3px', flexShrink: 0 }}>HIGH</span>}
+                                <span style={{ fontSize: '12px', color: '#64748b', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{b.note}</span>
+                                <span style={{ fontSize: '11px', color: '#94a3b8', whiteSpace: 'nowrap', flexShrink: 0 }}>{fmtAt(b.at)}</span>
+                                <button onClick={() => updateFieldInView('bidLog', (currentViewProperty.bidLog || []).filter(x => x.id !== b.id))} title="Delete bid" style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#94a3b8', fontSize: '12px', padding: isMobile ? '10px' : '2px 6px', lineHeight: 1, fontFamily: 'inherit' }}>✕</button>
+                              </div>
+                              {b.overrideReason && <div style={{ fontSize: '11px', color: '#92400e', background: '#fffbeb', border: '1px solid #fde68a', borderRadius: '4px', padding: '4px 8px' }}>Override reason: {b.overrideReason}{b.actor ? ` · ${b.actor}` : ''}</div>}
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>
