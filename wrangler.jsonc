@@ -9,7 +9,13 @@
 	"compatibility_date": "2026-06-21",
 	"assets": {
 		"binding": "ASSETS",
-		"not_found_handling": "single-page-application"
+		"not_found_handling": "single-page-application",
+		// /share/:token is served BY the Worker. Without this, the asset router
+		// answers browser navigation requests (Sec-Fetch-Dest: document) with the
+		// SPA index.html before the Worker ever runs, so a partner clicking a share
+		// link gets the CRM login screen. Non-navigation requests (plain curl) do
+		// reach the Worker, which makes the breakage invisible to API-style tests.
+		"run_worker_first": ["/share/*"]
 	},
 	"observability": {
 		"enabled": true
