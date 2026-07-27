@@ -4263,6 +4263,191 @@ function buildReportJobPayload(property) {
   return payload;
 }
 
+// ── Phase 7.4: partner share links ──────────────────────────────────────────
+// Projects a property down to the fields a link holder may see. This is an
+// explicit ALLOWLIST and must stay one: an omit-list silently leaks every field
+// added to the property shape later. Deliberately excluded — our bidding
+// position (ourMaxBid, walkAway, targetBid, stretchBid, breakEvenBid), bid log,
+// hammer/sale price, post-mortems, per-field attribution, notes, documents,
+// readiness, red flags and the AI review.
+function shareProjectProperty(property) {
+  const an = property.analytics || {};
+  const num = (v) => (v == null || v === '' || isNaN(parseFloat(v))) ? null : parseFloat(v);
+  const intel = property.intelligence?.connectors || {};
+
+  const comps = [];
+  const seenComp = new Set();
+  const pushComp = (address, price, date, extra) => {
+    const key = String(address || '').split(',')[0].toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+    if (!address || seenComp.has(key)) return;
+    seenComp.add(key);
+    comps.push({ address, price: num(price), date: date || null, ...extra });
+  };
+  (an.compsList || []).forEach(c => pushComp(c.address, c.soldPrice, c.soldDate, { propertyType: c.propertyType || null, bedrooms: c.bedrooms ?? null, source: 'Report' }));
+  (intel.landRegistry?.data?.items || []).forEach(i => pushComp([i.address, i.town].filter(Boolean).join(', '), i.price, i.date, { propertyType: i.propertyType || null, bedrooms: null, source: 'Land Registry' }));
+  (property.comparables || []).filter(c => !c.fromIntelligence).forEach(c => pushComp(c.address, c.soldPrice ?? c.price, c.soldDate || c.date, { propertyType: c.propertyType || null, bedrooms: c.bedrooms ?? null, source: 'Manual' }));
+
+  const areaIntel = [];
+  if (intel.epc?.data?.epcRating) areaIntel.push(['EPC rating', String(intel.epc.data.epcRating)]);
+  if (intel.police?.data?.riskLabel) areaIntel.push(['Crime risk', `${intel.police.data.riskLabel} — ${intel.police.data.monthlyAverage} incidents/month nearby`]);
+  if (intel.flood?.data?.riskNote) areaIntel.push(['Flood', String(intel.flood.data.riskNote)]);
+  if (intel.imd?.data?.label) areaIntel.push(['Deprivation', `${intel.imd.data.label} (decile ${intel.imd.data.decile}/10)`]);
+  if (intel.hpi?.data?.avgPrice) areaIntel.push(['Area avg price', `£${Number(intel.hpi.data.avgPrice).toLocaleString()}${intel.hpi.data.growth1yr != null ? ` · ${intel.hpi.data.growth1yr}% 1yr growth` : ''}`]);
+
+  return {
+    id: String(property.id),
+    name: property.dealName || property.address || 'Property',
+    address: property.address || null,
+    postcode: property.postcode || null,
+    propertyType: property.propertyType || null,
+    bedrooms: property.bedrooms ?? null,
+    stage: property.status || null,
+    auctionDate: property.auctionDate || null,
+    guidePrice: num(property.guidePrice),
+    epcRating: an.epcRating || null,
+    floorArea: an.floorArea ?? null,
+    gdvConservative: num(an.gdvConservative ?? an.conservativeGDV),
+    gdvBase: num(an.gdvBase),
+    gdvOptimistic: num(an.gdvOptimistic ?? an.maxGDV),
+    reportMaxBid: num(an.maxBid),
+    netProfit: num(an.netProfit),
+    margin: num(an.profitMargin ?? an.margin),
+    roi: num(an.roi),
+    totalInvestment: num(an.totalInvestment),
+    buyersPremium: num(an.buyersPremium),
+    sdlt: num(an.sdlt),
+    acquisitionFeesTotal: num(an.acquisitionFeesTotal),
+    holdingTotal: num(an.holdingTotal),
+    exitTotal: num(an.exitTotal),
+    refurbLight: num(an.refurbLight),
+    refurbMedium: num(an.refurbMedium),
+    refurbHeavy: num(an.refurbHeavy),
+    comps: comps.slice(0, 8),
+    areaIntel,
+  };
+}
+
+function shareEsc(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function renderShareBoard(link, properties) {
+  const money = (v) => v == null ? '—' : `£${Math.round(v).toLocaleString()}`;
+  const pct = (v) => v == null ? '—' : `${v}%`;
+  const card = (p) => `
+    <article class="card">
+      <h2>${shareEsc(p.name)}</h2>
+      <p class="meta">${shareEsc([p.postcode, [p.bedrooms ? `${p.bedrooms} bed` : null, p.propertyType].filter(Boolean).join(' ')].filter(Boolean).join(' · '))}</p>
+      ${p.stage ? `<span class="chip">${shareEsc(p.stage)}</span>` : ''}
+      ${p.auctionDate ? `<span class="chip alt">Auction ${shareEsc(p.auctionDate)}</span>` : ''}
+      <dl>
+        <div><dt>Guide</dt><dd>${money(p.guidePrice)}</dd></div>
+        <div><dt>GDV (base)</dt><dd>${money(p.gdvBase)}</dd></div>
+        <div><dt>Net profit</dt><dd>${money(p.netProfit)}</dd></div>
+        <div><dt>Margin</dt><dd>${pct(p.margin)}</dd></div>
+      </dl>
+      <details>
+        <summary>Full figures</summary>
+        <table>
+          <tr><th>GDV — conservative</th><td>${money(p.gdvConservative)}</td></tr>
+          <tr><th>GDV — base</th><td>${money(p.gdvBase)}</td></tr>
+          <tr><th>GDV — optimistic</th><td>${money(p.gdvOptimistic)}</td></tr>
+          <tr><th>Assessed max bid</th><td>${money(p.reportMaxBid)}</td></tr>
+          <tr><th>Total investment</th><td>${money(p.totalInvestment)}</td></tr>
+          <tr><th>Buyer's premium</th><td>${money(p.buyersPremium)}</td></tr>
+          <tr><th>SDLT</th><td>${money(p.sdlt)}</td></tr>
+          ${p.acquisitionFeesTotal != null ? `<tr><th>Acquisition fees</th><td>${money(p.acquisitionFeesTotal)}</td></tr>` : ''}
+          ${p.holdingTotal != null ? `<tr><th>Holding costs</th><td>${money(p.holdingTotal)}</td></tr>` : ''}
+          ${p.exitTotal != null ? `<tr><th>Exit costs</th><td>${money(p.exitTotal)}</td></tr>` : ''}
+          <tr><th>ROI</th><td>${pct(p.roi)}</td></tr>
+          <tr><th>Refurb — light / medium / heavy</th><td>${money(p.refurbLight)} / ${money(p.refurbMedium)} / ${money(p.refurbHeavy)}</td></tr>
+          ${p.epcRating ? `<tr><th>EPC rating</th><td>${shareEsc(p.epcRating)}</td></tr>` : ''}
+          ${p.floorArea ? `<tr><th>Floor area</th><td>${shareEsc(p.floorArea)}</td></tr>` : ''}
+        </table>
+        ${p.comps.length ? `<h3>Comparable sales</h3><table><tr><th>Address</th><th>Price</th><th>Date</th><th>Source</th></tr>${p.comps.map(c => `<tr><td>${shareEsc(c.address)}</td><td>${money(c.price)}</td><td>${shareEsc(c.date || '—')}</td><td>${shareEsc(c.source)}</td></tr>`).join('')}</table>` : ''}
+        ${p.areaIntel.length ? `<h3>Area intelligence</h3><table>${p.areaIntel.map(([l, v]) => `<tr><th>${shareEsc(l)}</th><td>${shareEsc(v)}</td></tr>`).join('')}</table>` : ''}
+      </details>
+    </article>`;
+
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<title>${shareEsc(link.label || 'Shared pipeline')} — A&amp;A Investment Partners</title>
+<style>
+  :root { color-scheme: light dark; --bg:#f6f7f9; --fg:#0f172a; --mut:#64748b; --card:#fff; --line:#e2e8f0; --accent:#1e3a5f; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0b1120; --fg:#e2e8f0; --mut:#94a3b8; --card:#111c33; --line:#1e293b; --accent:#93c5fd; } }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px 16px 48px; background:var(--bg); color:var(--fg); font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  header { border-bottom:2px solid var(--line); padding-bottom:12px; margin-bottom:20px; display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; justify-content:space-between; }
+  h1 { font-size:20px; margin:0; }
+  .sub { color:var(--mut); font-size:13px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+  .card h2 { font-size:16px; margin:0 0 2px; }
+  .meta { color:var(--mut); font-size:13px; margin:0 0 8px; }
+  .chip { display:inline-block; font-size:11px; padding:2px 9px; border-radius:20px; background:var(--line); color:var(--fg); margin:0 4px 8px 0; }
+  .chip.alt { background:transparent; border:1px solid var(--line); color:var(--mut); }
+  dl { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:8px 0 0; }
+  dl div { min-width:0; }
+  dt { font-size:11px; color:var(--mut); text-transform:uppercase; letter-spacing:.05em; }
+  dd { margin:0; font-size:16px; font-weight:600; }
+  details { margin-top:12px; border-top:1px solid var(--line); padding-top:8px; }
+  summary { cursor:pointer; font-size:13px; color:var(--mut); }
+  table { width:100%; border-collapse:collapse; margin-top:8px; font-size:13px; }
+  th,td { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  th { font-weight:500; color:var(--mut); }
+  h3 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--mut); margin:14px 0 0; }
+  footer { margin-top:28px; padding-top:12px; border-top:1px solid var(--line); color:var(--mut); font-size:12px; }
+</style></head><body><div class="wrap">
+<header>
+  <div><h1>${shareEsc(link.label || 'Shared pipeline')}</h1>
+  <div class="sub">A&amp;A Investment Partners · ${properties.length} deal${properties.length === 1 ? '' : 's'}</div></div>
+  <div class="sub">Live · generated ${new Date().toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</div>
+</header>
+${properties.length ? `<div class="grid">${properties.map(card).join('')}</div>` : '<p class="sub">No deals are currently shared on this link.</p>'}
+<footer>Shared in confidence and regenerated each time this page is opened. Access expires ${shareEsc(new Date(link.expires_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }))}. Figures are estimates derived from assessment reports and public records; they are not a formal valuation. E&amp;OE.</footer>
+</div></body></html>`;
+}
+
+async function handleShareView(request, env, url) {
+  const token = url.pathname.slice('/share/'.length).replace(/\/+$/, '');
+  const notFound = () => new Response('<!DOCTYPE html><meta charset="utf-8"><title>Link unavailable</title><body style="font:15px system-ui;padding:40px;max-width:34em;margin:0 auto"><h1 style="font-size:19px">This link is not available</h1><p>It may have been revoked, expired, or the address may be mistyped. Contact whoever shared it with you.</p>', {
+    status: 404, headers: { 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' },
+  });
+  if (!token || !/^[a-f0-9]{64}$/.test(token)) return notFound();
+
+  const link = await env.CRM_DB.prepare('SELECT * FROM share_links WHERE token = ?').bind(token).first();
+  // One generic response for missing, revoked and expired so a probe can't tell
+  // a real-but-dead token from a guess.
+  if (!link || link.revoked || new Date(link.expires_at).getTime() <= Date.now()) return notFound();
+
+  let ids = [];
+  try { ids = JSON.parse(link.property_ids) || []; } catch {}
+  const idSet = new Set(ids.map(String));
+
+  let all = [];
+  try {
+    await ensureCrmMigratedToD1(env);
+    all = (await readCrmFromD1(env)).properties || [];
+  } catch {
+    const userIds = (await env.SCRAPER_KV.get('crm:user-ids', 'json')) || [];
+    const datasets = await Promise.all(userIds.map(id => env.SCRAPER_KV.get(`crm:user:${id}`, 'json')));
+    all = mergeUserData(datasets.filter(Boolean)).properties || [];
+  }
+  const shared = all
+    .filter(p => p && !p.deleted && idSet.has(String(p.id)))
+    .map(shareProjectProperty);
+
+  await env.CRM_DB.prepare(
+    'UPDATE share_links SET last_viewed_at = ?, view_count = view_count + 1 WHERE token = ?'
+  ).bind(new Date().toISOString(), token).run();
+
+  return new Response(renderShareBoard(link, shared), {
+    headers: { 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer' },
+  });
+}
+
 async function handleApiRoutes(request, env, url, ctx) {
     // --------------------------------------------------------
     // MARKET INTELLIGENCE — all /api/market/* routes live in
@@ -7282,6 +7467,65 @@ async function handleApiRoutes(request, env, url, ctx) {
       return corsResponse({ success: true, propertyId: String(propertyId), at });
     }
 
+    // --------------------------------------------------------
+    // SHARE LINKS (Phase 7.4) — create / list / revoke. The links themselves
+    // are served session-free at /share/:token.
+    // --------------------------------------------------------
+
+    if (url.pathname === '/api/share/links' && request.method === 'GET') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const { results } = await env.CRM_DB.prepare(
+        'SELECT token, label, property_ids, created_at, expires_at, revoked, last_viewed_at, view_count FROM share_links WHERE created_by = ? ORDER BY created_at DESC'
+      ).bind(session.userId).all();
+      const links = (results || []).map(r => {
+        let propertyIds = [];
+        try { propertyIds = JSON.parse(r.property_ids) || []; } catch {}
+        return {
+          token: r.token, label: r.label, propertyIds,
+          createdAt: r.created_at, expiresAt: r.expires_at,
+          revoked: !!r.revoked, lastViewedAt: r.last_viewed_at, viewCount: r.view_count,
+          expired: new Date(r.expires_at).getTime() <= Date.now(),
+        };
+      });
+      return corsResponse({ success: true, links });
+    }
+
+    if (url.pathname === '/api/share/links' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const allowed = await checkRateLimit(env, `share:${session.userId}`, 20);
+      if (!allowed) return corsResponse({ success: false, message: 'Too many requests — please slow down' }, 429);
+
+      const { label, propertyIds, expiryDays } = await request.json();
+      if (!Array.isArray(propertyIds) || propertyIds.length === 0) {
+        return corsResponse({ success: false, message: 'Select at least one property to share' }, 400);
+      }
+      const ids = [...new Set(propertyIds.map(String))].slice(0, 100);
+      const days = Math.min(Math.max(parseInt(expiryDays) || 30, 1), 365);
+      const token = generateToken();
+      const now = new Date();
+      const expires = new Date(now.getTime() + days * 86400000);
+      await env.CRM_DB.prepare(
+        'INSERT INTO share_links (token, label, property_ids, created_by, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)'
+      ).bind(token, String(label || '').slice(0, 120) || null, JSON.stringify(ids), session.userId, now.toISOString(), expires.toISOString()).run();
+
+      return corsResponse({ success: true, token, expiresAt: expires.toISOString(), propertyIds: ids });
+    }
+
+    if (url.pathname === '/api/share/links/revoke' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+      const { token } = await request.json();
+      if (!token) return corsResponse({ success: false, message: 'token is required' }, 400);
+      // Scoped to the caller's own links so one user cannot revoke another's.
+      const res = await env.CRM_DB.prepare(
+        'UPDATE share_links SET revoked = 1 WHERE token = ? AND created_by = ?'
+      ).bind(String(token), session.userId).run();
+      if (!res.meta?.changes) return corsResponse({ success: false, message: 'Link not found' }, 404);
+      return corsResponse({ success: true, token: String(token) });
+    }
+
     // POST /api/ingest/:entity — generic single-record upsert for external
     // callers (the Chrome extension). Identical mechanism to
     // /api/properties/ingest above, generalised to any capturable entity.
@@ -7358,6 +7602,23 @@ async function handleApiRoutes(request, env, url, ctx) {
     // --------------------------------------------------------
     if (url.pathname.startsWith('/api/')) {
       return corsResponse({ success: false, message: 'Not found' }, 404);
+    }
+
+    // --------------------------------------------------------
+    // PUBLIC SHARE VIEW — /share/:token, deliberately session-free
+    // --------------------------------------------------------
+    // Must sit above the SPA fallthrough or ASSETS swallows it. Wrapped so a
+    // failure here renders the generic "unavailable" page rather than a bare
+    // 500 — the top-level try/catch rethrows for non-/api paths.
+    if (url.pathname.startsWith('/share/')) {
+      try {
+        return await handleShareView(request, env, url);
+      } catch (err) {
+        console.error('Share view failed:', err);
+        return new Response('<!DOCTYPE html><meta charset="utf-8"><title>Link unavailable</title><body style="font:15px system-ui;padding:40px;max-width:34em;margin:0 auto"><h1 style="font-size:19px">This link is not available</h1><p>Please try again shortly.</p>', {
+          status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8', 'X-Robots-Tag': 'noindex, nofollow', 'Cache-Control': 'no-store' },
+        });
+      }
     }
 
     // --------------------------------------------------------

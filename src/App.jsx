@@ -677,6 +677,64 @@ export default function App({ user = {}, onLogout }) {
       .finally(() => setReadsLoaded(true));
   }, []);
 
+  // Phase 7.4: partner share links (Settings → Shared Links)
+  const [shareLinks, setShareLinks] = useState([]);
+  const [shareLinksLoading, setShareLinksLoading] = useState(false);
+  const [shareLabel, setShareLabel] = useState('');
+  const [shareExpiryDays, setShareExpiryDays] = useState(30);
+  const [shareSelectedIds, setShareSelectedIds] = useState([]);
+  const [shareCreating, setShareCreating] = useState(false);
+  const [shareJustCreated, setShareJustCreated] = useState(null);
+
+  const loadShareLinks = async () => {
+    const token = localStorage.getItem('crm_session');
+    if (!token) return;
+    setShareLinksLoading(true);
+    try {
+      const res = await fetch('/api/share/links', { headers: { 'Authorization': `Bearer ${token}` } });
+      const data = await res.json();
+      if (data.success) setShareLinks(data.links || []);
+    } catch {}
+    setShareLinksLoading(false);
+  };
+
+  const createShareLink = async () => {
+    const token = localStorage.getItem('crm_session');
+    if (!token || !shareSelectedIds.length || shareCreating) return;
+    setShareCreating(true);
+    try {
+      const res = await fetch('/api/share/links', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ label: shareLabel, propertyIds: shareSelectedIds, expiryDays: shareExpiryDays }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setShareJustCreated(`${window.location.origin}/share/${data.token}`);
+        setShareLabel(''); setShareSelectedIds([]);
+        loadShareLinks();
+      } else {
+        alert(data.message || 'Could not create the link.');
+      }
+    } catch { alert('Could not create the link — check your connection.'); }
+    setShareCreating(false);
+  };
+
+  const revokeShareLink = async (token) => {
+    const sess = localStorage.getItem('crm_session');
+    if (!sess) return;
+    if (!window.confirm('Revoke this link? Anyone holding it will immediately lose access.')) return;
+    try {
+      const res = await fetch('/api/share/links/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${sess}` },
+        body: JSON.stringify({ token }),
+      });
+      const data = await res.json();
+      if (data.success) setShareLinks(prev => prev.map(l => l.token === token ? { ...l, revoked: true } : l));
+    } catch {}
+  };
+
   const markPropertySeen = (id) => {
     const token = localStorage.getItem('crm_session');
     if (!token || id == null) return;
@@ -13241,13 +13299,130 @@ ${pm.refurbAccuracy ? row('Was our refurb estimate right?', PM_ACC[pm.refurbAccu
                 <div style={{ display: 'flex', gap: '0', flexDirection: isMobile ? 'column' : 'row', minHeight: 0, flex: '1 1 0', overflow: isMobile ? 'auto' : 'hidden', backgroundColor: '#ffffff', borderRadius: isMobile ? '8px' : '12px', border: '1px solid #e2e8f0' }}>
                   {/* Left nav */}
                   <div style={{ width: isMobile ? '100%' : '200px', borderRight: isMobile ? 'none' : '1px solid #e2e8f0', borderBottom: isMobile ? '1px solid #e2e8f0' : 'none', padding: '12px', display: 'flex', flexDirection: isMobile ? 'row' : 'column', flexWrap: isMobile ? 'wrap' : 'nowrap', gap: '4px', flexShrink: 0 }}>
-                    {[['profile', 'Profile'], ['appearance', 'Appearance'], ['notifications', 'Notifications'], ['users', 'Users & Permissions'], ['api', 'API Keys'], ['integrations', 'Integrations'], ['aiUsage', 'AI Usage'], ['cards', 'Custom Cards'], ['data', 'Data Management']].map(([key, label]) => (
-                      <button key={key} onClick={() => setSettingsSection(key)} style={{ padding: '9px 12px', textAlign: 'left', borderRadius: '6px', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: '500', backgroundColor: settingsSection === key ? '#f0fdf4' : 'transparent', color: settingsSection === key ? '#059669' : '#64748b', borderLeft: settingsSection === key ? '2px solid #059669' : '2px solid transparent' }}>{label}</button>
+                    {[['profile', 'Profile'], ['appearance', 'Appearance'], ['notifications', 'Notifications'], ['users', 'Users & Permissions'], ['api', 'API Keys'], ['integrations', 'Integrations'], ['sharing', 'Shared Links'], ['aiUsage', 'AI Usage'], ['cards', 'Custom Cards'], ['data', 'Data Management']].map(([key, label]) => (
+                      <button key={key} onClick={() => { setSettingsSection(key); if (key === 'sharing') loadShareLinks(); }} style={{ padding: '9px 12px', textAlign: 'left', borderRadius: '6px', border: 'none', cursor: 'pointer', fontSize: '12px', fontWeight: '500', backgroundColor: settingsSection === key ? '#f0fdf4' : 'transparent', color: settingsSection === key ? '#059669' : '#64748b', borderLeft: settingsSection === key ? '2px solid #059669' : '2px solid transparent' }}>{label}</button>
                     ))}
                   </div>
                   {/* Right content */}
                   <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '16px' : '24px 28px' }}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', maxWidth: '600px' }}>
+
+                    {/* SHARED LINKS (Phase 7.4) */}
+                    {settingsSection === 'sharing' && (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                        <div>
+                          <h3 style={{ fontSize: '14px', fontWeight: '600', color: '#0f172a', margin: '0 0 4px' }}>Shared links</h3>
+                          <p style={{ fontSize: '12px', color: '#64748b', margin: 0, lineHeight: 1.6 }}>
+                            Give a partner a read-only web page for chosen deals, without a CRM login. The page regenerates
+                            each time it's opened, so figures are always current. It shows headline figures, GDV scenarios,
+                            the assessed max bid, cost stack, refurb estimates, comparables and area intelligence — never your
+                            max bid, walk-away price, bid log, post-mortems, notes or documents.
+                          </p>
+                        </div>
+
+                        <div style={{ border: '1px solid #e2e8f0', borderRadius: '8px', padding: '14px' }}>
+                          <div style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a', marginBottom: '10px' }}>Create a link</div>
+                          <input
+                            value={shareLabel}
+                            onChange={e => setShareLabel(e.target.value)}
+                            placeholder="Label (e.g. Dave — JV shortlist)"
+                            style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', boxSizing: 'border-box', fontFamily: 'inherit', marginBottom: '10px' }}
+                          />
+                          <div style={{ fontSize: '11px', fontWeight: '600', color: '#64748b', marginBottom: '6px' }}>
+                            Deals to include {shareSelectedIds.length > 0 && <span style={{ color: '#059669' }}>· {shareSelectedIds.length} selected</span>}
+                          </div>
+                          <div style={{ maxHeight: '190px', overflowY: 'auto', border: '1px solid #f1f5f9', borderRadius: '6px', padding: '6px', marginBottom: '10px' }}>
+                            {properties.filter(p => !p.deleted).length === 0 ? (
+                              <div style={{ fontSize: '11px', color: '#94a3b8', padding: '8px' }}>No properties yet.</div>
+                            ) : properties.filter(p => !p.deleted).map(p => {
+                              const checked = shareSelectedIds.includes(String(p.id));
+                              return (
+                                <label key={p.id} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '5px 6px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px', color: '#334155' }}>
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() => setShareSelectedIds(prev => checked ? prev.filter(x => x !== String(p.id)) : [...prev, String(p.id)])}
+                                    style={{ cursor: 'pointer' }}
+                                  />
+                                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.dealName || p.address}</span>
+                                  <span style={{ fontSize: '10px', color: '#94a3b8', flexShrink: 0 }}>{normaliseStatus(p.status)}</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                            <label style={{ fontSize: '11px', color: '#64748b' }}>
+                              Expires after{' '}
+                              <select value={shareExpiryDays} onChange={e => setShareExpiryDays(parseInt(e.target.value))} style={{ padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: '6px', fontSize: '12px', fontFamily: 'inherit' }}>
+                                <option value={7}>7 days</option>
+                                <option value={30}>30 days</option>
+                                <option value={90}>90 days</option>
+                              </select>
+                            </label>
+                            <button
+                              onClick={createShareLink}
+                              disabled={!shareSelectedIds.length || shareCreating}
+                              style={{ padding: '8px 16px', backgroundColor: (!shareSelectedIds.length || shareCreating) ? '#cbd5e1' : '#059669', color: '#fff', border: 'none', borderRadius: '6px', fontSize: '12px', fontWeight: '600', cursor: (!shareSelectedIds.length || shareCreating) ? 'not-allowed' : 'pointer', fontFamily: 'inherit' }}
+                            >
+                              {shareCreating ? 'Creating…' : 'Create link'}
+                            </button>
+                          </div>
+                          {shareJustCreated && (
+                            <div style={{ marginTop: '10px', padding: '10px', background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: '6px' }}>
+                              <div style={{ fontSize: '11px', fontWeight: '600', color: '#065f46', marginBottom: '5px' }}>Link created — copy it now</div>
+                              <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+                                <input readOnly value={shareJustCreated} onFocus={e => e.target.select()} style={{ flex: 1, minWidth: '200px', padding: '6px 8px', border: '1px solid #bbf7d0', borderRadius: '5px', fontSize: '11px', fontFamily: 'monospace', background: '#fff' }} />
+                                <button onClick={() => { navigator.clipboard?.writeText(shareJustCreated); }} style={{ padding: '6px 12px', background: '#059669', color: '#fff', border: 'none', borderRadius: '5px', fontSize: '11px', fontWeight: '600', cursor: 'pointer', fontFamily: 'inherit' }}>Copy</button>
+                                <button onClick={() => setShareJustCreated(null)} style={{ padding: '6px 10px', background: 'transparent', border: '1px solid #bbf7d0', borderRadius: '5px', fontSize: '11px', color: '#065f46', cursor: 'pointer', fontFamily: 'inherit' }}>Dismiss</button>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                            <span style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a' }}>Active and past links</span>
+                            <button onClick={loadShareLinks} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px', color: '#059669', fontFamily: 'inherit', padding: 0 }}>Refresh</button>
+                          </div>
+                          {shareLinksLoading ? (
+                            <div style={{ fontSize: '12px', color: '#94a3b8' }}>Loading…</div>
+                          ) : shareLinks.length === 0 ? (
+                            <div style={{ fontSize: '12px', color: '#94a3b8', padding: '12px', border: '1px dashed #e2e8f0', borderRadius: '6px' }}>No links created yet.</div>
+                          ) : (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                              {shareLinks.map(l => {
+                                const dead = l.revoked || l.expired;
+                                return (
+                                  <div key={l.token} style={{ border: '1px solid #e2e8f0', borderRadius: '8px', padding: '10px 12px', opacity: dead ? 0.6 : 1 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '4px' }}>
+                                      <span style={{ fontSize: '12px', fontWeight: '600', color: '#0f172a' }}>{l.label || 'Untitled link'}</span>
+                                      <span style={{ fontSize: '10px', padding: '1px 7px', borderRadius: '10px', background: l.revoked ? '#fee2e2' : l.expired ? '#f1f5f9' : '#dcfce7', color: l.revoked ? '#991b1b' : l.expired ? '#64748b' : '#065f46' }}>
+                                        {l.revoked ? 'Revoked' : l.expired ? 'Expired' : 'Active'}
+                                      </span>
+                                      {!dead && (
+                                        <button onClick={() => revokeShareLink(l.token)} style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', fontSize: '11px', color: '#dc2626', fontFamily: 'inherit', padding: 0 }}>Revoke</button>
+                                      )}
+                                    </div>
+                                    <div style={{ fontSize: '11px', color: '#64748b', lineHeight: 1.6 }}>
+                                      {l.propertyIds.length} deal{l.propertyIds.length === 1 ? '' : 's'} · expires {new Date(l.expiresAt).toLocaleDateString('en-GB')} ·{' '}
+                                      {l.viewCount > 0 ? `opened ${l.viewCount}×${l.lastViewedAt ? `, last ${new Date(l.lastViewedAt).toLocaleDateString('en-GB')}` : ''}` : 'never opened'}
+                                    </div>
+                                    {!dead && (
+                                      <input
+                                        readOnly
+                                        value={`${window.location.origin}/share/${l.token}`}
+                                        onFocus={e => e.target.select()}
+                                        style={{ width: '100%', marginTop: '6px', padding: '5px 7px', border: '1px solid #f1f5f9', borderRadius: '5px', fontSize: '10px', fontFamily: 'monospace', color: '#64748b', background: '#f8fafc', boxSizing: 'border-box' }}
+                                      />
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
 
                     {/* PROFILE */}
                     {settingsSection === 'profile' && (
