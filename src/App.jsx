@@ -653,7 +653,56 @@ export default function App({ user = {}, onLogout }) {
   const togglePropSidebar = () => setPropSidebarCollapsed(c => { const n = !c; try { localStorage.setItem('propSidebarCollapsed', n ? '1' : '0'); } catch (e) {} return n; });
   const [propMapOpen, setPropMapOpen] = useState(false);
   const [propStreetOpen, setPropStreetOpen] = useState(false);
+
+  // Phase 7.3: per-user read state. `propertyReads` is the stored last-seen map
+  // (propertyId → ISO); `seenBaseline` freezes the value from the moment you
+  // opened a property, so marking it seen immediately doesn't wipe the very
+  // highlights you opened it to look at.
+  const [propertyReads, setPropertyReads] = useState({});
+  const [seenBaseline, setSeenBaseline] = useState({});
+  const [readsLoaded, setReadsLoaded] = useState(false);
+  // Read through a ref so the open-property effect can stay keyed on the
+  // property id alone — depending on propertyReads directly would re-fire it
+  // every time marking-seen updates the map.
+  const propertyReadsRef = useRef({});
+  useEffect(() => { propertyReadsRef.current = propertyReads; }, [propertyReads]);
+
+  useEffect(() => {
+    const token = localStorage.getItem('crm_session');
+    if (!token) { setReadsLoaded(true); return; }
+    fetch('/api/properties/reads', { headers: { 'Authorization': `Bearer ${token}` } })
+      .then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.success) setPropertyReads(d.reads || {}); })
+      .catch(() => {})
+      .finally(() => setReadsLoaded(true));
+  }, []);
+
+  const markPropertySeen = (id) => {
+    const token = localStorage.getItem('crm_session');
+    if (!token || id == null) return;
+    const at = new Date().toISOString();
+    setPropertyReads(prev => ({ ...prev, [String(id)]: at }));
+    fetch('/api/properties/reads', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+      body: JSON.stringify({ propertyId: String(id) }),
+    }).catch(() => {});
+  };
+
   const openPropertyView = (p) => { setCurrentViewProperty(p); setPropCanvasTab('overview'); setNarrativeTab(null); setPropMapOpen(false); };
+
+  // The canvas is opened from a dozen places that call setCurrentViewProperty
+  // directly (pipeline rows, map pins, notification panel, command palette,
+  // dashboard lists), so read state is driven off the property actually in view
+  // rather than off any one open helper. Waits for readsLoaded so a fast click
+  // can't freeze an empty baseline and silently suppress every marker.
+  useEffect(() => {
+    const id = currentViewProperty?.id;
+    if (id == null || !readsLoaded) return;
+    const key = String(id);
+    setSeenBaseline(prev => (key in prev ? prev : { ...prev, [key]: propertyReadsRef.current[key] || null }));
+    markPropertySeen(id);
+  }, [currentViewProperty?.id, readsLoaded]);
 
   // Unified Note Creation Fields
   const [noteText, setNoteText] = useState('');
@@ -1163,9 +1212,43 @@ export default function App({ user = {}, onLogout }) {
     ],
   });
 
+  // Phase 7.3: fields whose last edit is attributed on the canvas. Deliberately
+  // narrow — these are the decision-bearing numbers someone would want to
+  // challenge ("who moved our max bid, and when"), not every editable field.
+  const ATTRIBUTED_FIELDS = {
+    ourMaxBid: 'Our max bid', guidePrice: 'Guide price', status: 'Stage',
+    refurbLevel: 'Refurb level', lotSalePrice: 'Winning bid',
+    hammerPrice: 'Hammer price', planningToBid: 'Planning to bid',
+  };
+  const FIELD_COALESCE_MS = 5 * 60 * 1000;
+
+  // Records who last changed `field` and from what. Consecutive edits by the
+  // same person inside FIELD_COALESCE_MS collapse into one record keeping the
+  // ORIGINAL from-value: number inputs fire onChange per keystroke, so typing
+  // "78000" would otherwise log five separate changes ending at 7→78→780→…
+  const withFieldChange = (prop, field, from, to) => {
+    const meta = { ...(prop.fieldMeta || {}) };
+    const by = user.name || 'You';
+    const now = Date.now();
+    const prev = meta[field];
+    const coalescing = prev && prev.by === by && (now - new Date(prev.at).getTime()) < FIELD_COALESCE_MS;
+    const origin = coalescing ? prev.from : (from ?? null);
+    // Typed and then reverted within one editing session — nothing net changed,
+    // so drop the record rather than claim a change that didn't happen.
+    if (coalescing && JSON.stringify(origin) === JSON.stringify(to ?? null)) {
+      delete meta[field];
+      return { ...prop, fieldMeta: meta };
+    }
+    meta[field] = { by, at: new Date(now).toISOString(), from: origin, to: to ?? null };
+    return { ...prop, fieldMeta: meta };
+  };
+
   const updateFieldInView = (field, value) => {
     if (!currentViewProperty) return;
     let updated = { ...currentViewProperty, [field]: value };
+    if (ATTRIBUTED_FIELDS[field] && value !== currentViewProperty[field]) {
+      updated = withFieldChange(updated, field, currentViewProperty[field], value);
+    }
     if (field === 'status' && value !== currentViewProperty.status) {
       updated = withActivity(updated, 'stage', `Stage changed: ${normaliseStatus(currentViewProperty.status)} → ${value}`);
       runStageAutomation(currentViewProperty, normaliseStatus(value));
@@ -4533,6 +4616,34 @@ ${pm.refurbAccuracy ? row('Was our refurb estimate right?', PM_ACC[pm.refurbAccu
             const intel = currentViewProperty.intelligence || {};
             const intelConflicts = currentViewProperty.intelligenceConflicts || [];
             const fmtAt = iso => { const d = new Date(iso); return isNaN(d) ? '' : d.toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); };
+            // Phase 7.3 — inline field provenance.
+            const agoShort = (iso) => {
+              const t = new Date(iso).getTime();
+              if (isNaN(t)) return '';
+              const mins = Math.round((Date.now() - t) / 60000);
+              if (mins < 1) return 'just now';
+              if (mins < 60) return `${mins}m ago`;
+              const hrs = Math.round(mins / 60);
+              if (hrs < 24) return `${hrs}h ago`;
+              const days = Math.round(hrs / 24);
+              return days === 1 ? 'yesterday' : `${days}d ago`;
+            };
+            const fieldMeta = currentViewProperty.fieldMeta || {};
+            const fieldNote = (field) => {
+              const m = fieldMeta[field];
+              return m ? `${m.by} · ${agoShort(m.at)}` : null;
+            };
+            // "Changed since you last opened" means changed by SOMEONE ELSE after
+            // the baseline captured when you opened it. Your own edits are never
+            // news to you, and a property you've never opened has no baseline to
+            // compare against — both return false rather than highlighting noise.
+            const fieldChangedSince = (field) => {
+              const m = fieldMeta[field];
+              if (!m || m.by === (user.name || 'You')) return false;
+              const base = seenBaseline[String(currentViewProperty.id)];
+              if (!base) return false;
+              return new Date(m.at).getTime() > new Date(base).getTime();
+            };
             const dc2 = currentViewProperty.dealCalc || {};
             const pp2 = parseFloat(dc2.purchasePrice) || 0;
             const acqFees = pp2 > 0 ? (pp2 * (parseFloat(dc2.buyersPremium) || 0) / 100) + (parseFloat(dc2.adminFee) || 0) + (parseFloat(dc2.legalFees) || 0) + (parseFloat(dc2.surveyCost) || 0) + calcSDLT(pp2, true) : 0;
@@ -4732,8 +4843,11 @@ ${pm.refurbAccuracy ? row('Was our refurb estimate right?', PM_ACC[pm.refurbAccu
                     { l: 'Net profit', v: act ? fmtNum(act.netProfit) : (netProfit ? fmtNum(netProfit) : '—'), vc: act ? (act.netProfit >= 0 ? '#4ade80' : '#f87171') : (netProfit ? '#4ade80' : '#f1f5f9'), src: act ? 'Actual' : (an.netProfit ? 'Report' : ''), est: act && an.netProfit ? `est ${fmtNum(parseFloat(an.netProfit))}` : null },
                     { l: 'Margin', v: act && act.margin != null ? `${act.margin.toFixed(1)}%` : margin != null ? `${margin.toFixed(1)}%` : '—', vc: (() => { const m = act && act.margin != null ? act.margin : margin; return m >= 20 ? '#4ade80' : m >= 10 ? '#fbbf24' : m != null ? '#f87171' : '#f1f5f9'; })(), src: act && act.margin != null ? 'Actual' : (an.profitMargin != null || an.margin != null) ? 'Report' : '', est: act && act.margin != null && margin != null ? `est ${margin.toFixed(1)}%` : null },
                     { l: 'ROI', v: act && act.roi != null ? `${act.roi.toFixed(1)}%` : (an.roi != null && an.roi !== '') ? `${parseFloat(an.roi).toFixed(1)}%` : '—', vc: act && act.roi != null ? (act.roi >= 0 ? '#4ade80' : '#f87171') : (an.roi != null && an.roi !== '') ? '#4ade80' : '#f1f5f9', src: act && act.roi != null ? 'Actual' : (an.roi != null && an.roi !== '') ? 'Report' : '', est: act && act.roi != null && an.roi != null && an.roi !== '' ? `est ${parseFloat(an.roi).toFixed(1)}%` : null },
-                  ]; return kpis.map((k, i) => (
-                    <div key={k.l} style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '0 13px 0 0', marginRight: '13px', borderRight: i < kpis.length - 1 ? '1px solid #1e293b' : 'none' }}>
+                  ]; return kpis.map((k, i) => {
+                    const kChanged = k.editKey ? fieldChangedSince(k.editKey) : false;
+                    const kNote = k.editKey ? fieldNote(k.editKey) : null;
+                    return (
+                    <div key={k.l} title={kNote ? `${ATTRIBUTED_FIELDS[k.editKey]} last changed by ${kNote}` : undefined} style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: kChanged ? '2px 13px 2px 8px' : '0 13px 0 0', marginRight: '13px', borderRight: i < kpis.length - 1 ? '1px solid #1e293b' : 'none', ...(kChanged ? { boxShadow: 'inset 0 0 0 1px #7C3AED', borderRadius: '6px' } : null) }}>
                       <span style={{ fontSize: '10px', color: '#475569', textTransform: 'uppercase', letterSpacing: '.05em', whiteSpace: 'nowrap' }}>{k.l}</span>
                       {editingKpi && k.editKey ? (
                         <input
@@ -4746,11 +4860,12 @@ ${pm.refurbAccuracy ? row('Was our refurb estimate right?', PM_ACC[pm.refurbAccu
                         <span style={{ display: 'inline-flex', flexDirection: 'column', lineHeight: 1.25 }}>
                           <span style={{ fontSize: '14px', fontWeight: '600', color: k.vc, whiteSpace: 'nowrap' }}>{k.v}</span>
                           {k.est && <span style={{ fontSize: '10px', color: '#64748b', whiteSpace: 'nowrap' }}>{k.est}</span>}
+                          {kNote && <span style={{ fontSize: '10px', color: kChanged ? '#a78bfa' : '#475569', whiteSpace: 'nowrap' }}>{kChanged ? '● ' : ''}{kNote}</span>}
                         </span>
                       )}
                       {k.src && <span style={{ fontSize: '9px', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '.04em', padding: '1px 4px', borderRadius: '3px', background: k.src === 'Actual' ? '#052e16' : k.src === 'Report' ? '#0c2a3d' : '#1e293b', color: k.src === 'Actual' ? '#4ade80' : k.src === 'Report' ? '#60a5fa' : '#64748b' }}>{k.src}</span>}
                     </div>
-                  )); })()}
+                  ); }); })()}
                   <span style={{ flex: 1 }} />
                   <button onClick={() => setEditingKpi(e => !e)} title="Edit guide / max bid" style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '0', fontSize: '13px', color: editingKpi ? '#a78bfa' : '#475569', lineHeight: 1 }}>⚙</button>
                 </div>
@@ -4873,13 +4988,18 @@ ${pm.refurbAccuracy ? row('Was our refurb estimate right?', PM_ACC[pm.refurbAccu
                   </div>
 
                   {/* Pipeline status pills */}
-                  <div style={{ padding: '12px 16px', borderBottom: '1px solid #1e293b' }}>
+                  <div style={{ padding: '12px 16px', borderBottom: '1px solid #1e293b', ...(fieldChangedSince('status') ? { boxShadow: 'inset 2px 0 0 #7C3AED' } : null) }}>
                     <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.07em', color: '#475569', marginBottom: '7px' }}>Pipeline stage</div>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                       {MAIN_STAGES.map(s => (
                         <button key={s} onClick={() => updateFieldInView('status', s)} style={{ padding: isMobile ? '8px 12px' : '3px 8px', borderRadius: '4px', fontSize: '10px', border: '0.5px solid', cursor: 'pointer', fontFamily: 'inherit', background: st === s ? '#1e3a5f' : 'transparent', borderColor: st === s ? '#3b82f6' : '#334155', color: st === s ? '#93c5fd' : '#64748b' }}>{s}</button>
                       ))}
                     </div>
+                    {fieldNote('status') && (
+                      <div style={{ fontSize: '10px', color: fieldChangedSince('status') ? '#a78bfa' : '#475569', marginTop: '5px' }}>
+                        {fieldChangedSince('status') ? '● ' : ''}{fieldNote('status')}
+                      </div>
+                    )}
                     <div style={{ fontSize: '10px', color: '#475569', margin: '8px 0 5px' }}>Auction outcome</div>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                       {[
@@ -4956,7 +5076,7 @@ ${pm.refurbAccuracy ? row('Was our refurb estimate right?', PM_ACC[pm.refurbAccu
                   ) : null}
 
                   {/* Refurb level */}
-                  <div style={{ padding: '12px 16px', borderBottom: '1px solid #1e293b' }}>
+                  <div style={{ padding: '12px 16px', borderBottom: '1px solid #1e293b', ...(fieldChangedSince('refurbLevel') ? { boxShadow: 'inset 2px 0 0 #7C3AED' } : null) }}>
                     <div style={{ fontSize: '10px', textTransform: 'uppercase', letterSpacing: '.07em', color: '#475569', marginBottom: '7px' }}>Refurb level</div>
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
                       {[
@@ -4972,6 +5092,11 @@ ${pm.refurbAccuracy ? row('Was our refurb estimate right?', PM_ACC[pm.refurbAccu
                         );
                       })}
                     </div>
+                    {fieldNote('refurbLevel') && (
+                      <div style={{ fontSize: '10px', color: fieldChangedSince('refurbLevel') ? '#a78bfa' : '#475569', marginTop: '5px' }}>
+                        {fieldChangedSince('refurbLevel') ? '● ' : ''}{fieldNote('refurbLevel')}
+                      </div>
+                    )}
                   </div>
 
                   {/* Auction details — editable */}

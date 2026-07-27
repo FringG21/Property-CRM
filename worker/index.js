@@ -7247,6 +7247,41 @@ async function handleApiRoutes(request, env, url, ctx) {
       return corsResponse({ success: true, id: idStr });
     }
 
+    // GET /api/properties/reads — this user's per-property last-seen map, used
+    // by the canvas to mark fields another user changed since you last looked.
+    if (url.pathname === '/api/properties/reads' && request.method === 'GET') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+
+      const { results } = await env.CRM_DB.prepare(
+        'SELECT property_id, last_seen_at FROM property_reads WHERE user_id = ?'
+      ).bind(session.userId).all();
+      const reads = {};
+      for (const r of (results || [])) reads[r.property_id] = r.last_seen_at;
+      return corsResponse({ success: true, reads });
+    }
+
+    // POST /api/properties/reads — { propertyId } stamps it seen now for the
+    // calling user only. Never touches the property row, so opening a deal
+    // cannot bump its updated_at and mark it changed for everyone else.
+    if (url.pathname === '/api/properties/reads' && request.method === 'POST') {
+      const session = await getSession(env, request);
+      if (!session) return corsResponse({ success: false, message: 'Unauthorized' }, 401);
+
+      const allowed = await checkRateLimit(env, `reads:${session.userId}`, 120);
+      if (!allowed) return corsResponse({ success: false, message: 'Too many requests — please slow down' }, 429);
+
+      const { propertyId } = await request.json();
+      if (propertyId == null) return corsResponse({ success: false, message: 'propertyId is required' }, 400);
+
+      const at = new Date().toISOString();
+      await env.CRM_DB.prepare(
+        `INSERT INTO property_reads (user_id, property_id, last_seen_at) VALUES (?, ?, ?)
+         ON CONFLICT(user_id, property_id) DO UPDATE SET last_seen_at = excluded.last_seen_at`
+      ).bind(session.userId, String(propertyId), at).run();
+      return corsResponse({ success: true, propertyId: String(propertyId), at });
+    }
+
     // POST /api/ingest/:entity — generic single-record upsert for external
     // callers (the Chrome extension). Identical mechanism to
     // /api/properties/ingest above, generalised to any capturable entity.
